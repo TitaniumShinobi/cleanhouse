@@ -1,0 +1,94 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+venv/
+cleanhouse_env/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs (runtime data)
+logs/
+*.log
+*.log.*
+*.out
+*.err
+
+# Database files (runtime data)
+*.db
+*.sqlite
+*.sqlite3
+user_auth.db
+authorized_sessions.json
+
+# Data files (runtime/user data)
+userdata/
+datafiles/
+backups/
+results/
+cleanup_log.txt
+cleanup_report.json
+integrity_baseline.json
+
+# Configuration overrides (user-specific)
+config.local.yml
+config.local.json
+email_config.json
+
+# Test coverage
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Temporary files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# CleanHouse specific runtime data
+unauthorized_sessions.json
+integrity_baseline.json
+cleanup_log.txt
+cleanup_report.json
+
