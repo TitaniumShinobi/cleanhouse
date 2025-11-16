@@ -92,3 +92,4 @@ integrity_baseline.json
 cleanup_log.txt
 cleanup_report.json
 
+.env.bak

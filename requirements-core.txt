@@ -1,0 +1,29 @@
+# Core dependencies (platform-specific)
+pywin32>=305; platform_system=="Windows"
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Cloud storage dependencies
+google-auth-oauthlib>=1.0.0
+google-auth-httplib2>=0.0.1
+google-api-python-client>=2.0.0
+dropbox>=11.36.0
+
+# Security dependencies
+cryptography>=41.0.0
+pyOpenSSL>=23.0.0
+
+# Logging and monitoring
+psutil>=5.9.0
+watchdog>=3.0.0
+
+# Development dependencies
+black>=23.0.0
+pylint>=2.17.0
+pytest>=7.0.0
+
+# Added from the code block
+matplotlib>=3.0.0
+
+# WebView authentication (native autofill support)
+pywebview>=6.0

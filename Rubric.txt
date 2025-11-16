@@ -1,0 +1,39 @@
+🧠 CleanHouse System Rubric (v1.0)
+1. Scope
+Monitored Directory: C:/MockDirtyHouse
+
+Focus: Detect unauthorized file modifications, purge untrusted content, verify integrity of trusted projects.
+
+2. Core Components
+Module	Purpose
+config.py	Stores global constants: BASE_DIR, WHITELIST, LOG_FILE, etc.
+integrity.py	Handles hashing, baseline generation, and verification routines.
+passion.py	Orchestrates integrity checks and conditional purge triggers.
+purge.py	Deletes non-whitelisted folders/files if authorized & triggered.
+brain.py	Central launcher that activates ignite_passion()
+
+3. Expected Behaviors
+Trigger	Outcome
+First run (no baseline)	Generate full file hash map (integrity_baseline.json)
+File modified	verify_integrity() flags the file in logs and console
+WHITELIST violation	verify_whitelist_integrity() warns about tampering or missing files
+File count of changes ≥ threshold	Triggers purge_system() (unless dry_run=True)
+Unauthorized purge_system() call	Aborts and logs attempt
+
+4. Important Files
+File	Format/Contents
+integrity_baseline.json	{ path: sha256_hash } for each scanned file
+checksum_db.json	Optional secondary hash set for whitelist check
+purge.log	Event log for purges, failures, or warnings
+unauthorized_sessions.json	Logs any unauthorized purge attempts
+
+5. Testing Strategy
+🔍 Create fake project dirs/files inside C:/MockDirtyHouse
+
+🧪 Modify or delete a few files manually
+
+🧠 Run python brain.py
+
+✅ Expect alert logs + optional dry-run purge messages
+
+🔥 Raise threshold = test full purge execution path.
