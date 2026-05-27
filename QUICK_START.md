@@ -17,7 +17,7 @@ source cleanhouse_env/bin/activate
 python3 backend/server.py
 ```
 
-Then open your browser to: **http://localhost:5000/login**
+Then open your browser to: **http://localhost:3333/login**
 
 ### Option 2: Desktop App
 ```bash
@@ -28,9 +28,9 @@ python3 desktop/wrapper.py
 
 ## What You'll See
 
-- **Login Page**: http://localhost:5000/login
-- **Signup Page**: http://localhost:5000/signup
-- **API Endpoints**: http://localhost:5000/api/auth/*
+- **Login Page**: http://localhost:3333/login
+- **Signup Page**: http://localhost:3333/signup
+- **API Endpoints**: http://localhost:3333/api/auth/*
 
 ## Troubleshooting
 
@@ -40,10 +40,10 @@ source cleanhouse_env/bin/activate
 pip install flask flask-cors
 ```
 
-### Port 5000 already in use
-Change the port in `backend/server.py`:
-```python
-app.run(host='127.0.0.1', port=5001, ...)  # Use different port
+### Port 3333 already in use
+Set `CLEANHOUSE_PORT` before starting the server:
+```sh
+CLEANHOUSE_PORT=3334 python3 backend/server.py
 ```
 
 ### Frontend files not found
@@ -58,4 +58,3 @@ python3 scripts/separate_css_js.py
 - **Hot Reload**: Just refresh your browser after making changes
 - **Debugging**: Use browser DevTools (F12) for console, network, etc.
 - **API Testing**: Use browser console or Postman to test `/api/auth/*` endpoints
-

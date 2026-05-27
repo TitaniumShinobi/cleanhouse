@@ -36,7 +36,7 @@ def setup_paths():
     """Setup Python paths for imports."""
     base_dir = Path(__file__).parent.parent
     paths_to_add = [
-        str(base_dir), 
+        str(base_dir),
         str(base_dir / "corefiles"),
         str(base_dir / "ui"),
         str(base_dir / "models"),
@@ -49,51 +49,65 @@ def setup_paths():
 def setup_logging(verbose: bool = False):
     """
     Setup comprehensive logging for CleanHouse.
-    
+
     Args:
         verbose: If True, set log level to DEBUG for detailed output
     """
-    log_dir = Path.home() / "Documents" / "CleanHouse" / "Logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # Use project-relative logs directory
+    base_dir = Path(__file__).parent.parent
+    log_dir = base_dir / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        # Fallback to system temp directory if project directory not writable
+        import tempfile
+        log_dir = Path(tempfile.gettempdir()) / "cleanhouse_logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "cleanhouse.log"
-    
+
     # Determine log level
     log_level = logging.DEBUG if verbose else logging.INFO
-    
+
     # Create formatters
     # Detailed format with module name and line number for file logs
     detailed_formatter = logging.Formatter(
         '[%(asctime)s] %(levelname)s [%(name)s:%(lineno)d] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    
+
     # Simple format for console (like Chatty - faithful, with timestamps, no emojis)
     console_formatter = logging.Formatter(
         '%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%I:%M:%S %p'
     )
-    
-    # File handler with detailed format
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setLevel(log_level)
-    file_handler.setFormatter(detailed_formatter)
-    
+
+    # File handler with detailed format (try to create, fallback to console-only if fails)
+    file_handler = None
+    try:
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(log_level)
+        file_handler.setFormatter(detailed_formatter)
+    except (PermissionError, OSError) as e:
+        # If file logging fails, fall back to console-only
+        logger.warning(f"Could not create log file at {log_file}: {e}. Using console logging only.")
+
     # Console handler with simple format
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(log_level)
     console_handler.setFormatter(console_formatter)
-    
+
     # Configure root logger (this will propagate to all child loggers)
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
     root_logger.handlers.clear()  # Clear any existing handlers
-    root_logger.addHandler(file_handler)
+    if file_handler:
+        root_logger.addHandler(file_handler)
     root_logger.addHandler(console_handler)
-    
+
     # Configure cleanhouse logger (inherits from root, no need to add handlers again)
     logger.setLevel(log_level)
     # Don't add handlers to logger - it will use root logger's handlers via propagation
-    
+
     logger.info("=" * 60)
     logger.info("CleanHouse logging initialized")
     logger.info(f"Log level: {logging.getLevelName(log_level)}")
@@ -107,22 +121,22 @@ def setup_signal_handlers():
         """Handle SIGINT (Ctrl+C) and SIGTERM signals."""
         print("\n🛑 CleanHouse shutdown requested...")
         logging.info(f"Received signal {signum}, initiating graceful shutdown")
-        
+
         # Set a flag to indicate shutdown is requested
         global shutdown_requested
         shutdown_requested = True
-        
+
         # Give a moment for cleanup
         time.sleep(0.5)
-        
+
         # Force exit if needed
         print("✅ CleanHouse terminated.")
         sys.exit(0)
-    
+
     # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     # Global flag for shutdown state
     global shutdown_requested
     shutdown_requested = False
@@ -133,20 +147,20 @@ def check_authentication():
         cleanhouse_root = Path.home() / '.cleanhouse'
         auth_token_file = cleanhouse_root / '.auth_token'
         auth_user_file = cleanhouse_root / '.auth_user.json'
-        
+
         if not auth_token_file.exists():
             logger.warning("No authentication token found. User must authenticate via web interface.")
             return None
-        
+
         # Read token
         token = auth_token_file.read_text(encoding='utf-8').strip()
-        
+
         # Verify token
         try:
             setup_paths()  # Ensure paths are set up for imports
             from backend.utils.jwt_utils import verify_jwt_token, get_user_from_token
             user_data = get_user_from_token(token)
-            
+
             if user_data:
                 # Load user data from file if available
                 user_info = user_data
@@ -157,7 +171,7 @@ def check_authentication():
                         user_info = file_user_data
                     except Exception as e:
                         logger.warning(f"Could not load user data from file: {e}, using token data")
-                
+
                 logger.info(f"User authenticated: {user_info.get('email', 'unknown')}")
                 return {
                     'token': token,
@@ -184,7 +198,7 @@ def check_authentication():
                 except Exception:
                     pass
             return None
-        
+
     except Exception as e:
         logger.error(f"Error checking authentication: {e}", exc_info=True)
         return None
@@ -195,7 +209,7 @@ def launch_gui():
     logger.info("CleanHouse - Starting GUI...")
     logger.info("Press Ctrl+C to terminate CleanHouse")
     logger.info("=" * 60)
-    
+
     # Check authentication
     auth_data = check_authentication()
     if auth_data:
@@ -203,26 +217,67 @@ def launch_gui():
     else:
         logger.warning("Not authenticated. Some features may be limited.")
         logger.info("To authenticate, visit http://127.0.0.1:5000/login in your browser")
-    
+
+    # Try pywebview-based desktop wrapper first (doesn't require tkinter)
+    logger.info("Attempting to launch pywebview-based desktop app...")
+    try:
+        setup_paths()
+        from desktop.wrapper import main as launch_webview_desktop
+        logger.info("Launching CleanHouse desktop app via pywebview...")
+        launch_webview_desktop()
+        return True
+    except ImportError as e:
+        logger.debug(f"Pywebview desktop wrapper not available: {e}")
+        logger.info("Falling back to tkinter-based UI...")
+    except SystemError as e:
+        error_str = str(e)
+        if "1507" in error_str or "macOS" in error_str:
+            logger.warning("Pywebview also has macOS compatibility issue, trying tkinter...")
+        else:
+            raise
+    except Exception as e:
+        logger.warning(f"Pywebview desktop wrapper failed: {e}, trying tkinter...")
+
+    # Fallback to tkinter-based UI
     try:
         logger.debug("Setting up Python paths...")
         setup_paths()
         logger.debug("Python paths configured")
-        
+
         logger.info("Importing CleanHouseUI...")
         from ui import CleanHouseUI
         logger.info("CleanHouseUI imported successfully")
-        
+
         logger.info("Creating CleanHouseUI instance...")
         # Pass auth data to UI if available
-        app = CleanHouseUI(auth_data=auth_data if auth_data else None)
-        logger.info("CleanHouseUI instance created successfully")
-        
+        try:
+            app = CleanHouseUI(auth_data=auth_data if auth_data else None)
+            logger.info("CleanHouseUI instance created successfully")
+        except SystemError as e:
+            error_str = str(e)
+            if "1507" in error_str or "macOS" in error_str:
+                logger.error("=" * 60)
+                logger.error("Tkinter macOS Compatibility Issue Detected")
+                logger.error("=" * 60)
+                logger.error("Your macOS version appears incompatible with the installed")
+                logger.error("Tcl/Tk libraries used by tkinter.")
+                logger.error("")
+                logger.error("This is a known macOS 15.x compatibility issue.")
+                logger.error("")
+                logger.error("Alternatives:")
+                logger.error("1. Use CLI mode: python3 corefiles/brain.py --monitor")
+                logger.error("2. Use backend server: python3 backend/server.py")
+                logger.error("3. Try updating Tcl/Tk: brew install python-tk")
+                logger.error("=" * 60)
+                sys.exit(1)
+            else:
+                raise
+
         # Set up signal handling for the GUI
         def gui_signal_handler(signum, frame):
             """Handle signals in GUI mode."""
             logger.warning(f"Received signal {signum} in GUI mode - initiating shutdown")
-            
+
             # Close the GUI gracefully
             try:
                 logger.debug("Quitting GUI application...")
@@ -231,19 +286,19 @@ def launch_gui():
                 logger.info("GUI closed successfully")
             except Exception as e:
                 logger.error(f"Error during GUI shutdown: {e}", exc_info=True)
-            
+
             logger.info("CleanHouse GUI terminated")
             sys.exit(0)
-        
+
         # Set up signal handlers for GUI
         signal.signal(signal.SIGINT, gui_signal_handler)
         signal.signal(signal.SIGTERM, gui_signal_handler)
         logger.debug("Signal handlers configured for GUI")
-        
+
         logger.info("Starting GUI mainloop...")
         app.mainloop()
         logger.info("GUI mainloop ended")
-        
+
     except ImportError as e:
         logger.error(f"Failed to import GUI: {e}", exc_info=True)
         print(f"❌ Failed to import GUI: {e}")
@@ -257,18 +312,47 @@ def launch_gui():
         print("  3. Use CLI mode (no GUI required):")
         print("     python3 corefiles/brain.py --monitor")
         return False
+    except (SystemError, RuntimeError) as e:
+        error_str = str(e)
+        if "1507" in error_str or "macOS" in error_str or "tkinter" in error_str.lower():
+            logger.error("=" * 60)
+            logger.error("Tkinter macOS Compatibility Issue")
+            logger.error("=" * 60)
+            logger.error("Your system has a tkinter/Tcl/Tk compatibility issue with macOS 15.x")
+            logger.error("")
+            logger.error("This is a known issue. Use one of these alternatives:")
+            logger.error("")
+            logger.error("1. CLI Mode (Recommended):")
+            logger.error("   python3 corefiles/brain.py --monitor")
+            logger.error("")
+            logger.error("2. Backend Server (Web Interface):")
+            logger.error("   python3 backend/server.py")
+            logger.error("   Then visit: http://localhost:5000/login")
+            logger.error("")
+            logger.error("3. Fix Tcl/Tk (may require system updates):")
+            logger.error("   brew install python-tk")
+            logger.error("=" * 60)
+            print("\n" + "=" * 60)
+            print("❌ GUI Mode Unavailable - macOS Compatibility Issue")
+            print("=" * 60)
+            print("\nYour system has a tkinter compatibility issue.")
+            print("Use CLI mode instead: python3 corefiles/brain.py --monitor")
+            print("=" * 60 + "\n")
+            sys.exit(1)
+        else:
+            raise
     except Exception as e:
         logger.error(f"GUI startup failed: {e}", exc_info=True)
         print(f"❌ Failed to start GUI: {e}")
         return False
-    
+
     return True
 
 def cli_monitor(target_dir: Path | None = None, interval: int = 30, dry_run: bool = True):
     """Simple CLI monitoring mode (optional)."""
     if not target_dir:
         target_dir = Path.cwd()
-    
+
     print(f"🔍 CleanHouse - CLI Monitor")
     print(f"Target: {target_dir}")
     print(f"Interval: {interval} seconds")
@@ -284,7 +368,7 @@ def cli_monitor(target_dir: Path | None = None, interval: int = 30, dry_run: boo
             if 'shutdown_requested' in globals() and shutdown_requested:
                 print("\n✅ Monitoring stopped (shutdown requested).")
                 break
-                
+
             # Basic file count monitoring
             files = list(target_dir.rglob("*.py"))
             print(f"[{time.strftime('%H:%M:%S')}] Monitoring {len(files)} Python files...")
@@ -315,20 +399,20 @@ def main():
         default=None,
         help='Target directory for monitoring mode'
     )
-    
+
     args = parser.parse_args()
-    
+
     # Setup logging with verbose flag
     setup_logging(verbose=args.verbose)
-    
+
     logger.info("CleanHouse brain initialized")
     logger.debug(f"Command line arguments: {sys.argv}")
     logger.debug(f"Parsed arguments: {vars(args)}")
-    
+
     # Set up signal handlers for the main process
     setup_signal_handlers()
     logger.debug("Signal handlers configured")
-    
+
     # Route to appropriate mode
     if args.monitor:
         # CLI monitoring mode

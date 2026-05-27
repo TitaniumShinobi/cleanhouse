@@ -20,11 +20,10 @@ frontend/
 Open `login.html` or `signup.html` directly in a browser for testing.
 
 ### With Backend
-The backend API should be running on `http://localhost:5000` for full functionality.
+The backend API should be running on `http://localhost:3333` for full functionality.
 
 ## Notes
 
 - These files were extracted from `ui/simple_webview_auth.py`
 - The JavaScript uses `window.pywebview.api` for desktop integration
 - For web deployment, replace `window.pywebview.api` calls with HTTP fetch calls
-
