@@ -7,6 +7,9 @@
 import os
 import sys
 import logging
+import platform
+import shutil
+import subprocess
 from pathlib import Path
 from datetime import datetime
 # Windows-specific imports (optional)
@@ -47,7 +50,7 @@ class NotificationManager:
         """Create a hidden window for notifications."""
         if not WINDOWS_AVAILABLE:
             return
-        
+
         wc = win32gui.WNDCLASS()
         wc.lpszClassName = "CleanHouseNotification"
         wc.style = 0
@@ -56,7 +59,7 @@ class NotificationManager:
         wc.hInstance = win32gui.GetModuleHandle(None)
         wc.hCursor = win32gui.LoadCursor(0, win32con.IDC_ARROW)
         wc.hIcon = win32gui.LoadIcon(0, win32con.IDI_APPLICATION)
-        
+
         try:
             win32gui.RegisterClass(wc)
         except Exception as e:
@@ -82,23 +85,36 @@ class NotificationManager:
         """Background worker for processing notifications."""
         while True:
             try:
-                title, message, level = self.notification_queue.get()
-                self._show_notification(title, message, level)
+                payload = self.notification_queue.get()
+                if len(payload) == 3:
+                    title, message, level = payload
+                    metadata = None
+                    click_url = None
+                else:
+                    title, message, level, metadata, click_url = payload
+                self._show_notification(title, message, level, metadata=metadata, click_url=click_url)
                 self.notification_queue.task_done()
             except Exception as e:
                 logging.error(f"Error in notification worker: {e}")
 
-    def _show_notification(self, title, message, level="info"):
+    def _show_notification(self, title, message, level="info", metadata=None, click_url=None):
         """Show a desktop notification."""
+        if platform.system() == "Darwin":
+            if self._show_macos_notification(title, message, level=level, metadata=metadata, click_url=click_url):
+                return
+            print(f"Notification: {title} - {message} ({level})")
+            return
+
         if not WINDOWS_AVAILABLE:
             print(f"Notification: {title} - {message} ({level})")
             return
-        
+
         try:
             # Set icon based on level
             icon = {
                 "info": win32con.IDI_INFORMATION,
                 "warning": win32con.IDI_WARNING,
+                "critical": win32con.IDI_ERROR,
                 "error": win32con.IDI_ERROR
             }.get(level, win32con.IDI_INFORMATION)
 
@@ -122,16 +138,59 @@ class NotificationManager:
         except Exception as e:
             logging.error(f"Failed to show notification: {e}")
 
-    def send_notification(self, title, message, level="info"):
+    def _show_macos_notification(self, title, message, level="info", metadata=None, click_url=None):
+        terminal_notifier = shutil.which("terminal-notifier")
+        if terminal_notifier:
+            cmd = [
+                terminal_notifier,
+                "-title",
+                str(title),
+                "-message",
+                str(message),
+                "-group",
+                str((metadata or {}).get("notification_id") or "cleanhouse-operator"),
+            ]
+            if click_url:
+                cmd.extend(["-open", str(click_url)])
+            try:
+                completed = subprocess.run(cmd, check=False, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if completed.returncode == 0:
+                    return True
+            except Exception as e:
+                logging.error(f"Failed to show terminal-notifier notification: {e}")
+
+        osascript = shutil.which("osascript")
+        if not osascript:
+            return False
+        script = (
+            "display notification "
+            + _applescript_string(str(message))
+            + " with title "
+            + _applescript_string(str(title))
+        )
+        try:
+            subprocess.run([osascript, "-e", script], check=False, timeout=5, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return True
+        except Exception as e:
+            logging.error(f"Failed to show AppleScript notification: {e}")
+            return False
+
+    def send_notification(self, title, message, level="info", metadata=None, click_url=None):
         """Queue a notification to be shown."""
-        self.notification_queue.put((title, message, level))
+        self.notification_queue.put((title, message, level, metadata, click_url))
 
     def cleanup(self):
         """Clean up notification resources."""
+        if not WINDOWS_AVAILABLE or self.hwnd is None:
+            return
         try:
             win32gui.DestroyWindow(self.hwnd)
         except Exception as e:
             logging.error(f"Error cleaning up notifications: {e}")
+
+
+def _applescript_string(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 class PersistentErrorHandler:
     def __init__(self):
@@ -154,7 +213,7 @@ class PersistentErrorHandler:
         """Determine if an error should be logged based on its history."""
         current_time = time.time()
         key = f"{error_type}:{error_key}"
-        
+
         if key not in self.error_history:
             self.error_history[key] = {
                 'count': 1,
@@ -162,21 +221,21 @@ class PersistentErrorHandler:
                 'last_seen': current_time
             }
             return True
-            
+
         history = self.error_history[key]
         history['count'] += 1
         history['last_seen'] = current_time
-        
+
         # Always log first occurrence
         if history['count'] == 1:
             return True
-            
+
         # If we've seen this error too many times, only log if cooldown has passed
         if history['count'] > self.error_threshold:
             if current_time - history['last_seen'] > self.error_cooldown:
                 return True
             return False
-            
+
         return True
 
     def get_error_message(self, error_type: str, error_key: str) -> str:
@@ -210,28 +269,28 @@ class CustomLogHandler(logging.Handler):
         super().__init__()
         self.log_queue = log_queue
         self.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-        
+
     def emit(self, record):
         try:
             msg = self.format(record)
-            
+
             # Check if this is an error that should be handled by PersistentErrorHandler
             if record.levelno >= logging.ERROR:
                 error_type = getattr(record, 'error_type', 'unknown')
                 error_key = getattr(record, 'error_key', 'unknown')
-                
+
                 if not error_handler.should_log_error(error_type, error_key):
                     return
-                    
+
                 # Get user-friendly message and summary
                 user_msg = error_handler.get_error_message(error_type, error_key)
                 summary = error_handler.get_error_summary(error_type, error_key)
-                
+
                 if summary:
                     msg = f"{user_msg}\n{summary}"
                 else:
                     msg = user_msg
-            
+
             # Add to queue with metadata for UI display
             self.log_queue.put({
                 'timestamp': record.created,
@@ -241,6 +300,6 @@ class CustomLogHandler(logging.Handler):
                 'error_type': getattr(record, 'error_type', None),
                 'error_key': getattr(record, 'error_key', None)
             })
-            
+
         except Exception as e:
-            self.handleError(record) 
+            self.handleError(record)
