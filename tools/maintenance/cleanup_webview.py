@@ -11,7 +11,7 @@ import sys
 def cleanup_webview_processes():
     """Clean up any remaining WebView processes."""
     print("🧹 Cleaning up WebView processes...")
-    
+
     try:
         if platform.system() == 'Darwin':  # macOS
             # Kill WebView-related processes
@@ -22,7 +22,7 @@ def cleanup_webview_processes():
                 'Python',
                 'CleanHouse'
             ]
-            
+
             for process in processes_to_kill:
                 try:
                     result = subprocess.run(['pkill', '-f', process], capture_output=True)
@@ -32,12 +32,12 @@ def cleanup_webview_processes():
                         print(f"ℹ️  No {process} processes found")
                 except Exception as e:
                     print(f"⚠️  Error killing {process}: {e}")
-            
+
             print("✅ WebView cleanup completed")
-            
+
         else:
             print("ℹ️  This script is designed for macOS")
-            
+
     except Exception as e:
         print(f"❌ Error during cleanup: {e}")
 
