@@ -108,7 +108,7 @@ CleanHouse/
 ├── Zaelith/
 │   ├── detector.py               # Zaelith lie detector engine
 │   └── brain.py                  # Zaelith CLI interface
-└── test_zaelith_integration.py   # Integration test suite
+└── tools/manual/zaelith_integration_probe.py # Integration probe
 ```
 
 ### Dependencies
@@ -134,14 +134,14 @@ CleanHouse/
 ### Debugging
 - Check the CleanHouse logs in `logs/cleanhouse.log` for detailed error information
 - Use the "Test Connection" button to verify Zaelith functionality
-- Run `python test_zaelith_integration.py` for comprehensive diagnostics
+- Run `python tools/manual/zaelith_integration_probe.py` for comprehensive diagnostics
 
 ## Testing
 
 Run the integration test suite:
 ```bash
 cd CleanHouse
-python test_zaelith_integration.py
+python tools/manual/zaelith_integration_probe.py
 ```
 
 This will verify:

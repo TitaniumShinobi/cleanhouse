@@ -103,7 +103,7 @@ pm_integration.setup_form_for_password_managers(
 ```bash
 cd /Users/devonwoodson/Documents/GitHub/CleanHouse
 source cleanhouse_env/bin/activate
-python3 test_password_manager.py
+python3 tools/manual/password_manager_probe.py
 ```
 
 ### **Manual Testing:**
@@ -202,4 +202,3 @@ The integration is **production-ready** and provides a seamless experience for u
 - **Navigation Issues** - Test Tab/Enter navigation
 
 The system is designed to work seamlessly with all major password managers on macOS! 🎉
-

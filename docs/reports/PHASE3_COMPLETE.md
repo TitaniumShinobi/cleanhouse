@@ -248,8 +248,8 @@ For each user in SQLite:
 
 ## Documentation
 
-- ✅ Implementation plan: `SHARDED_USER_REGISTRY_IMPLEMENTATION_PLAN.md`
-- ✅ Task breakdown: `TASK_BREAKDOWN.md`
+- ✅ Implementation plan: `../plans/SHARDED_USER_REGISTRY_IMPLEMENTATION_PLAN.md`
+- ✅ Task breakdown: `../plans/TASK_BREAKDOWN.md`
 - ✅ Phase 1 completion: `PHASE1_COMPLETE.md`
 - ✅ Phase 2 completion: `PHASE2_COMPLETE.md`
 - ✅ This completion summary: `PHASE3_COMPLETE.md`
@@ -259,4 +259,3 @@ For each user in SQLite:
 **Phase 3 Status**: ✅ **COMPLETE**
 
 Migration script is ready for use. Test with `--dry-run` before running on production data.
-

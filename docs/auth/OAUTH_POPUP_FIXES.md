@@ -276,7 +276,7 @@ python3 test_enhanced_focus.py
 ```bash
 cd /Users/devonwoodson/Documents/GitHub/cleanhouse
 source cleanhouse_env/bin/activate
-python3 test_oauth_popup_fixes.py
+python3 tools/manual/oauth_popup_probe.py
 ```
 
 ### **Full App Test:**
@@ -354,4 +354,3 @@ time.sleep(0.1)  # Secondary delay
 ```
 
 The system is designed to work seamlessly with all OAuth providers and provides professional popup handling! 🎉
-

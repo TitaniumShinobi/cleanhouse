@@ -18,7 +18,7 @@ Your CleanHouse now has **proper WebView process cleanup** to prevent the need t
 - **Process Management** - Handles WebKit, Safari, and Python processes
 - **Error Handling** - Graceful cleanup even if errors occur
 
-### 3. **Cleanup Script** (`cleanup_webview.py`)
+### 3. **Cleanup Script** (`tools/maintenance/cleanup_webview.py`)
 - **Manual Cleanup** - Script to kill remaining WebView processes
 - **Process Detection** - Identifies and kills WebView-related processes
 - **macOS Optimized** - Designed specifically for macOS process management
@@ -33,7 +33,7 @@ Your CleanHouse now has **proper WebView process cleanup** to prevent the need t
 4. **Force Exit** - Ensures complete application termination
 
 ### **Manual Cleanup:**
-1. **Run Script** - `python3 cleanup_webview.py`
+1. **Run Script** - `python3 tools/maintenance/cleanup_webview.py`
 2. **Process Detection** - Identifies WebView-related processes
 3. **Safe Killing** - Kills only WebView processes
 4. **Verification** - Confirms cleanup completion
@@ -50,7 +50,7 @@ python3 corefiles/brain.py
 
 ### **Test Manual Cleanup:**
 ```bash
-python3 cleanup_webview.py
+python3 tools/maintenance/cleanup_webview.py
 ```
 
 ### **Check for Remaining Processes:**
@@ -210,7 +210,7 @@ Your CleanHouse now has **enterprise-grade process management**:
 ## 🔍 **Troubleshooting**
 
 ### **If CleanHouse Still Hangs:**
-1. **Run Cleanup Script** - `python3 cleanup_webview.py`
+1. **Run Cleanup Script** - `python3 tools/maintenance/cleanup_webview.py`
 2. **Check Processes** - `ps aux | grep -i webview`
 3. **Force Kill** - `pkill -f webview` (if needed)
 4. **Restart** - Restart the application

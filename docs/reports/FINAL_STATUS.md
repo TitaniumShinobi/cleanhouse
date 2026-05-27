@@ -62,7 +62,7 @@ CleanHouse/
 │   └── assets/              # Images and icons
 ├── requirements.txt         # Updated dependencies
 ├── requirements-core.txt    # Core dependencies only
-└── INSTALLATION_GUIDE.md    # Installation instructions
+└── docs/operations/INSTALLATION_GUIDE.md    # Installation instructions
 ```
 
 ## ⚠️ Known Issues & Solutions

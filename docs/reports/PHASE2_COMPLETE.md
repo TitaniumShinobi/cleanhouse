@@ -223,8 +223,8 @@ cleanhouse/
 
 ## Documentation
 
-- ✅ Implementation plan: `SHARDED_USER_REGISTRY_IMPLEMENTATION_PLAN.md`
-- ✅ Task breakdown: `TASK_BREAKDOWN.md`
+- ✅ Implementation plan: `../plans/SHARDED_USER_REGISTRY_IMPLEMENTATION_PLAN.md`
+- ✅ Task breakdown: `../plans/TASK_BREAKDOWN.md`
 - ✅ Phase 1 completion: `PHASE1_COMPLETE.md`
 - ✅ This completion summary: `PHASE2_COMPLETE.md`
 
@@ -233,4 +233,3 @@ cleanhouse/
 **Phase 2 Status**: ✅ **COMPLETE**
 
 Ready for Phase 3 (Migration Script) or Phase 4 (UI Integration Testing).
-

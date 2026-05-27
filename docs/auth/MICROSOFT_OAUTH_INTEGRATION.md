@@ -73,7 +73,7 @@ Your CleanHouse now has **full Microsoft OAuth integration** alongside Google an
 ```bash
 cd /Users/devonwoodson/Documents/GitHub/CleanHouse
 source cleanhouse_env/bin/activate
-python3 test_microsoft_oauth.py
+python3 tools/manual/microsoft_oauth_probe.py
 ```
 
 ### **Full App Test:**
@@ -214,4 +214,3 @@ Your CleanHouse now has **enterprise-grade OAuth integration** with all major id
 - **Error Recovery** - Robust error handling and recovery
 
 The Microsoft OAuth integration completes your enterprise-grade authentication system! 🎉
-

@@ -25,11 +25,11 @@ python3 corefiles/brain.py --help     # See all options
 # 💡 Press Ctrl+C to terminate CleanHouse at any time
 ```
 
-### Level 2: Service Integration (No GUI deps) 
+### Level 2: Service Integration (No GUI deps)
 ```bash
 # Programmatic analysis without GUI
-python3 example_zaelith_usage.py      # Service examples
-python3 test_zaelith_integration.py   # Integration tests
+python3 examples/zaelith_usage.py                  # Service examples
+python3 tools/manual/zaelith_integration_probe.py  # Integration probe
 ```
 
 ### Level 3: Full GUI Experience (All features)
@@ -85,12 +85,12 @@ cd CleanHouse
 python3 Zaelith/brain.py
 # Enter a prompt and response, type 'run' to analyze
 
-# 2. Test CLI monitoring  
+# 2. Test CLI monitoring
 python3 corefiles/brain.py --monitor .
 # Monitors current directory for changes
 
 # 3. Test service integration
-python3 example_zaelith_usage.py
+python3 examples/zaelith_usage.py
 # Shows programmatic usage examples
 ```
 
@@ -109,8 +109,8 @@ python3 example_zaelith_usage.py
 
 **Options**:
 - Install tkinter: `pip install tk` (or use system package manager)
-- Use CLI only: `python3 corefiles/brain.py --monitor` 
-- Use service API: `python3 example_zaelith_usage.py`
+- Use CLI only: `python3 corefiles/brain.py --monitor`
+- Use service API: `python3 examples/zaelith_usage.py`
 
 ### Import errors from corefiles
 **Solution**: Path issues or missing modules.
@@ -140,21 +140,21 @@ python3 corefiles/brain.py --monitor /path/to/monitor
 CleanHouse/
 ├── 📁 Zaelith/                   # Standalone lie detection
 │   ├── brain.py                  # ✅ No dependencies
-│   └── detector.py               # ✅ No dependencies  
+│   └── detector.py               # ✅ No dependencies
 ├── 📁 corefiles/                 # CleanHouse core
 │   ├── brain.py                  # ✅ Minimal dependencies
 │   ├── config.py                 # ✅ No extra dependencies
 │   └── zaelith_service.py        # ✅ No extra dependencies
 ├── ui.py                         # ⚠️ Requires tkinter + matplotlib
 ├── launch_cleanhouse.py          # 🚀 Smart launcher with checks
-├── example_zaelith_usage.py      # ✅ No GUI dependencies
+├── examples/zaelith_usage.py     # ✅ No GUI dependencies
 └── requirements.txt              # 📦 Optional dependencies
 ```
 
 ## 💡 Recommended Workflow
 
 1. **Start Simple**: Try `python3 Zaelith/brain.py` first
-2. **Test Integration**: Run `python3 example_zaelith_usage.py` 
+2. **Test Integration**: Run `python3 examples/zaelith_usage.py`
 3. **Add GUI**: Install matplotlib and run `python3 launch_cleanhouse.py`
 4. **Full Setup**: Install all requirements for complete features
 
@@ -162,7 +162,7 @@ CleanHouse/
 
 - ✅ **CLI Working**: `python3 corefiles/brain.py --help` shows usage
 - ✅ **Lie Detection Working**: `python3 Zaelith/brain.py` accepts input
-- ✅ **Service Working**: `python3 example_zaelith_usage.py` shows analysis
+- ✅ **Service Working**: `python3 examples/zaelith_usage.py` shows analysis
 - ✅ **GUI Working**: `python3 launch_cleanhouse.py` opens window
 - ✅ **Integration Working**: Lie Detection tab appears in GUI
 

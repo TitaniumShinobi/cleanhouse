@@ -73,7 +73,7 @@ Your CleanHouse now has **full native autofill support** using WebView technolog
 ```bash
 cd /Users/devonwoodson/Documents/GitHub/CleanHouse
 source cleanhouse_env/bin/activate
-python3 test_simple_webview.py
+python3 tools/manual/simple_webview_probe.py
 ```
 
 ### **Full App Test:**
@@ -209,4 +209,3 @@ The WebView authentication provides the same experience as professional applicat
 - **UI Not Loading** - Check HTML content and WebView setup
 
 The system is designed to work seamlessly with all major password managers and provides a professional authentication experience! 🎉
-

@@ -210,4 +210,3 @@ getAuthHeaders() {
 ---
 
 For complete implementation details, see `AUTHENTICATION_SETUP_GUIDE.md`
-

@@ -204,9 +204,9 @@ cleanhouse/
 
 ## Documentation
 
-- ✅ Implementation plan: `SHARDED_USER_REGISTRY_IMPLEMENTATION_PLAN.md`
+- ✅ Implementation plan: `../plans/SHARDED_USER_REGISTRY_IMPLEMENTATION_PLAN.md`
 - ✅ Review document: `SHARDED_REGISTRY_REVIEW.md`
-- ✅ Task breakdown: `TASK_BREAKDOWN.md`
+- ✅ Task breakdown: `../plans/TASK_BREAKDOWN.md`
 - ✅ This completion summary: `PHASE1_COMPLETE.md`
 
 ---
@@ -214,4 +214,3 @@ cleanhouse/
 **Phase 1 Status**: ✅ **COMPLETE AND TESTED**
 
 Ready for Phase 2 implementation.
-
