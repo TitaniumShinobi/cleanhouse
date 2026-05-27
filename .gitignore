@@ -13,10 +13,10 @@ env.bak/
 venv.bak/
 .venv/
 
-# Environment variables
+# Environment (secrets) — ignore all variants; allow optional committed template
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # IDE
 .vscode/
@@ -35,12 +35,19 @@ logs/
 
 # Database files (runtime data)
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 *.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
 user_auth.db
 authorized_sessions.json
 
 # Data files (runtime/user data)
+data/
 userdata/
 datafiles/
 backups/
@@ -71,6 +78,7 @@ htmlcov/
 *.temp
 tmp/
 temp/
+$CODEX_HOME/
 
 # OS files
 .DS_Store
@@ -91,5 +99,3 @@ unauthorized_sessions.json
 integrity_baseline.json
 cleanup_log.txt
 cleanup_report.json
-
-.env.bak
