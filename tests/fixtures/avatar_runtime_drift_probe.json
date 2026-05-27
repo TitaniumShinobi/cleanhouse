@@ -1,0 +1,35 @@
+{
+  "declared_scope": "assets/avatars/requested/",
+  "description": "Canonical expected receipt-side scope analysis for avatar mutation and traversal runs.",
+  "fixture": "avatar_runtime_drift_probe",
+  "scenarios": {
+    "expected-mutation": {
+      "changed_paths": [
+        "assets/avatars/requested/avatar.png"
+      ],
+      "classification": "within_declared_scope",
+      "path_clusters": [
+        {
+          "cluster": "assets/avatars/requested",
+          "relation": "within_declared_scope",
+          "scope_weight": 0.0
+        }
+      ],
+      "scope_weight": 0.0
+    },
+    "out-of-scope-traversal": {
+      "changed_paths": [
+        "assets/avatars/substituted/avatar.png"
+      ],
+      "classification": "outside_declared_scope",
+      "path_clusters": [
+        {
+          "cluster": "assets/avatars/substituted",
+          "relation": "outside_declared_scope",
+          "scope_weight": 1.0
+        }
+      ],
+      "scope_weight": 1.0
+    }
+  }
+}
