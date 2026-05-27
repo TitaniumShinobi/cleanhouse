@@ -72,7 +72,7 @@ class CleanHouseUI(tk.Tk):
                 Path.home() / "Documents" / "GitHub" / "CleanHouse",
             ]
             for path in possible_paths:
-                if path.exists() and (path / "CLEANHOUSE_TERMS_OF_SERVICE.md").exists():
+                if path.exists() and (path / "docs" / "legal" / "CLEANHOUSE_TERMS_OF_SERVICE.md").exists():
                     config.BASE_DIR = path.resolve()
                     break
             else:

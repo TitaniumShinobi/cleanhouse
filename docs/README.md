@@ -87,6 +87,8 @@ Canonical scope and evidence docs live in `canon/`.
 - [European Electronic Communications Code Disclosure](legal/CLEANHOUSE_EUROPEAN_ELECTRONIC_COMMUNICATIONS_CODE_DISCLOSURE.md)
 - [CleanHouse Privacy Notice](legal/CLEANHOUSE_PRIVACY_NOTICE.md)
 - [CleanHouse Terms of Service](legal/CLEANHOUSE_TERMS_OF_SERVICE.md)
+- [Legacy Privacy Policy](legal/LEGACY_PRIVACY_POLICY.md)
+- [Legacy Terms of Use](legal/LEGACY_TERMS_OF_USE.md)
 
 ## Archive
 

@@ -145,7 +145,7 @@ class SimpleWebViewAuth:
                 Path.home() / "Documents" / "GitHub" / "CleanHouse",
             ]
             for path in possible_paths:
-                if path.exists() and (path / "CLEANHOUSE_TERMS_OF_SERVICE.md").exists():
+                if path.exists() and (path / "docs" / "legal" / "CLEANHOUSE_TERMS_OF_SERVICE.md").exists():
                     self.base_dir = str(path.resolve())
                     logging.info(f"[UI] Found CleanHouse directory: {self.base_dir}")
                     break
@@ -3672,17 +3672,17 @@ class SimpleWebViewAuth:
 
     def showTerms(self):
         """Show Terms of Service in system browser."""
-        terms_path = Path(self.base_dir) / "CLEANHOUSE_TERMS_OF_SERVICE.md"
+        terms_path = Path(self.base_dir) / "docs" / "legal" / "CLEANHOUSE_TERMS_OF_SERVICE.md"
         self._open_markdown_in_browser(terms_path, "CleanHouse Terms of Service")
 
     def showPrivacy(self):
         """Show Privacy Notice in system browser."""
-        privacy_path = Path(self.base_dir) / "CLEANHOUSE_PRIVACY_NOTICE.md"
+        privacy_path = Path(self.base_dir) / "docs" / "legal" / "CLEANHOUSE_PRIVACY_NOTICE.md"
         self._open_markdown_in_browser(privacy_path, "CleanHouse Privacy Notice")
 
     def showEECCD(self):
         """Show European Electronic Communications Code Disclosure in system browser."""
-        eeccd_path = Path(self.base_dir) / "CLEANHOUSE_EUROPEAN_ELECTRONIC_COMMUNICATIONS_CODE_DISCLOSURE.md"
+        eeccd_path = Path(self.base_dir) / "docs" / "legal" / "CLEANHOUSE_EUROPEAN_ELECTRONIC_COMMUNICATIONS_CODE_DISCLOSURE.md"
         self._open_markdown_in_browser(eeccd_path, "European Electronic Communications Code Disclosure")
 
     def getTurnstileSiteKey(self) -> str:
