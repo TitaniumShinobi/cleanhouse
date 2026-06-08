@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import queue
 import sqlite3
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 import sys
@@ -176,6 +177,119 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         self.assertIn("path", response[0])
         self.assertIn("timestamp", response[0])
 
+    def test_events_endpoint_rejects_non_integer_limit(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"limit": "abc"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_events()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "limit must be an integer")
+
+    def test_events_endpoint_rejects_zero_limit(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"limit": "0"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_events()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "limit must be at least 1")
+
+    def test_events_endpoint_rejects_limit_above_maximum(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"limit": "1001"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_events()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "limit exceeds maximum")
+
+    def test_events_endpoint_rejects_malformed_session_id(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"session_id": "bad session"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_events()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "session_id format is invalid")
+
+    def test_events_endpoint_row_schema_contract(self):
+        events.insert_event(
+            event_type="created",
+            path="/tmp/schema-events.txt",
+            summary="created: /tmp/schema-events.txt",
+            session_id="session-events-schema",
+            observed_vs_expected={"observed": "created"},
+            evidence_refs=["local://cleanhouse/test/events-schema"],
+            data={"ok": True},
+        )
+        cleanhouse_module.request = SimpleNamespace(
+            args={"limit": "10", "session_id": "session-events-schema"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_events()
+        self.assertIsInstance(response, list)
+        self.assertGreaterEqual(len(response), 1)
+        row = response[0]
+        for key in ("id", "timestamp", "session_id", "event_type", "path", "summary"):
+            self.assertIn(key, row)
+        self.assertIsInstance(row.get("observed_vs_expected"), dict)
+        self.assertIsInstance(row.get("evidence_refs"), list)
+        self.assertIsInstance(row.get("data"), dict)
+
+    def test_events_endpoint_rejects_invalid_row_field_types(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"limit": "10"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        bad_rows = [
+            {
+                "id": "evt-1",
+                "timestamp": "2026-05-30T00:00:00Z",
+                "session_id": "session-typed",
+                "event_type": "created",
+                "path": "/tmp/file.txt",
+                "summary": "",
+                "observed_vs_expected": {},
+                "evidence_refs": [],
+                "data": {},
+            }
+        ]
+        with patch.object(events, "list_events", return_value=bad_rows):
+            response = cleanhouse_module.get_events()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "events payload schema invalid")
+
+    def test_events_endpoint_rejects_invalid_evidence_ref_shape(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"limit": "10"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        bad_rows = [
+            {
+                "id": "evt-2",
+                "timestamp": "2026-05-30T00:00:00Z",
+                "session_id": "session-typed",
+                "event_type": "created",
+                "path": "/tmp/file.txt",
+                "summary": "created",
+                "observed_vs_expected": {},
+                "evidence_refs": [123],
+                "data": {},
+            }
+        ]
+        with patch.object(events, "list_events", return_value=bad_rows):
+            response = cleanhouse_module.get_events()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "events payload schema invalid")
+
     def test_receipts_endpoint_creates_and_returns_rows(self):
         events.insert_event(
             event_type="prompt_event",
@@ -208,6 +322,116 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         self.assertIn("event_ids", row)
         self.assertIn("timestamp", row)
         self.assertIn("summary", row)
+
+    def test_receipts_endpoint_rejects_non_integer_limit(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"limit": "abc"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_receipts_list()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "limit must be an integer")
+
+    def test_receipts_endpoint_rejects_zero_limit(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"limit": "0"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_receipts_list()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "limit must be at least 1")
+
+    def test_receipts_endpoint_rejects_limit_above_maximum(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"limit": "1001"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_receipts_list()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "limit exceeds maximum")
+
+    def test_receipts_endpoint_rejects_malformed_session_id(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"session_id": "bad session"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_receipts_list()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "session_id format is invalid")
+
+    def test_receipts_endpoint_row_schema_contract(self):
+        session_id = "session-receipts-schema"
+        events.insert_event(
+            event_type="prompt_event",
+            path="/tmp/schema-receipt-prompt.txt",
+            summary="prompt: /tmp/schema-receipt-prompt.txt",
+            session_id=session_id,
+        )
+        events.insert_event(
+            event_type="created",
+            path="/tmp/schema-receipt-file.txt",
+            summary="created: /tmp/schema-receipt-file.txt",
+            session_id=session_id,
+        )
+        cleanhouse_module.request = SimpleNamespace(
+            args={"session_id": session_id, "limit": "10"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        response = cleanhouse_module.get_receipts_list()
+        self.assertIsInstance(response, list)
+        self.assertGreaterEqual(len(response), 1)
+        row = response[0]
+        for key in ("id", "timestamp", "session_id", "summary", "event_ids"):
+            self.assertIn(key, row)
+        self.assertIsInstance(row.get("event_ids"), list)
+        self.assertIsInstance(row.get("affected_paths"), list)
+
+    def test_receipts_endpoint_rejects_invalid_row_field_types(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"session_id": "session-receipts-schema", "limit": "10"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        bad_rows = [
+            {
+                "id": "receipt-1",
+                "timestamp": "2026-05-30T00:00:00Z",
+                "session_id": "session-receipts-schema",
+                "summary": "ok",
+                "event_ids": ["evt-1", ""],
+                "affected_paths": ["/tmp/file.txt"],
+            }
+        ]
+        with patch.object(events, "ensure_latest_receipt", return_value=None), patch.object(events, "list_receipts", return_value=bad_rows):
+            response = cleanhouse_module.get_receipts_list()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "receipts payload schema invalid")
+
+    def test_receipts_endpoint_rejects_invalid_affected_paths_shape(self):
+        cleanhouse_module.request = SimpleNamespace(
+            args={"session_id": "session-receipts-schema", "limit": "10"},
+            headers={},
+            get_json=lambda silent=True: None,
+        )
+        bad_rows = [
+            {
+                "id": "receipt-2",
+                "timestamp": "2026-05-30T00:00:00Z",
+                "session_id": "session-receipts-schema",
+                "summary": "ok",
+                "event_ids": ["evt-1"],
+                "affected_paths": [42],
+            }
+        ]
+        with patch.object(events, "ensure_latest_receipt", return_value=None), patch.object(events, "list_receipts", return_value=bad_rows):
+            response = cleanhouse_module.get_receipts_list()
+        self.assertEqual(response[1], 400)
+        self.assertEqual(response[0]["message"], "receipts payload schema invalid")
 
     def test_objective_markers_and_receipt_enrichment(self):
         objective_id = "o-cleanhouse-test"
@@ -364,7 +588,36 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         self.assertIn("collector_status", status["writer"])
         self.assertIn("queue", status["writer"])
         self.assertIn("metrics", status["writer"])
+        self.assertIn("timestamps", status["writer"])
         self.assertIn("degradation", status["writer"])
+        self.assertIn("last_event_at", status)
+        self.assertIn("last_event_type", status)
+
+    def test_filesystem_watcher_filters_event_db_sidecars_without_drops(self):
+        original_metrics = events.get_writer_metrics()
+        sidecars = [
+            self._db_path,
+            self._db_path.with_name(self._db_path.name + "-wal"),
+            self._db_path.with_name(self._db_path.name + "-shm"),
+            self._db_path.with_name(self._db_path.name + "-journal"),
+        ]
+
+        for path in sidecars:
+            events.insert_event_async(
+                event_type="modified",
+                path=str(path),
+                summary=f"modified: {path}",
+                session_id="sidecar-filter",
+                source_surface="filesystem_watcher",
+            )
+
+        rows = events.list_events(limit=10, session_id="sidecar-filter")
+        health = events.get_writer_health()
+        metrics = health["metrics"]
+        self.assertEqual(rows, [])
+        self.assertEqual(metrics.get("filtered", 0), original_metrics.get("filtered", 0) + len(sidecars))
+        self.assertEqual(metrics.get("dropped", 0), original_metrics.get("dropped", 0))
+        self.assertIsNotNone(health["timestamps"].get("last_filtered_at"))
 
     def test_writer_queue_failure_surfaces_in_health(self):
         original_queue = events._EVENT_QUEUE

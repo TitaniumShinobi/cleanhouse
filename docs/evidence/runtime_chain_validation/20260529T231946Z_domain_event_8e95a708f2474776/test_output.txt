@@ -1,0 +1,11 @@
+lab_cleaned=2026-05-29T23:19:42.260051+00:00
+prepared
+baseline_rc=0
+process_started name=antigravity-agent pid=15220
+mutation_applied file=new2.txt change=new
+event_id=domain_event:8e95a708f2474776
+incident_id=incident:33bb0027b2edb521
+receipt_create_http=200
+receipt_create_status=ok
+case_id=qpb_case:e63e97791fab16d0
+action=quarantine http=200 status=ok

@@ -1,0 +1,8 @@
+{
+  "status": "ok",
+  "blocker": "intervention_workflow",
+  "objective": "event detected -> intervention requested -> decision recorded -> outcome enforced -> receipt generated",
+  "implemented": true,
+  "tests_passed": true,
+  "evidence_generated": true
+}

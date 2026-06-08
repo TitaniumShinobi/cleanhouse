@@ -408,14 +408,7 @@ class SignupWebView:
                 }
                 
                 async function submitSignup(data) {
-                    // Simulate API call - in real implementation, this would call your backend
-                    return new Promise((resolve) => {
-                        setTimeout(() => {
-                            // For now, just simulate success
-                            // In real implementation, you'd call your user service here
-                            resolve({ success: true, message: 'Account created successfully!' });
-                        }, 1000);
-                    });
+                    return { success: false, message: 'Authentication backend unavailable. Enable auth routes and retry.' };
                 }
                 
                 function showError(message) {

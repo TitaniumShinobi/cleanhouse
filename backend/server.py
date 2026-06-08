@@ -73,8 +73,18 @@ try:
 except ImportError:
     logging.warning("python-dotenv not installed, environment variables must be set manually")
 
+# Safe defaults: native notifications enabled with live-only delivery gates.
+os.environ.setdefault("CLEANHOUSE_NATIVE_NOTIFICATIONS", "1")
+os.environ.setdefault("CLEANHOUSE_NATIVE_CODEX_ACTIVITY", "1")
+os.environ.setdefault("CLEANHOUSE_NATIVE_LIVE_ONLY", "1")
+os.environ.setdefault("CLEANHOUSE_NATIVE_LIVE_MAX_AGE_SECONDS", "3")
+os.environ.setdefault("CLEANHOUSE_NATIVE_REMINDERS", "0")
+os.environ.setdefault("CLEANHOUSE_ACTIVE_CONTEXT_RESPONSE_NOTIFICATIONS", "1")
+os.environ.setdefault("CLEANHOUSE_ACTIVE_CONTEXT_FOLLOW", "1")
+
 from backend.api.cleanhouse import bp as cleanhouse_bp
 from backend import events as cleanhouse_events
+from backend import runtime_supervisor
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = _read_secret_key()
@@ -117,7 +127,7 @@ def _cleanhouse_port():
 
 
 def _auth_enabled():
-    return os.environ.get('CLEANHOUSE_ENABLE_AUTH', '').lower() in {'1', 'true', 'yes', 'on'}
+    return os.environ.get('CLEANHOUSE_ENABLE_AUTH', '1').lower() not in {'0', 'false', 'no', 'off'}
 
 
 if _auth_enabled():
@@ -127,7 +137,7 @@ if _auth_enabled():
     except Exception as exc:
         logging.warning("Auth API disabled; CleanHouse monitoring endpoints remain available: %s", exc)
 else:
-    logging.info("Auth API disabled; set CLEANHOUSE_ENABLE_AUTH=1 to enable auth routes.")
+    logging.info("Auth API disabled; set CLEANHOUSE_ENABLE_AUTH=1 or unset it to enable auth routes.")
 
 @app.route('/')
 def index():
@@ -144,10 +154,52 @@ def signup():
     """Serve signup page"""
     return send_from_directory(str(FRONTEND_DIR), 'signup.html')
 
+@app.route('/account/delete')
+def account_delete():
+    """Serve official account deletion page."""
+    return send_from_directory(str(FRONTEND_DIR), 'account-delete.html')
+
+@app.route('/legal/terms')
+def legal_terms():
+    """Serve CleanHouse Terms of Service."""
+    path = BASE_DIR / "docs" / "legal" / "CLEANHOUSE_TERMS_OF_SERVICE.md"
+    return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+@app.route('/legal/privacy')
+def legal_privacy():
+    """Serve CleanHouse Privacy Notice."""
+    path = BASE_DIR / "docs" / "legal" / "CLEANHOUSE_PRIVACY_NOTICE.md"
+    return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
+@app.route('/legal/eeccd')
+def legal_eeccd():
+    """Serve CleanHouse European Electronic Communications Code Disclosure."""
+    path = BASE_DIR / "docs" / "legal" / "CLEANHOUSE_EUROPEAN_ELECTRONIC_COMMUNICATIONS_CODE_DISCLOSURE.md"
+    return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+
 @app.route('/dashboard')
 def dashboard():
     """Serve monitoring dashboard"""
     return send_from_directory(str(FRONTEND_DIR), 'dashboard.html')
+
+@app.route('/investigations')
+def investigations():
+    """Serve investigation-first operator surface"""
+    return send_from_directory(str(FRONTEND_DIR), 'investigations.html')
+
+@app.route('/applications')
+@app.route('/applications/<path:_app_id>')
+@app.route('/network')
+@app.route('/files')
+@app.route('/custom-scan')
+def app_security_center(_app_id=None):
+    """Serve app-first security center routes"""
+    return send_from_directory(str(FRONTEND_DIR), 'investigations.html')
+
+@app.route('/incident-receipt')
+def incident_receipt():
+    """Serve standalone incident receipt card"""
+    return send_from_directory(str(FRONTEND_DIR), 'incident-receipt.html')
 
 @app.route('/css/<path:filename>')
 def css(filename):
@@ -162,14 +214,34 @@ def js(filename):
 @app.route('/assets/<path:filename>')
 def assets(filename):
     """Serve asset files"""
-    return send_from_directory(str(FRONTEND_DIR / 'assets'), filename)
+    frontend_asset = FRONTEND_DIR / 'assets' / filename
+    if frontend_asset.exists():
+        return send_from_directory(str(FRONTEND_DIR / 'assets'), filename)
+    return send_from_directory(str(BASE_DIR / 'assets'), filename)
 
 
 _EVENTS_SERVICES_STARTED = False
+_RUNTIME_HEARTBEAT_STARTED = False
+
+
+def _cleanhouse_host():
+    return os.environ.get('CLEANHOUSE_HOST', DEFAULT_HOST) or DEFAULT_HOST
+
+
+def _start_runtime_heartbeat() -> None:
+    global _RUNTIME_HEARTBEAT_STARTED
+    if _RUNTIME_HEARTBEAT_STARTED:
+        return
+    _RUNTIME_HEARTBEAT_STARTED = True
+    try:
+        runtime_supervisor.start_backend_heartbeat(_cleanhouse_host(), _cleanhouse_port())
+    except Exception as exc:
+        logging.warning("cleanhouse runtime heartbeat not started: %s", exc)
 
 
 def _start_events_services():
     global _EVENTS_SERVICES_STARTED
+    _start_runtime_heartbeat()
     if _EVENTS_SERVICES_STARTED:
         return
     _EVENTS_SERVICES_STARTED = True
@@ -185,6 +257,10 @@ def _stop_events_services() -> None:
         cleanhouse_events.stop_events_services()
     except Exception as exc:  # pragma: no cover
         logging.warning("cleanhouse event services not stopped cleanly: %s", exc)
+    try:
+        runtime_supervisor.stop_backend_heartbeat(_cleanhouse_host(), _cleanhouse_port())
+    except Exception as exc:  # pragma: no cover
+        logging.warning("cleanhouse runtime heartbeat not stopped cleanly: %s", exc)
 
 
 atexit.register(_stop_events_services)
@@ -201,10 +277,11 @@ else:
 
 if __name__ == '__main__':
     cleanhouse_events.init_db()
+    _start_runtime_heartbeat()
 
     # Run on localhost for desktop wrapper
     app.run(
-        host=os.environ.get('CLEANHOUSE_HOST', DEFAULT_HOST),
+        host=_cleanhouse_host(),
         port=_cleanhouse_port(),
         debug=False,
         threaded=True,

@@ -32,6 +32,7 @@ DEFAULT_OBJECTIVE_PATH_PREFIX = "/objectives/"
 
 _WATCHER_LOCK = threading.Lock()
 _DB_LOCK = threading.Lock()
+_DB_INIT_LOCK = threading.Lock()
 _WRITER_LOCK = threading.Lock()
 _WATCHER_STATE: dict[str, Any] = {
     "observer": None,
@@ -45,11 +46,18 @@ _WRITER_STOP_EVENT = threading.Event()
 _WRITER_STATS: dict[str, int] = {
     "enqueued": 0,
     "written": 0,
+    "filtered": 0,
     "dropped": 0,
     "max_depth": 0,
     "write_retries": 0,
     "write_failures": 0,
 }
+_WRITER_TIMESTAMPS: dict[str, str | None] = {
+    "last_enqueued_at": None,
+    "last_written_at": None,
+    "last_filtered_at": None,
+}
+_DB_INIT_STATE: dict[str, bool] = {}
 
 _DB_CONNECT_TIMEOUT_SECONDS = 5.0
 _DB_BUSY_TIMEOUT_MS = 2000
@@ -76,6 +84,13 @@ _RECEIPT_EVENT_TYPES = {
     "replay_or_signature_failure",
     "continuity_degraded",
     "runtime_recovery_failure",
+    "runtime_state_transition",
+    "runtime_connection_lost",
+    "runtime_connection_restored",
+    "excessive_traversal",
+    "collector_failure",
+    "critical_filesystem_mutation",
+    "rollback_needed",
 }
 
 _EVENT_JSON_FIELDS = {"observed_vs_expected", "evidence_refs", "data"}
@@ -110,6 +125,11 @@ def _record_writer_metric(name: str, increment: int = 1) -> None:
         return
     with _WRITER_LOCK:
         _WRITER_STATS[name] = _WRITER_STATS.get(name, 0) + increment
+
+
+def _record_writer_timestamp(name: str) -> None:
+    with _WRITER_LOCK:
+        _WRITER_TIMESTAMPS[name] = _now_iso_timestamp()
 
 
 def _track_queue_depth() -> None:
@@ -249,6 +269,10 @@ def _ensure_event_columns(conn: sqlite3.Connection) -> None:
 def init_db() -> None:
     db_path = _resolve_db_path()
     _ensure_db_directory(db_path)
+    db_key = str(db_path)
+    with _DB_INIT_LOCK:
+        if _DB_INIT_STATE.get(db_key):
+            return
 
     def _create_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
@@ -305,6 +329,8 @@ def init_db() -> None:
 
     _run_with_retries(_migrate, db_path)
     _configure_db(db_path)
+    with _DB_INIT_LOCK:
+        _DB_INIT_STATE[db_key] = True
 
 
 def _json_dumps(value: Any, default: Any) -> str:
@@ -508,6 +534,7 @@ def _db_writer_loop(event_queue: "queue.Queue[dict[str, Any]]") -> None:
                     session_count=payload.get("session_count", 0),
                 )
             _record_writer_metric("written")
+            _record_writer_timestamp("last_written_at")
         except Exception as exc:
             record_type = payload.get("record_type") if isinstance(payload, dict) else None
             record_event_write_failure("db_writer", exc, record_type=record_type)
@@ -579,10 +606,55 @@ def get_writer_metrics() -> dict[str, int]:
         return dict(_WRITER_STATS)
 
 
+def _latest_event_timestamps() -> dict[str, Any]:
+    db_path = _resolve_db_path()
+    if not db_path.exists():
+        return {
+            "last_event_at": None,
+            "last_event_id": None,
+            "last_event_type": None,
+            "last_event_error": None,
+        }
+    try:
+        def _select(conn: sqlite3.Connection):
+            return conn.execute(
+                """
+                SELECT id, timestamp, event_type
+                FROM events
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+        row = _run_with_retries(_select, db_path)
+    except Exception as exc:
+        return {
+            "last_event_at": None,
+            "last_event_id": None,
+            "last_event_type": None,
+            "last_event_error": _runtime_error_payload("latest_event", exc),
+        }
+    if row is None:
+        return {
+            "last_event_at": None,
+            "last_event_id": None,
+            "last_event_type": None,
+            "last_event_error": None,
+        }
+    row_dict = dict(row)
+    return {
+        "last_event_at": row_dict.get("timestamp"),
+        "last_event_id": row_dict.get("id"),
+        "last_event_type": row_dict.get("event_type"),
+        "last_event_error": None,
+    }
+
+
 def get_writer_health() -> dict[str, Any]:
     with _WRITER_LOCK:
         thread = _WRITER_STATE.get("thread")
         metrics = dict(_WRITER_STATS)
+        timestamps = dict(_WRITER_TIMESTAMPS)
         last_error = dict(_WRITER_STATE["last_error"]) if isinstance(_WRITER_STATE.get("last_error"), dict) else None
     running = thread is not None and thread.is_alive()
     queue_depth = _EVENT_QUEUE.qsize()
@@ -622,6 +694,7 @@ def get_writer_health() -> dict[str, Any]:
         "queue": queue_metrics,
         "stop_requested": _WRITER_STOP_EVENT.is_set(),
         "metrics": metrics,
+        "timestamps": timestamps,
         "last_error": last_error,
         "degradation": {
             "degraded": bool(degradation_reasons),
@@ -646,7 +719,24 @@ def _queue_db_write(payload: dict[str, Any]) -> None:
         logging.warning("Event write queue full; dropped record %s", payload.get("record_type"))
     else:
         _record_writer_metric("enqueued")
+        _record_writer_timestamp("last_enqueued_at")
         _track_queue_depth()
+
+
+def should_ignore_filesystem_event_path(path: str | os.PathLike[str], *, db_path: Path | None = None) -> bool:
+    try:
+        event_path = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    resolved_db = (db_path or _resolve_db_path()).expanduser().resolve()
+    if event_path == resolved_db:
+        return True
+    db_sidecars = {
+        resolved_db.with_name(resolved_db.name + "-wal"),
+        resolved_db.with_name(resolved_db.name + "-shm"),
+        resolved_db.with_name(resolved_db.name + "-journal"),
+    }
+    return event_path in db_sidecars
 
 
 def insert_event(
@@ -667,6 +757,14 @@ def insert_event(
     data: dict[str, Any] | None = None,
 ) -> None:
     init_db()
+    if (
+        source_surface == "filesystem_watcher"
+        and event_type in {"created", "modified", "deleted"}
+        and should_ignore_filesystem_event_path(path)
+    ):
+        _record_writer_metric("filtered")
+        _record_writer_timestamp("last_filtered_at")
+        return
     if not session_id:
         session_id = DEFAULT_SESSION_ID
     event_timestamp = timestamp or _now_iso_timestamp()
@@ -707,6 +805,14 @@ def insert_event_async(
     data: dict[str, Any] | None = None,
 ) -> None:
     init_db()
+    if (
+        source_surface == "filesystem_watcher"
+        and event_type in {"created", "modified", "deleted"}
+        and should_ignore_filesystem_event_path(path)
+    ):
+        _record_writer_metric("filtered")
+        _record_writer_timestamp("last_filtered_at")
+        return
     _queue_db_write(
         {
             "record_type": "event",
@@ -1090,7 +1196,9 @@ if FileSystemEventHandler is not None and Observer is not None:
             if not self._is_file_event(event):
                 return
             event_path = Path(event.src_path).resolve()
-            if event_path == self._db_path:
+            if should_ignore_filesystem_event_path(event_path, db_path=self._db_path):
+                _record_writer_metric("filtered")
+                _record_writer_timestamp("last_filtered_at")
                 return
             if ".git" in event_path.parts:
                 return
@@ -1213,6 +1321,7 @@ def get_watcher_status() -> dict[str, Any]:
 def get_runtime_status() -> dict[str, Any]:
     watcher = get_watcher_status()
     writer = get_writer_health()
+    latest_event = _latest_event_timestamps()
     reasons: list[dict[str, Any]] = []
     for name, state in (("watcher", watcher), ("writer", writer)):
         degradation = state.get("degradation")
@@ -1227,6 +1336,10 @@ def get_runtime_status() -> dict[str, Any]:
         "watcher": watcher,
         "writer": writer,
         "queue": writer.get("queue", {}),
+        "last_event_at": latest_event.get("last_event_at"),
+        "last_event_id": latest_event.get("last_event_id"),
+        "last_event_type": latest_event.get("last_event_type"),
+        "last_event_error": latest_event.get("last_event_error"),
         "degradation": {
             "degraded": bool(reasons),
             "reasons": reasons,

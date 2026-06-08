@@ -1,0 +1,38 @@
+{
+  "artifact_count": 6,
+  "artifacts": [
+    {
+      "bytes": 325,
+      "file": "chain_ids.json",
+      "sha256": "6f802845bb27ff08d516037a533f47f1a5d9dcf0e0ab900551fb37fdb24ecc6e"
+    },
+    {
+      "bytes": 391,
+      "file": "outcome.json",
+      "sha256": "29fad2f40ab13a968fec61420856097a201819098a3e867364c3b1b4bf8469eb"
+    },
+    {
+      "bytes": 387,
+      "file": "evidence_refs.json",
+      "sha256": "bb5623cc8f2c56cdbe98b798aceb0dc7b42ff5a8063f8021a0fe8130dd50962d"
+    },
+    {
+      "bytes": 33616,
+      "file": "incident_receipt.json",
+      "sha256": "8c1e8404c9e3d6b0fb46373602c5780ceecb717cc09edfee8f8e39bf8081a6b9"
+    },
+    {
+      "bytes": 422,
+      "file": "test_output.txt",
+      "sha256": "7ce422c811958f4bc4bb8990d5a483f1cbd4f4ecb4d3181fb8a11d5f370013c9"
+    },
+    {
+      "bytes": 689985,
+      "file": "operator_screenshot.png",
+      "sha256": "8eb229ec428a2398dd9c25167f90796663d2e773bf1c8c84201628e0a12e58f7"
+    }
+  ],
+  "captured_at_utc": "2026-05-29T23:19:42.252109+00:00",
+  "notes": "validation_only",
+  "validation_only": true
+}

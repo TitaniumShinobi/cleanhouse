@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CleanHouse App Security Center</title>
+<link rel="stylesheet" href="/css/investigations.css?v=5">
+</head>
+<body>
+<div class="app-shell">
+    <aside class="liquid-sidebar" aria-label="CleanHouse navigation">
+        <img class="sidebar-brand" src="/assets/fourstars.svg" alt="CleanHouse">
+        <nav class="sidebar-nav" aria-label="Primary">
+            <a class="nav-link active" href="#home" data-view="home" aria-label="Overview" data-label="Overview">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.25 19.5 6.5v5.75c0 4.7-3.05 7.45-7.5 8.5-4.45-1.05-7.5-3.8-7.5-8.5V6.5L12 3.25Z"/><path d="M8.75 12.25h6.5"/><path d="M10 15.25h4"/></svg>
+            </a>
+            <a class="nav-link" href="#applications" data-view="applications" aria-label="Applications" data-label="Applications">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h5v5H5z"/><path d="M14 5h5v5h-5z"/><path d="M5 14h5v5H5z"/><path d="M14 14h5v5h-5z"/></svg>
+            </a>
+            <a class="nav-link" href="#network" data-view="network" aria-label="Network" data-label="Network">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 18.75a6.75 6.75 0 1 0 0-13.5 6.75 6.75 0 0 0 0 13.5Z"/><path d="M5.75 9.5h12.5"/><path d="M5.75 14.5h12.5"/><path d="M12 5.25c1.75 1.7 2.55 3.95 2.55 6.75s-.8 5.05-2.55 6.75C10.25 17.05 9.45 14.8 9.45 12S10.25 6.95 12 5.25Z"/></svg>
+            </a>
+            <a class="nav-link" href="#files" data-view="files" aria-label="Files" data-label="Files">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.75 7.25h5.5l1.55 2h7.45v8.5h-14.5z"/><path d="M4.75 7.25v10.5"/></svg>
+            </a>
+        </nav>
+        <a class="advanced-entry" href="/dashboard" aria-label="Advanced" data-label="Advanced">
+            <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.75A3.25 3.25 0 1 0 12 15.25 3.25 3.25 0 0 0 12 8.75Z"/><path d="M19.25 12a7.2 7.2 0 0 0-.1-1.2l2.1-1.55-2-3.45-2.45 1a7.65 7.65 0 0 0-2.05-1.2L14.45 3h-4.9l-.3 2.6A7.65 7.65 0 0 0 7.2 6.8l-2.45-1-2 3.45 2.1 1.55a7.2 7.2 0 0 0 0 2.4l-2.1 1.55 2 3.45 2.45-1a7.65 7.65 0 0 0 2.05 1.2l.3 2.6h4.9l.3-2.6a7.65 7.65 0 0 0 2.05-1.2l2.45 1 2-3.45-2.1-1.55c.07-.4.1-.8.1-1.2Z"/></svg>
+        </a>
+    </aside>
+
+    <main class="main-canvas">
+        <div class="corner-actions" aria-label="CleanHouse controls">
+            <div id="notification-center" class="notification-center">
+            <button id="notification-center-button" class="notification-center-button" type="button" aria-label="Notification Center" aria-haspopup="menu" aria-expanded="false" aria-controls="notification-center-menu" data-label="Notification Center">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M18 16.25H6l1.25-1.7V10.5a4.75 4.75 0 0 1 9.5 0v4.05z"/>
+                    <path d="M10 18.25a2.2 2.2 0 0 0 4 0"/>
+                </svg>
+                <span id="notification-center-badge" class="notification-center-badge" hidden>0</span>
+            </button>
+            <section id="notification-center-menu" class="notification-dropdown" role="menu" aria-label="Notification Center" hidden>
+                <header>
+                    <strong>Notifications</strong>
+                    <small id="notification-center-count">No unread</small>
+                </header>
+                <div id="notification-list" class="notification-list">
+                    <p class="notification-empty">No live CleanHouse notifications.</p>
+                </div>
+            </section>
+            </div>
+        </div>
+        <section id="home" class="view-section home-view" data-view-panel="home">
+            <div class="hero-copy">
+                <h1 class="sr-only">CleanHouse security overview</h1>
+                <p class="section-kicker">Security at a glance</p>
+                <p>Scan your Mac and prove what your apps are doing.</p>
+            </div>
+
+            <div class="scan-orb">
+                <button id="system-scan-btn" class="scan-button" type="button">Scan</button>
+                <a class="custom-scan-link" href="#custom-scan" data-view="custom">Custom scan</a>
+            </div>
+
+            <div class="security-areas" aria-label="Security areas">
+                <button class="area-card" type="button" data-view="applications"><span>Applications</span><small id="apps-area-status">Loading apps</small></button>
+                <button class="area-card" type="button" data-view="files"><span>Files</span><small>Ready to check</small></button>
+                <button class="area-card" type="button" data-view="applications"><span>Processes</span><small>Inside Applications</small></button>
+                <button class="area-card" type="button" data-view="network"><span>Network</span><small id="network-area-status">Wireshark status pending</small></button>
+                <button class="area-card" type="button" data-view="custom"><span>Communications</span><small>Use app filters</small></button>
+            </div>
+
+            <section id="scan-results" class="result-strip" aria-label="Scan results" hidden>
+                <article><span>Status</span><strong id="scan-status">Unknown</strong></article>
+                <article><span>Findings</span><strong id="scan-findings">0</strong></article>
+                <article><span>Evidence</span><code id="scan-evidence">Unavailable</code></article>
+                <article><span>Receipt</span><code id="scan-receipt">Unavailable</code></article>
+                <article><span>Next Action</span><p id="scan-next-action">Run a scan.</p></article>
+            </section>
+        </section>
+
+        <section id="applications" class="view-section" data-view-panel="applications" hidden>
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Installed on this Mac</p>
+                    <h2>Applications</h2>
+                </div>
+                <button id="refresh-apps-btn" class="secondary-action" type="button">Refresh</button>
+            </div>
+            <div id="app-grid" class="app-grid" aria-label="Applications">
+                <div class="empty-state">Loading applications from this Mac...</div>
+            </div>
+        </section>
+
+        <section id="app-dashboard" class="view-section app-dashboard" data-view-panel="app-dashboard" hidden>
+            <p id="app-route-context" class="route-context" hidden></p>
+            <div class="section-head">
+                <div class="selected-app-head">
+                    <img id="selected-app-icon" class="selected-app-icon" alt="">
+                    <div>
+                        <p class="section-kicker">App security dashboard</p>
+                        <h2 id="selected-app-name">Application</h2>
+                        <p id="selected-app-subtitle">Identity pending</p>
+                    </div>
+                </div>
+                <div class="app-scan-actions">
+                    <button id="scan-app-btn" class="primary-action" type="button">Scan App</button>
+                    <button id="app-custom-scan-toggle" class="inline-scan-link" type="button">Custom scan</button>
+                </div>
+            </div>
+
+            <div class="dashboard-grid">
+                <article class="truth-panel">
+                    <h3>Identity</h3>
+                    <dl class="identity-list">
+                        <div><dt>Name</dt><dd id="app-identity-name">Unknown</dd></div>
+                        <div><dt>Bundle ID</dt><dd id="app-identity-bundle">Unknown</dd></div>
+                        <div><dt>Version</dt><dd id="app-identity-version">Unknown</dd></div>
+                        <div><dt>Path</dt><dd id="app-identity-path">Unknown</dd></div>
+                    </dl>
+                </article>
+                <article class="truth-panel">
+                    <h3>Status</h3>
+                    <dl class="identity-list">
+                        <div><dt>Running</dt><dd id="app-running-state">Unknown</dd></div>
+                        <div><dt>Audit</dt><dd id="app-audit-state">Unknown</dd></div>
+                        <div><dt>Badge</dt><dd id="app-badge-state">None</dd></div>
+                    </dl>
+                </article>
+                <article class="truth-panel">
+                    <h3>Permissions</h3>
+                    <p class="muted-copy">Permission evidence appears after an app scan.</p>
+                </article>
+            </div>
+
+            <article class="truth-panel">
+                <div class="panel-heading">
+                    <h3>Processes</h3>
+                    <span class="panel-note">At a glance</span>
+                </div>
+                <div id="app-process-list" class="process-list">
+                    <div class="empty-state">No app-owned processes observed yet.</div>
+                </div>
+                <p id="process-scan-status" class="status-line">Use Custom scan to select individual app processes or components.</p>
+            </article>
+
+            <article id="app-custom-scan-panel" class="truth-panel app-custom-scan-panel" hidden>
+                <div class="panel-heading">
+                    <h3>App custom scan</h3>
+                    <button id="scan-processes-btn" class="secondary-action" type="button">Scan Selected</button>
+                </div>
+                <p class="muted-copy">Select the specific processes or app components to scan.</p>
+                <div id="app-custom-process-list" class="process-list">
+                    <div class="empty-state">No app-owned processes observed yet.</div>
+                </div>
+                <p id="app-custom-scan-status" class="status-line">Choose at least one process or component.</p>
+            </article>
+
+            <article class="truth-panel" id="app-scan-result" hidden>
+                <h3 id="app-result-title">Scan result</h3>
+                <p id="app-result-summary">No app scan has run.</p>
+                <div id="app-finding-list" class="operator-findings"></div>
+            </article>
+
+            <section id="evidence" class="case-file-section" aria-labelledby="evidence-title" hidden>
+                <div class="section-heading">
+                    <h2 id="evidence-title">Evidence</h2>
+                    <p>Case file</p>
+                </div>
+                <div class="case-file">
+                    <details class="case-item" open>
+                        <summary>Timeline</summary>
+                        <div id="evidence-timeline" class="case-copy empty">Timeline evidence appears after a scan.</div>
+                    </details>
+                    <details class="case-item">
+                        <summary>Process Tree</summary>
+                        <div id="evidence-process" class="case-copy empty">Process evidence appears after a scan.</div>
+                    </details>
+                    <details class="case-item">
+                        <summary>File Activity</summary>
+                        <div id="evidence-file" class="case-copy empty">File evidence appears after a scan.</div>
+                    </details>
+                    <details class="case-item">
+                        <summary>Network</summary>
+                        <div id="evidence-network" class="case-copy empty">Network evidence appears after a scan.</div>
+                    </details>
+                    <details class="case-item">
+                        <summary>Receipt</summary>
+                        <div id="evidence-receipt" class="case-copy empty">Receipt artifact appears after a scan.</div>
+                    </details>
+                </div>
+            </section>
+        </section>
+
+        <section id="network" class="view-section" data-view-panel="network" hidden>
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Wireshark evidence engine</p>
+                    <h2>Network</h2>
+                </div>
+                <button id="scan-network-btn" class="primary-action" type="button">Scan Network</button>
+            </div>
+            <p id="network-route-context" class="route-context" hidden></p>
+            <div class="dashboard-grid">
+                <article class="truth-panel"><h3>Capture Engine</h3><p id="wireshark-message">Checking Wireshark...</p></article>
+                <article class="truth-panel"><h3>Interfaces</h3><p id="wireshark-permission">Unknown</p></article>
+                <article class="truth-panel"><h3>Fallback</h3><p id="wireshark-fallback">CleanHouse network metadata is fallback only.</p></article>
+            </div>
+            <div id="network-results" class="case-file"></div>
+        </section>
+
+        <section id="files" class="view-section" data-view-panel="files" hidden>
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">File evidence</p>
+                    <h2>Files</h2>
+                </div>
+                <button id="scan-files-btn" class="primary-action" type="button">Scan Files</button>
+            </div>
+            <p id="files-route-context" class="route-context" hidden></p>
+            <div class="dashboard-grid">
+                <article class="truth-panel"><h3>Watched Locations</h3><p>Home, application support, and CleanHouse evidence paths.</p></article>
+                <article class="truth-panel"><h3>Recent Activity</h3><p>Recent file events appear after scan.</p></article>
+                <article class="truth-panel"><h3>Integrity</h3><p>Deviation evidence appears when available.</p></article>
+            </div>
+            <p id="files-status" class="status-line">Ready to scan files.</p>
+        </section>
+
+        <section id="custom-scan" class="view-section" data-view-panel="custom" hidden>
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Custom scan</p>
+                    <h2>Select apps or filters</h2>
+                </div>
+                <button id="run-custom-scan-btn" class="primary-action" type="button">Scan Selected</button>
+            </div>
+            <div class="filter-row" aria-label="Custom scan filters">
+                <button type="button" data-filter="running">Running apps</button>
+                <button type="button" data-filter="new">New apps</button>
+                <button type="button" data-filter="communications">Communication apps</button>
+                <button type="button" data-filter="files">File apps</button>
+                <button type="button" data-filter="developer">Developer tools</button>
+                <button type="button" data-filter="network">Network-active apps</button>
+                <button type="button" data-filter="attention">Needs attention</button>
+            </div>
+            <div id="custom-app-list" class="custom-app-list"></div>
+            <p id="custom-scan-status" class="status-line">Choose apps or a filter.</p>
+        </section>
+    </main>
+</div>
+
+<script src="/js/api-client.js?v=2"></script>
+<script src="/js/investigations.js?v=4"></script>
+</body>
+</html>

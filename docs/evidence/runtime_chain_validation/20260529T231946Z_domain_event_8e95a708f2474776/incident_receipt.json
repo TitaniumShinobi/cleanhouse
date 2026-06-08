@@ -1,0 +1,327 @@
+{
+  "card": {
+    "card_id": "incident_receipt:qpb_case:e63e97791fab16d0",
+    "decision_path": {
+      "allowed_actions": [
+        "quarantine",
+        "purge",
+        "bless"
+      ],
+      "current_status": "quarantined",
+      "next_action": "purge"
+    },
+    "evidence": {
+      "history": [
+        {
+          "action": "detected",
+          "actor": "operator",
+          "case_id": "qpb_case:e63e97791fab16d0",
+          "evidence_refs": [
+            "local://cleanhouse/process/6211",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+            "local://cleanhouse/integrity/0a205e04f014fc47",
+            "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+            "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+          ],
+          "integrity": {
+            "root_hash": "a169b2da74b9eade6b0bbb5614b34937bc8e6981fc8aa62000b72de582880e5b"
+          },
+          "metadata": {
+            "source": "incident_receipt"
+          },
+          "status": "detected",
+          "target_scope": {
+            "paths": [
+              "new2.txt"
+            ],
+            "process_pids": [
+              6211
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:46.150072"
+        },
+        {
+          "action": "quarantine",
+          "actor": "operator",
+          "case_id": "qpb_case:e63e97791fab16d0",
+          "evidence_refs": [
+            "local://cleanhouse/process/6211",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+            "local://cleanhouse/integrity/0a205e04f014fc47",
+            "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+            "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+          ],
+          "integrity": {
+            "root_hash": "47fd46abe7f225dc87b036e36096c70ada4745f3265819be35b9d0dbe0f94e37"
+          },
+          "metadata": {},
+          "status": "quarantined",
+          "target_scope": {
+            "paths": [
+              "new2.txt"
+            ],
+            "process_pids": [
+              6211
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:46.212155"
+        }
+      ],
+      "refs": [
+        "local://cleanhouse/process/6211",
+        "local://cleanhouse/pattern/platform/code",
+        "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+        "local://cleanhouse/integrity/0a205e04f014fc47",
+        "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+        "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+      ]
+    },
+    "incident": {
+      "acknowledged_at": "2026-05-29T19:19:46.480602",
+      "created_at": "2026-05-29T19:19:44.101780",
+      "evidence_refs": [
+        "local://cleanhouse/process/6211",
+        "local://cleanhouse/pattern/platform/code",
+        "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+        "local://cleanhouse/integrity/0a205e04f014fc47",
+        "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+        "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+      ],
+      "history": [
+        {
+          "action": "created",
+          "actor": "policy_engine",
+          "evidence_refs": [
+            "local://cleanhouse/process/6211",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+            "local://cleanhouse/integrity/0a205e04f014fc47",
+            "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+            "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+          ],
+          "incident_id": "incident:33bb0027b2edb521",
+          "integrity": {
+            "root_hash": "e94252e11492bc459b0a80981949d2f703cb714c4b1d6a063dde8bd0f471ab52"
+          },
+          "note": "incident created from domain event",
+          "state": "open",
+          "timestamp": "2026-05-29T19:19:44.101793"
+        },
+        {
+          "action": "review",
+          "actor": "operator",
+          "evidence_refs": [
+            "local://cleanhouse/process/6211",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+            "local://cleanhouse/integrity/0a205e04f014fc47",
+            "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+            "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+          ],
+          "incident_id": "incident:33bb0027b2edb521",
+          "integrity": {
+            "root_hash": "e44ace21d0090153cd93c1d4d47836209d3084bda6fc029df5238569c551f9d2"
+          },
+          "note": "qpb quarantine -> quarantined",
+          "state": "in_review",
+          "timestamp": "2026-05-29T19:19:46.480609"
+        }
+      ],
+      "id": "incident:33bb0027b2edb521",
+      "metadata": {
+        "domain": "agent_firewall",
+        "policy_decision_id": "policy_decision:9011be8f1ff2daf6",
+        "surface": "process_integrity_collector"
+      },
+      "next_action": "inspect lineage",
+      "notification_type": "incident_action_required",
+      "objective_id": null,
+      "resolved_at": null,
+      "session_id": "runtime-global",
+      "severity": "warning",
+      "source_event_id": "domain_event:8e95a708f2474776",
+      "status": "in_review",
+      "summary": "agent_firewall/process_integrity_collector: process_file_integrity_suspicion",
+      "title": "process_file_integrity_suspicion",
+      "updated_at": "2026-05-29T19:19:46.480602"
+    },
+    "objective_id": "None",
+    "outcome": {
+      "action": "quarantine",
+      "actor": "operator",
+      "details": {},
+      "integrity_root_hash": "47fd46abe7f225dc87b036e36096c70ada4745f3265819be35b9d0dbe0f94e37",
+      "note": "",
+      "status": "quarantined",
+      "timestamp": "2026-05-29T19:19:46.212155"
+    },
+    "proposal": {
+      "applied_at": "2026-05-29T19:19:46.094821",
+      "created_at": "2026-05-29T19:19:45.632069",
+      "evidence_refs": [
+        "local://cleanhouse/process/6211",
+        "local://cleanhouse/pattern/platform/code",
+        "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+        "local://cleanhouse/integrity/0a205e04f014fc47",
+        "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+        "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+      ],
+      "id": "proposal:c34cd8346a93bbb4",
+      "metadata": {
+        "applied_ops": [
+          {
+            "op": "write_file",
+            "path": "new2.txt"
+          }
+        ],
+        "incident_id": "incident:33bb0027b2edb521",
+        "repo_path": "/private/tmp/cleanhouse-runtime-validation",
+        "synthetic": false,
+        "undo_records": [
+          {
+            "before_content_b64": "bmV3Cg==",
+            "before_exists": true,
+            "op": "write_file",
+            "path": "new2.txt"
+          }
+        ],
+        "workflow": "standalone_incident_receipt"
+      },
+      "objective_id": null,
+      "operations": [
+        {
+          "content": "standalone_incident_receipt=true\nsession_id=runtime-global\nsignal_source=process_integrity_collector\nsignal_pid=6211\nsignal_process=/Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=gpu-process --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --gpu-preferences=SAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAAwAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990997080739 --seatbelt-client=38\nsuspicion_reason=process 6211 (/Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=gpu-process --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --gpu-preferences=SAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAAwAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990997080739 --seatbelt-client=38) correlated with integrity new on new2.txt\ncreated_at=2026-05-29T19:19:44.039428\n",
+          "op": "write_file",
+          "path": "new2.txt"
+        }
+      ],
+      "proposal_type": "incident_receipt_stage",
+      "reason": "incident receipt file-integrity marker staged for mediation evidence",
+      "rollback_id": "op_rollback:b54c4255086279a9",
+      "session_id": "runtime-global",
+      "status": "applied",
+      "target_scope": {
+        "paths": [
+          "new2.txt"
+        ],
+        "process_pids": [
+          6211
+        ]
+      },
+      "undone_at": null,
+      "updated_at": "2026-05-29T19:19:46.094821"
+    },
+    "qpb_case": {
+      "created_at": "2026-05-29T19:19:46.150041",
+      "evidence_refs": [
+        "local://cleanhouse/process/6211",
+        "local://cleanhouse/pattern/platform/code",
+        "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+        "local://cleanhouse/integrity/0a205e04f014fc47",
+        "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+        "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+      ],
+      "history": [
+        {
+          "action": "detected",
+          "actor": "operator",
+          "case_id": "qpb_case:e63e97791fab16d0",
+          "evidence_refs": [
+            "local://cleanhouse/process/6211",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+            "local://cleanhouse/integrity/0a205e04f014fc47",
+            "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+            "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+          ],
+          "integrity": {
+            "root_hash": "a169b2da74b9eade6b0bbb5614b34937bc8e6981fc8aa62000b72de582880e5b"
+          },
+          "metadata": {
+            "source": "incident_receipt"
+          },
+          "status": "detected",
+          "target_scope": {
+            "paths": [
+              "new2.txt"
+            ],
+            "process_pids": [
+              6211
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:46.150072"
+        },
+        {
+          "action": "quarantine",
+          "actor": "operator",
+          "case_id": "qpb_case:e63e97791fab16d0",
+          "evidence_refs": [
+            "local://cleanhouse/process/6211",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:6b2f638f2c2eff3a.json",
+            "local://cleanhouse/integrity/0a205e04f014fc47",
+            "local://cleanhouse/evidence/integrity:490e9d9e4077cc1f.json",
+            "local://cleanhouse/correlation/process-integrity/4d0396cc368f0f04"
+          ],
+          "integrity": {
+            "root_hash": "47fd46abe7f225dc87b036e36096c70ada4745f3265819be35b9d0dbe0f94e37"
+          },
+          "metadata": {},
+          "status": "quarantined",
+          "target_scope": {
+            "paths": [
+              "new2.txt"
+            ],
+            "process_pids": [
+              6211
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:46.212155"
+        }
+      ],
+      "id": "qpb_case:e63e97791fab16d0",
+      "metadata": {
+        "incident_id": "incident:33bb0027b2edb521",
+        "proposal_id": "proposal:c34cd8346a93bbb4",
+        "repo_path": "/private/tmp/cleanhouse-runtime-validation",
+        "signal_pid": 6211,
+        "signal_process": "/Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=gpu-process --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --gpu-preferences=SAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAAwAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990997080739 --seatbelt-client=38",
+        "signal_source": "process_integrity_collector",
+        "suspicion_reason": "process 6211 (/Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=gpu-process --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --gpu-preferences=SAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAAwAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990997080739 --seatbelt-client=38) correlated with integrity new on new2.txt",
+        "synthetic": false,
+        "workflow": "standalone_incident_receipt"
+      },
+      "objective_id": "None",
+      "session_id": "runtime-global",
+      "status": "quarantined",
+      "target_scope": {
+        "paths": [
+          "new2.txt"
+        ],
+        "process_pids": [
+          6211
+        ]
+      },
+      "updated_at": "2026-05-29T19:19:46.212151"
+    },
+    "session_id": "runtime-global",
+    "suspicion": {
+      "process_pids": [
+        6211
+      ],
+      "reason": "process 6211 (/Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=gpu-process --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --gpu-preferences=SAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAAwAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990997080739 --seatbelt-client=38) correlated with integrity new on new2.txt",
+      "signal_pid": 6211,
+      "signal_process": "/Applications/Codex.app/Contents/Frameworks/Codex Helper.app/Contents/MacOS/Codex Helper --type=gpu-process --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --gpu-preferences=SAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAAwAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAQAAAAAAAAABAAAAAAAAAACAAAAAAAAAAIAAAAAAAAAA== --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990997080739 --seatbelt-client=38",
+      "signal_source": "process_integrity_collector",
+      "target_path": "new2.txt",
+      "target_paths": [
+        "new2.txt"
+      ],
+      "title": "Agent Firewall + File Integrity Suspicion"
+    },
+    "workflow": "standalone_incident_receipt"
+  },
+  "status": "ok"
+}

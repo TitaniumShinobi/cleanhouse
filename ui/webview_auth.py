@@ -542,20 +542,11 @@ class WebViewAuth:
                 """Handle login request."""
                 try:
                     content_length = int(self.headers['Content-Length'])
-                    post_data = self.rfile.read(content_length)
-                    data = json.loads(post_data.decode('utf-8'))
-                    
-                    # Here you would validate credentials
-                    # For now, we'll simulate a successful login
+                    self.rfile.read(content_length)
                     response = {
-                        'success': True,
-                        'user': {
-                            'email': data['email'],
-                            'name': data['email'].split('@')[0],
-                            'role': 'user'
-                        }
+                        'success': False,
+                        'error': 'Authentication unavailable in legacy webview mode. Enable backend auth routes.'
                     }
-                    
                     self._send_json_response(response)
                     
                 except Exception as e:

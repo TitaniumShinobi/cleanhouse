@@ -11,9 +11,11 @@ Canonical scope and evidence docs live in `canon/`.
 ## Canon
 
 - [Scope Gate](canon/SCOPE_GATE.md)
+- [RTOS Foundation](canon/CLEANHOUSE_RTOS_FOUNDATION.md)
+- [Canonical Runtime Spine](canon/CLEANHOUSE_CANONICAL_RUNTIME_SPINE.md)
 - [CleanHouse Rubric](canon/CLEANHOUSE_RUBRIC.md)
-- [Evidence Audit](canon/CLEANHOUSE_EVIDENCE_AUDIT.md)
 - [Master Implementation Plan](canon/CLEANHOUSE_MASTER_IMPLEMENTATION_PLAN.md)
+- [Evidence Audit](canon/CLEANHOUSE_EVIDENCE_AUDIT.md)
 - [Gate A Claim Ledger](canon/CLEANHOUSE_GATE_A_CLAIM_LEDGER.md)
 - [Frozen Checksums](canon/FROZEN_CHECKSUMS.md)
 - [Legacy Rubric Text](canon/Rubric.txt)
@@ -36,6 +38,7 @@ Canonical scope and evidence docs live in `canon/`.
 - [Enterprise Runtime Accountability Thesis](evidence/CLEANHOUSE_ENTERPRISE_RUNTIME_ACCOUNTABILITY_THESIS.md)
 - [Evidence First Conclusion](evidence/CLEANHOUSE_EVIDENCE_FIRST_CONCLUSION.md)
 - [Evidence First Thesis](evidence/CLEANHOUSE_EVIDENCE_FIRST_THESIS.md)
+- [Notification Spam Test Report](evidence/CLEANHOUSE_NOTIFICATION_SPAM_TEST_REPORT.md)
 - [Runtime Accountability Research](evidence/CLEANHOUSE_RUNTIME_ACCOUNTABILITY_RESEARCH.md)
 - [Tier 1 Runtime Accountability Audit](evidence/CLEANHOUSE_TIER1_RUNTIME_ACCOUNTABILITY_AUDIT.md)
 

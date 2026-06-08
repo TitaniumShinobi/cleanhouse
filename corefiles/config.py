@@ -32,7 +32,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # Update all log and baseline file paths
 SECURITY_LOG_FILE = LOG_DIR / "security_scan.log"
 INTEGRITY_BASELINE_FILE = LOG_DIR / "integrity_baseline.json"
-UNAUTHORIZED_SESSIONS_FILE = LOG_DIR / "unauthorized_sessions.json"
+OBSERVED_SESSION_EVENTS_FILE = LOG_DIR / "observed_session_events.json"
 
 # Cloud storage settings
 CLOUD_BACKUP_ENABLED = True
@@ -69,8 +69,8 @@ NOTIFICATION_DURATION = 5  # seconds
 
 # Service settings
 SERVICE_NAME = "CleanHouseService"
-SERVICE_DISPLAY_NAME = "CleanHouse Security Service"
-SERVICE_DESCRIPTION = "Monitors and protects against unauthorized AI processes"
+SERVICE_DISPLAY_NAME = "CleanHouse Observability Service"
+SERVICE_DESCRIPTION = "Monitors local process, file integrity, and network signals"
 SERVICE_START_TYPE = "auto"
 
 # Security pattern categories
@@ -307,6 +307,47 @@ SETTINGS_DEFAULTS = {
         "max_retries": 3,
         "retry_delay_seconds": 5,
     },
+    "automation": {
+        "qpb_enabled": True,
+        "presence_mode_enabled": True,
+        "auto_adjust_enabled": False,
+        "auto_sort_enabled": False,
+        "cleaner_enabled": False,
+    },
+    "qpb_policy": {
+        "purge_requires_confirmation": True,
+        "auto_quarantine_high_risk": False,
+        "auto_purge_high_risk": False,
+        "quarantine_confidence_min": 0.8,
+        "purge_confidence_min": 0.95,
+    },
+    "mediator": {
+        "default_mode": "suggest_confirm",
+        "undo_enabled": True,
+        "approval_timeout_seconds": 900,
+    },
+    "notification_policy": {
+        "hard_interrupt_enabled": True,
+        "hard_interrupt_types": [
+            "session_started",
+            "session_ended",
+            "scope_drift_detected",
+        ],
+        "hard_interrupt_reminder_seconds": 300,
+        "visibility_risk_seconds": 180,
+        "critical_reminder_interval_seconds": 300,
+        "dedupe_window_seconds": 120,
+        "fanout_all_backends": True,
+        "backend_order": "osascript_first",
+        "runtime_resumed_enabled": True,
+        "codex_activity_native_enabled": False,
+        "max_native_reminders_per_notification": 2,
+        "cooldown_bypass_types": [
+            "session_started",
+            "session_ended",
+            "scope_drift_detected",
+        ],
+    },
 }
 
 # Schema versions for persisted artifacts (bump on breaking format changes)
@@ -322,9 +363,19 @@ SCHEMA_VERSIONS: Dict[str, int] = {
     "receipt_bundle": 1,
     "operator_session": 1,
     "operator_notification": 1,
+    "runtime_recovery": 1,
     "continuity_pin": 1,
     "continuity_decision": 1,
     "continuity_search": 1,
+    "active_context": 1,
+    "native_notification_cooldown": 1,
+    "qpb_case": 1,
+    "operation_proposal": 1,
+    "domain_event": 1,
+    "incident_case": 1,
+    "notification_delivery": 1,
+    "policy_decision": 1,
+    "action_outcome": 1,
 }
 
 # Local persistence directory for versioned event/timeline/receipt artifacts
@@ -343,15 +394,33 @@ ARTIFACT_SUBDIRS: Dict[str, str] = {
     "receipt_bundle": "receipt_bundles",
     "operator_session": "operator_sessions",
     "operator_notification": "operator_notifications",
+    "runtime_recovery": "runtime_recoveries",
     "continuity_pin": "continuity_pins",
     "continuity_decision": "continuity_decisions",
     "continuity_search": "continuity_searches",
+    "active_context": "active_contexts",
+    "native_notification_cooldown": "native_notification_cooldowns",
+    "qpb_case": "qpb_cases",
+    "operation_proposal": "operation_proposals",
+    "domain_event": "domain_events",
+    "incident_case": "incident_cases",
+    "notification_delivery": "notification_deliveries",
+    "policy_decision": "policy_decisions",
+    "action_outcome": "action_outcomes",
 }
 
 # Artifact types eligible for retention pruning
 RETAINED_ARTIFACT_TYPES: set[str] = {
     "snapshot", "diff", "timeline", "receipt", "report", "event", "approval", "receipt_replay", "receipt_bundle",
-    "operator_session", "operator_notification", "continuity_pin", "continuity_decision", "continuity_search",
+    "operator_session", "operator_notification", "runtime_recovery", "continuity_pin", "continuity_decision", "continuity_search", "active_context",
+    "native_notification_cooldown",
+    "qpb_case",
+    "operation_proposal",
+    "domain_event",
+    "incident_case",
+    "notification_delivery",
+    "policy_decision",
+    "action_outcome",
 }
 
 # Max retention events kept in the audit trail

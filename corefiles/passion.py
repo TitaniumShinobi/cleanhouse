@@ -7,7 +7,6 @@
 # ╭─────────────────────────────── Imports ──────────────────────────────────╮
 from pathlib import Path
 import logging
-import shutil
 import re
 from datetime import datetime
 from typing import Dict, List, Set, Optional
@@ -285,32 +284,13 @@ def restore_file(path: Path):
             logging.error(f"No write permission for directory {path.parent}")
             return False
             
-        # Create temporary backup of current file
-        temp_backup = path.with_suffix(path.suffix + '.temp')
-        try:
-            shutil.copy2(path, temp_backup)
-            
-            # Attempt to restore from cloud storage
-            # This is a placeholder for cloud storage integration
-            # The actual implementation will depend on the cloud storage solution
-            logging.info(f"Attempting to restore {path} from cloud storage")
-            
-            # For now, we'll just log that we would restore from cloud
-            logging.info(f"Would restore {path} from cloud storage")
-            
-            # Clean up temporary backup
-            temp_backup.unlink()
-            return True
-                
-        except Exception as e:
-            logging.error(f"Error during restoration of {path}: {e}")
-            # Attempt to restore from temporary backup if it exists
-            if temp_backup.exists():
-                try:
-                    shutil.copy2(temp_backup, path)
-                except Exception as restore_error:
-                    logging.error(f"Failed to restore from temporary backup: {restore_error}")
-            return False
+        # This path is intentionally unsupported until a verified cloud restore
+        # source is implemented. Never report success without a real restore.
+        logging.warning(
+            "Cloud restore is unsupported in this path; no restore was performed for %s",
+            path,
+        )
+        return False
             
     except Exception as e:
         logging.error(f"Unexpected error in restore_file: {e}")

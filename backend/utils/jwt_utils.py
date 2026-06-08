@@ -1,14 +1,35 @@
-"""
-JWT Token Utilities for CleanHouse Authentication
+"""JWT token utilities for CleanHouse authentication.
+
+Primary path uses PyJWT when available. A deterministic local HS256 fallback is
+provided so local runtime/tests are not blocked when the optional dependency is
+missing.
 """
 
-import jwt
-import secrets
-import os
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Optional, Dict, Any
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+import json
 import logging
+import os
+import secrets
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+try:
+    import jwt as pyjwt  # type: ignore[import-not-found]
+except Exception:
+    pyjwt = None
+
+
+class _ExpiredSignatureError(Exception):
+    """Fallback compatibility error for expired tokens."""
+
+
+class _InvalidTokenError(Exception):
+    """Fallback compatibility error for malformed/invalid tokens."""
 
 # JWT configuration
 JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
@@ -41,12 +62,65 @@ def generate_jwt_token(user_data: Dict[str, Any]) -> str:
         'email': user_data.get('email'),
         'full_name': user_data.get('full_name', ''),
         'role': user_data.get('role', 'user'),
-        'iat': datetime.utcnow(),  # Issued at
-        'exp': datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)  # Expiration
+        'iat': datetime.now(timezone.utc),  # Issued at
+        'exp': datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)  # Expiration
     }
-    
-    token = jwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
-    return token
+    if pyjwt is not None:
+        token = pyjwt.encode(payload, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+        return str(token)
+    return _fallback_encode(payload, JWT_SECRET_KEY)
+
+
+def _urlsafe_b64encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _urlsafe_b64decode(value: str) -> bytes:
+    padding = "=" * ((4 - len(value) % 4) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+
+
+def _fallback_encode(payload: Dict[str, Any], secret: str) -> str:
+    header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
+    payload_copy = dict(payload)
+    for key in ("iat", "exp"):
+        value = payload_copy.get(key)
+        if isinstance(value, datetime):
+            payload_copy[key] = int(value.timestamp())
+
+    signing_input = ".".join(
+        (
+            _urlsafe_b64encode(json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")),
+            _urlsafe_b64encode(json.dumps(payload_copy, separators=(",", ":"), sort_keys=True).encode("utf-8")),
+        )
+    )
+    signature = hmac.new(secret.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
+    return f"{signing_input}.{_urlsafe_b64encode(signature)}"
+
+
+def _fallback_decode(token: str, secret: str) -> Dict[str, Any]:
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise _InvalidTokenError("wrong JWT segment count")
+        header_b64, payload_b64, sig_b64 = parts
+        signing_input = f"{header_b64}.{payload_b64}"
+        expected = hmac.new(secret.encode("utf-8"), signing_input.encode("ascii"), hashlib.sha256).digest()
+        actual = _urlsafe_b64decode(sig_b64)
+        if not hmac.compare_digest(actual, expected):
+            raise _InvalidTokenError("signature mismatch")
+
+        payload = json.loads(_urlsafe_b64decode(payload_b64).decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise _InvalidTokenError("payload is not an object")
+        exp = payload.get("exp")
+        if isinstance(exp, (int, float)) and datetime.now(timezone.utc).timestamp() > float(exp):
+            raise _ExpiredSignatureError("token expired")
+        return payload
+    except (_ExpiredSignatureError, _InvalidTokenError):
+        raise
+    except Exception as exc:
+        raise _InvalidTokenError(str(exc)) from exc
 
 def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
     """
@@ -59,13 +133,21 @@ def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
         dict: Decoded payload if valid, None if invalid
     """
     try:
-        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        if pyjwt is not None:
+            payload = pyjwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        else:
+            payload = _fallback_decode(token, JWT_SECRET_KEY)
         return payload
-    except jwt.ExpiredSignatureError:
-        logging.warning("JWT token expired")
-        return None
-    except jwt.InvalidTokenError as e:
-        logging.warning(f"Invalid JWT token: {e}")
+    except Exception as exc:
+        expired_type = getattr(pyjwt, "ExpiredSignatureError", _ExpiredSignatureError)
+        invalid_type = getattr(pyjwt, "InvalidTokenError", _InvalidTokenError)
+        if isinstance(exc, expired_type):
+            logging.warning("JWT token expired")
+            return None
+        if isinstance(exc, invalid_type):
+            logging.warning("Invalid JWT token: %s", exc)
+            return None
+        logging.warning("JWT token verification error: %s", exc)
         return None
 
 def get_user_from_token(token: str) -> Optional[Dict[str, Any]]:
@@ -103,8 +185,8 @@ def refresh_jwt_token(token: str) -> Optional[str]:
         return None
     
     # Check if token expires within 24 hours
-    exp_time = datetime.utcfromtimestamp(payload.get('exp', 0))
-    time_until_expiry = exp_time - datetime.utcnow()
+    exp_time = datetime.fromtimestamp(float(payload.get('exp', 0)), tz=timezone.utc)
+    time_until_expiry = exp_time - datetime.now(timezone.utc)
     
     if time_until_expiry.total_seconds() < 24 * 3600:  # Less than 24 hours
         # Generate new token with same user data
@@ -117,4 +199,3 @@ def refresh_jwt_token(token: str) -> Optional[str]:
         return generate_jwt_token(user_data)
     
     return token  # Token still valid, return original
-

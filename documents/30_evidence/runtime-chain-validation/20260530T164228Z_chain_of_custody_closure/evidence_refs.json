@@ -1,0 +1,14 @@
+{
+  "refs": [
+    "local://cleanhouse/prompt/<prompt_id>",
+    "local://cleanhouse/objective/<objective_id>",
+    "local://cleanhouse/timeline/<event_id>",
+    "local://cleanhouse/intervention-workflow/<workflow_id>",
+    "local://cleanhouse/approval-queue/<approval_id>",
+    "local://cleanhouse/operation-proposal/<proposal_id>",
+    "local://cleanhouse/receipt/<receipt_id>",
+    "local://cleanhouse/receipt-replay/<receipt_id>",
+    "local://cleanhouse/receipt-bundle/<receipt_id>"
+  ],
+  "note": "all custody hop refs are local://cleanhouse/ traceable links"
+}

@@ -263,7 +263,8 @@ class SurveillanceDetector:
         # Determine if surveillance is detected
         surveillance_detected = self._is_surveillance_detected()
 
-        # Send notification if surveillance detected
+        # Legacy direct desktop notification path is disabled by default to avoid
+        # untethered alert spam; CleanHouse operator notifications are the canonical path.
         if surveillance_detected:
             summary = self.findings['summary']
             critical = summary.get('critical', 0)
@@ -271,9 +272,15 @@ class SurveillanceDetector:
 
             notification_title = "🚨 Surveillance Detected"
             notification_message = f"Found {critical} critical and {high} high-severity surveillance indicators on your system!"
-
-            self._send_macos_notification(notification_title, notification_message, sound="Basso")
-            self._log("Surveillance detected - notification sent", "ALERT")
+            legacy_notifications_enabled = os.getenv("CLEANHOUSE_LEGACY_SURVEILLANCE_NOTIFICATIONS", "").strip().lower() in {"1", "true", "yes", "on"}
+            if legacy_notifications_enabled:
+                self._send_macos_notification(notification_title, notification_message, sound="Basso")
+                self._log("Surveillance detected - notification sent", "ALERT")
+            else:
+                self._log(
+                    "Surveillance detected - desktop notification suppressed (use operator notification pipeline)",
+                    "ALERT",
+                )
         else:
             self._log("No surveillance detected", "INFO")
 

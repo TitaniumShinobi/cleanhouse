@@ -1,0 +1,9 @@
+{
+  "refs": [
+    "local://cleanhouse/approval-queue/<approval_id>",
+    "local://cleanhouse/approval-mediation-proof/<approval_id>",
+    "local://cleanhouse/receipt/<receipt_id>",
+    "local://cleanhouse/receipt-bundle/<bundle_id>"
+  ],
+  "note": "approval_id, receipt_id, and bundle_id are generated deterministically per run content"
+}

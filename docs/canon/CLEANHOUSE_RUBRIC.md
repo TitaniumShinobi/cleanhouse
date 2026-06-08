@@ -679,7 +679,7 @@ Every release or handoff must include this table:
 | Signed evidence |  |  |  |  |
 | Approval mediation |  |  |  |  |
 | Rollback |  |  |  |  |
-| Notifications |  |  |  |  |
+| Notifications |  | `python3 -m scripts.native_notification_runtime_probe --output /tmp/cleanhouse-native-notification-probe.json` plus runtime notification artifacts (`incident_key`, `visibility_proof`, `native_delivery_result`) | Visibility proof may stay `transport_only` until operator acknowledgement confirms interruption | Required (YYYY-MM-DD) |
 | Operational view |  |  |  |  |
 | Operator sovereignty |  |  |  |  |
 | Cloud/agent/automation adapters |  |  |  |  |
@@ -690,6 +690,7 @@ Every release or handoff must include this table:
 
 Blank scores are not allowed in a completion report. Unknowns must be written as
 unknowns.
+Notification verification is incomplete unless `Last verified` is an explicit date and the probe artifact is attached.
 
 ## Final Standard
 

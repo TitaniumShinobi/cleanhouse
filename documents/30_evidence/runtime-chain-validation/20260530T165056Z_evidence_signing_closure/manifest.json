@@ -1,0 +1,11 @@
+{
+  "schema": "cleanhouse.runtime_chain_validation.v1",
+  "run_id": "20260530T165056Z_evidence_signing_closure",
+  "blocker": "evidence_signing",
+  "files": [
+    "test_output_core.txt",
+    "test_output_verify_cli.txt",
+    "outcome.json",
+    "evidence_refs.json"
+  ]
+}

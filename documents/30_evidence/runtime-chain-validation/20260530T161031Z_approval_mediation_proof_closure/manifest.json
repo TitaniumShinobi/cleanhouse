@@ -1,0 +1,10 @@
+{
+  "schema": "cleanhouse.runtime_chain_validation.v1",
+  "run_id": "20260530T161031Z_approval_mediation_proof_closure",
+  "blocker": "approval_mediation",
+  "files": [
+    "test_output.txt",
+    "outcome.json",
+    "evidence_refs.json"
+  ]
+}

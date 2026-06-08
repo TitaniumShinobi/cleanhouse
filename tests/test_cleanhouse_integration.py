@@ -12,6 +12,9 @@ import sys
 import types
 import tempfile
 import json
+import plistlib
+import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,7 +36,9 @@ if "flask" not in sys.modules:
             return func
 
     flask_stub.Blueprint = _Blueprint
+    flask_stub.Response = lambda payload="", mimetype=None, **kwargs: {"payload": payload, "mimetype": mimetype, **kwargs}
     flask_stub.jsonify = lambda obj=None, **kwargs: obj if obj is not None else kwargs
+    flask_stub.send_file = lambda path, mimetype=None, **kwargs: {"path": path, "mimetype": mimetype, **kwargs}
     flask_stub.request = types.SimpleNamespace(args={}, headers={})
     sys.modules["flask"] = flask_stub
 
@@ -110,16 +115,435 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         fixture_path = Path(__file__).resolve().parent / "fixtures" / "avatar_runtime_drift_probe.json"
         return json.loads(fixture_path.read_text(encoding="utf-8"))
 
+    def test_app_security_center_is_app_first_and_preserves_advanced_dashboard(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        html = (repo_root / "frontend" / "investigations.html").read_text(encoding="utf-8")
+        js = (repo_root / "frontend" / "js" / "investigations.js").read_text(encoding="utf-8")
+        css = (repo_root / "frontend" / "css" / "investigations.css").read_text(encoding="utf-8")
+        dashboard_html = (repo_root / "frontend" / "dashboard.html").read_text(encoding="utf-8")
+        server_py = (repo_root / "backend" / "server.py").read_text(encoding="utf-8")
+        cleanhouse_py = (repo_root / "backend" / "api" / "cleanhouse.py").read_text(encoding="utf-8")
+
+        self.assertIn("@app.route('/investigations')", server_py)
+        self.assertIn("@app.route('/applications')", server_py)
+        self.assertIn("@app.route('/network')", server_py)
+        self.assertIn("@app.route('/files')", server_py)
+        self.assertIn("@app.route('/custom-scan')", server_py)
+        self.assertIn('@bp.route("/cleanhouse/applications"', cleanhouse_py)
+        self.assertIn('@bp.route("/cleanhouse/scan/system"', cleanhouse_py)
+        self.assertIn('@bp.route("/cleanhouse/network/wireshark"', cleanhouse_py)
+        self.assertIn('@bp.route("/cleanhouse/investigations/application"', cleanhouse_py)
+        self.assertIn("<title>CleanHouse App Security Center</title>", html)
+        self.assertIn("Scan your Mac and prove what your apps are doing.", html)
+        self.assertIn('id="system-scan-btn"', html)
+        self.assertIn(">Scan</button>", html)
+        self.assertIn("Custom scan", html)
+        for area in ("Applications", "Files", "Processes", "Network", "Communications"):
+            self.assertIn(area, html)
+        self.assertIn('id="app-grid"', html)
+        self.assertIn('class="app-grid"', html)
+        self.assertIn('id="app-dashboard"', html)
+        self.assertIn("Scan App", html)
+        self.assertIn("App custom scan", html)
+        self.assertIn("Scan Selected", html)
+        self.assertIn('id="app-custom-scan-toggle"', html)
+        self.assertIn('id="app-custom-scan-panel"', html)
+        self.assertIn('id="app-custom-process-list"', html)
+        self.assertIn("Inside Applications", html)
+        self.assertIn("Wireshark evidence engine", html)
+        self.assertIn("Scan Network", html)
+        self.assertIn("Scan Files", html)
+        self.assertIn("Select apps or filters", html)
+        self.assertIn("Communication apps", html)
+        self.assertIn('aria-label="Overview"', html)
+        self.assertIn('class="corner-actions"', html)
+        self.assertIn('class="notification-center-button"', html)
+        self.assertIn('id="notification-center-button"', html)
+        self.assertIn('id="notification-center-menu"', html)
+        self.assertIn('id="notification-list"', html)
+        self.assertIn('aria-haspopup="menu"', html)
+        self.assertNotIn('href="/dashboard#notification-tray-panel"', html)
+        self.assertIn('id="notification-center-badge"', html)
+        self.assertIn('id="app-route-context"', html)
+        self.assertIn('id="network-route-context"', html)
+        self.assertIn('id="files-route-context"', html)
+        self.assertIn('class="sidebar-brand"', html)
+        self.assertIn('/assets/fourstars.svg', html)
+        self.assertIn('class="sr-only">CleanHouse security overview</h1>', html)
+        self.assertNotIn('<h1>CleanHouse</h1>', html)
+        self.assertNotIn('<span class="brand-mark"', html)
+        self.assertIn('aria-label="Applications"', html)
+        self.assertIn('aria-label="Network"', html)
+        self.assertIn('aria-label="Files"', html)
+        self.assertIn('aria-label="Advanced"', html)
+        self.assertIn('data-label="Overview"', html)
+        self.assertNotIn('title="Overview"', html)
+        self.assertNotIn('title="Applications"', html)
+        self.assertNotIn('title="Network"', html)
+        self.assertNotIn('title="Files"', html)
+        self.assertNotIn('title="Advanced"', html)
+        self.assertNotIn('class="nav-link" href="#custom-scan"', html)
+        for first_screen_label in ("Incidents", "Reports", "History"):
+            self.assertNotIn(first_screen_label, html)
+        self.assertNotIn("What do you want to check?", html)
+        self.assertNotIn("Why is Terminal busy?", html)
+        self.assertNotIn('id="investigation-question"', html)
+        self.assertNotIn("What seems wrong?", html)
+        self.assertNotIn("Investigate Selected", html)
+        self.assertNotIn("Observed applications and processes", html)
+        self.assertNotIn("No action yet", html)
+        self.assertNotIn("investigation-cards", html)
+        self.assertNotIn("investigation-card", html)
+        self.assertNotIn("Question ->", html)
+
+        self.assertIn("getApplications", js)
+        self.assertIn("renderApplications", js)
+        self.assertIn("openAppDashboard", js)
+        self.assertIn("scanSelectedApp", js)
+        self.assertIn("scanSelectedProcesses", js)
+        self.assertIn("toggleAppCustomScan", js)
+        self.assertIn("processRows(selectedApp, false)", js)
+        self.assertIn("processRows(selectedApp, true)", js)
+        self.assertIn("runSystemScan", js)
+        self.assertIn("loadWireshark", js)
+        self.assertIn("loadNotificationBadge", js)
+        self.assertIn("renderNotificationCenter", js)
+        self.assertIn("routeForNotification", js)
+        self.assertIn("openNotification", js)
+        self.assertIn("findAppForNotification", js)
+        self.assertIn("ackNotification", js)
+        self.assertIn("getRuntime", js)
+        self.assertIn("customFilterMatch", js)
+        self.assertIn("runApplicationInvestigation", js)
+        self.assertIn("target: selectedApp.path", js)
+        self.assertIn("evidence_artifact_path", js)
+        self.assertIn("receipt_artifact_path", js)
+        self.assertIn(".liquid-sidebar", css)
+        self.assertIn("grid-template-columns: 64px minmax(0, 1fr)", css)
+        self.assertIn(".nav-icon", css)
+        self.assertIn("background: transparent", css)
+        self.assertIn("box-shadow: none", css)
+        self.assertIn(".nav-link.active::before", css)
+        self.assertIn("content: attr(data-label)", css)
+        self.assertIn(".corner-actions", css)
+        self.assertIn(".notification-center-button", css)
+        self.assertIn(".notification-dropdown", css)
+        self.assertIn(".notification-item", css)
+        self.assertIn(".route-context", css)
+        self.assertIn(".notification-center-badge", css)
+        self.assertIn(".sidebar-brand", css)
+        self.assertNotIn("blur(28px) saturate(160%)", css)
+        self.assertNotIn("grid-template-columns: 230px minmax(0, 1fr)", css)
+        self.assertIn(".truth-panel", css)
+        self.assertIn(".app-grid", css)
+        self.assertIn(".app-card", css)
+        self.assertIn(".app-icon", css)
+        self.assertIn(".app-badge", css)
+        self.assertIn(".scan-button", css)
+        self.assertIn(".process-row", css)
+        self.assertIn(".app-scan-actions", css)
+        self.assertIn(".inline-scan-link", css)
+        self.assertIn(".app-custom-scan-panel", css)
+        self.assertIn(".case-file", css)
+        self.assertNotIn(".question-panel", css)
+        self.assertNotIn(".example-button", css)
+        self.assertNotIn(".investigation-card", css)
+        self.assertNotIn(".investigation-cards", css)
+        self.assertNotIn(".report-actions", css)
+        self.assertNotIn(".history-list", css)
+
+        self.assertIn('href="/investigations"', dashboard_html)
+        self.assertIn('href="/dashboard" aria-label="Advanced"', html)
+        self.assertNotIn("QPB Action Queue", html)
+        self.assertNotIn("Runtime Spine", html)
+        self.assertNotIn("Collector Manifest", html)
+        self.assertNotIn("Mediator Queue", html)
+
+    def test_application_inventory_auto_adopts_apps_with_badge_contract(self):
+        from backend.api import cleanhouse as cleanhouse_module
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            app_dir = root / "Example.app"
+            contents = app_dir / "Contents"
+            contents.mkdir(parents=True)
+            (contents / "Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleName": "Example",
+                "CFBundleDisplayName": "Example",
+                "CFBundleIdentifier": "com.example.cleanhouse",
+                "CFBundleShortVersionString": "1.2.3",
+            }))
+            state_path = root / "state" / "apps.json"
+            with patch.object(cleanhouse_module, "APPLICATION_SEARCH_ROOTS", (root,)), patch.object(cleanhouse_module, "APPLICATION_TARGETS", {}), patch.object(cleanhouse_module, "_load_process_rows", return_value=[]), patch.dict("os.environ", {"CLEANHOUSE_APP_INVENTORY_PATH": str(state_path)}):
+                first = cleanhouse_module.list_applications_payload(refresh=True)
+                second = cleanhouse_module.list_applications_payload(refresh=True)
+
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(first["count"], 1)
+        self.assertEqual(first["apps"][0]["name"], "Example")
+        self.assertEqual(first["apps"][0]["bundle_id"], "com.example.cleanhouse")
+        self.assertEqual(first["apps"][0]["version"], "1.2.3")
+        self.assertIn("/cleanhouse/applications/", first["apps"][0]["icon_url"])
+        self.assertEqual(first["apps"][0]["badge"], "New")
+        self.assertEqual(first["apps"][0]["badge_count"], 1)
+        self.assertEqual(second["apps"][0]["badge"], "")
+        self.assertEqual(second["apps"][0]["badge_count"], 0)
+
+    def test_wireshark_status_contract_is_explicit(self):
+        from backend.api.cleanhouse import _wireshark_status_payload
+
+        payload = _wireshark_status_payload()
+        self.assertEqual(payload["engine"], "wireshark")
+        self.assertIn(payload["status"], {"available", "missing"})
+        self.assertIn("tshark", payload["message"].lower())
+        self.assertIn("fallback", payload)
+
+    def test_terminal_investigation_generates_openable_finding_with_artifacts(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        html = (repo_root / "frontend" / "investigations.html").read_text(encoding="utf-8")
+        js = (repo_root / "frontend" / "js" / "investigations.js").read_text(encoding="utf-8")
+        css = (repo_root / "frontend" / "css" / "investigations.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="app-finding-list"', html)
+        self.assertIn('id="app-scan-result"', html)
+        self.assertIn('id="evidence"', html)
+        self.assertIn("Scan App", html)
+        self.assertIn("renderAppScan", js)
+        self.assertIn("renderEvidence", js)
+        self.assertIn("scanSelectedApp", js)
+        self.assertIn("Status", js)
+        self.assertIn("Evidence Strength", js)
+        self.assertIn("evidence_artifact_path", js)
+        self.assertIn("receipt_artifact_path", js)
+        self.assertIn(".operator-finding-card", css)
+        self.assertIn(".finding-meta", css)
+
+        from backend.api.cleanhouse import run_application_investigation
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict("os.environ", {"CLEANHOUSE_INVESTIGATION_DIR": tmpdir}):
+            report = run_application_investigation({
+                "session_id": "finding-proof-session",
+                "question": "Why is Terminal busy?",
+                "target": "terminal",
+            })
+            evidence_path = Path(report["evidence"]["evidence_artifact_path"])
+            receipt_path = Path(report["evidence"]["receipt_artifact_path"])
+            self.assertTrue(evidence_path.exists())
+            self.assertTrue(receipt_path.exists())
+            evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+            receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+            self.assertIn("finding_objects", evidence_payload)
+            self.assertIn("finding_objects", receipt_payload)
+
+        self.assertEqual(report["status"], "ok")
+        self.assertGreaterEqual(len(report["finding_objects"]), 1)
+        finding = report["finding_objects"][0]
+        required_keys = {
+            "id",
+            "title",
+            "status",
+            "severity",
+            "confidence",
+            "evidence_strength",
+            "timestamp",
+            "timeline_anchor",
+            "observed",
+            "inferred",
+            "unknown",
+            "evidence_refs",
+            "receipt_ref",
+            "next_action",
+        }
+        self.assertTrue(required_keys.issubset(finding.keys()))
+        self.assertTrue(finding["title"])
+        self.assertNotIn(finding["title"], {"Terminal Runtime Activity", "Process Activity", "Application Behavior"})
+        self.assertIn(
+            finding["title"],
+            {
+                "Long-running Node Process",
+                "Node Process Running Under Terminal",
+                "Unexpected Child Process Spawned",
+                "Repeated File Access Pattern",
+                "Active Network Connection During Idle State",
+                "Persistent Background Activity Detected",
+                "Terminal Activity Could Not Be Confirmed",
+            },
+        )
+        self.assertEqual(finding["status"], "open")
+        self.assertIn(finding["severity"], {"Low", "Medium", "High"})
+        self.assertIsInstance(finding["confidence"], int)
+        self.assertIn(finding["evidence_strength"], {"Limited", "Moderate", "Strong"})
+        self.assertTrue(finding["evidence_strength_basis"])
+        self.assertTrue(finding["timestamp"])
+        self.assertTrue(finding["timeline_anchor"])
+        self.assertGreaterEqual(len(finding["observed"]), 1)
+        self.assertTrue(finding["evidence_refs"])
+        self.assertTrue(finding["receipt_ref"])
+        self.assertTrue(finding["next_action"])
+
+    def test_status_ready_reflects_runtime_self_deviation(self):
+        from backend.api import cleanhouse as cleanhouse_module
+        from backend import runtime_supervisor
+
+        runtime_payload = {
+            "runtime_state": "unhealthy",
+            "operator_ready": False,
+            "reason_codes": ["runtime_memory_ceiling_exceeded"],
+            "resource_guard": {
+                "status": "blocked",
+                "action": "hard_stop",
+                "reason_codes": ["runtime_memory_ceiling_exceeded"],
+            },
+            "self_deviation": {
+                "id": "runtime_self_deviation:test",
+                "evidence_artifact_path": "/tmp/evidence.json",
+                "receipt_artifact_path": "/tmp/receipt.json",
+            },
+        }
+        with patch.object(cleanhouse_module, "request", types.SimpleNamespace(args={"ready": "1"})), patch.object(
+            cleanhouse_module, "jsonify", side_effect=lambda payload=None, **kwargs: payload if payload is not None else kwargs
+        ), patch.object(runtime_supervisor, "current_runtime_payload", return_value=runtime_payload), patch.object(
+            cleanhouse_module, "_event_spine_payload", return_value={"status": "ok", "degradation": {"degraded": False, "reasons": []}}
+        ):
+            payload = cleanhouse_module.status()
+
+        self.assertEqual(payload["status"], "degraded")
+        self.assertFalse(payload["ready"])
+        self.assertIn("runtime_memory_ceiling_exceeded", payload["reason_codes"])
+        self.assertIn("CleanHouse is unhealthy", payload["operator_warning"])
+        self.assertEqual(payload["runtime"]["self_deviation"]["id"], "runtime_self_deviation:test")
+
+    def test_application_investigation_timeout_records_runtime_self_deviation(self):
+        from backend.api import cleanhouse as cleanhouse_module
+
+        def slow_investigation(payload):
+            time.sleep(0.05)
+            return {"status": "ok"}
+
+        with tempfile.TemporaryDirectory() as runtime_dir, patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_RUNTIME_DIR": runtime_dir,
+                "CLEANHOUSE_INVESTIGATION_TIMEOUT_SECONDS": "0.001",
+            },
+        ), patch.object(cleanhouse_module, "run_application_investigation", side_effect=slow_investigation):
+            report = cleanhouse_module.run_application_investigation_with_timeout({
+                "session_id": "timeout-proof-session",
+                "question": "Why did Terminal hang?",
+                "target": "terminal",
+            })
+
+        self.assertEqual(report["status"], "degraded")
+        self.assertIn("investigation_timeout", report["reason_codes"])
+        self.assertEqual(report["self_deviation"]["comparison_result"], "Investigation Timeout")
+        self.assertEqual(report["self_deviation"]["mitigation_action"], "investigation_pause")
+        self.assertTrue(report["next_action"])
+        evidence_path = Path(report["evidence"]["evidence_artifact_path"])
+        receipt_path = Path(report["evidence"]["receipt_artifact_path"])
+        self.assertTrue(evidence_path.is_file())
+        self.assertTrue(receipt_path.is_file())
+        evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+        receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(evidence_payload["comparison_result"], "Investigation Timeout")
+        self.assertEqual(receipt_payload["id"], report["self_deviation"]["id"])
+
+    def test_official_signup_uses_cleanhouse_auth_canon(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        auth_root = repo_root.parent / "auth"
+        signup_html = (repo_root / "frontend" / "signup.html").read_text(encoding="utf-8")
+        auth_js = (repo_root / "frontend" / "js" / "auth.js").read_text(encoding="utf-8")
+        auth_css = (repo_root / "frontend" / "css" / "auth.css").read_text(encoding="utf-8")
+        auth_api = (repo_root / "backend" / "api" / "auth.py").read_text(encoding="utf-8")
+        server_py = (repo_root / "backend" / "server.py").read_text(encoding="utf-8")
+        simple_webview_auth = (repo_root / "ui" / "simple_webview_auth.py").read_text(encoding="utf-8")
+        cleanhouse_config_path = auth_root / "config" / "cleanhouse.json"
+        cleanhouse_auth_config = json.loads(cleanhouse_config_path.read_text(encoding="utf-8"))
+
+        self.assertIn('class="official-signup-form"', signup_html)
+        self.assertIn('id="turnstile-widget"', signup_html)
+        self.assertIn('id="turnstile-helper"', signup_html)
+        self.assertIn('/legal/terms', signup_html)
+        self.assertIn('/legal/privacy', signup_html)
+        self.assertIn('/legal/eeccd', signup_html)
+        self.assertIn("Continue with Google", signup_html)
+        self.assertIn("Continue with Microsoft", signup_html)
+        self.assertIn("Continue with Apple", signup_html)
+        self.assertIn("Continue with GitHub", signup_html)
+        self.assertIn('id="oauth-google" onclick="signInWithGoogle()" disabled aria-disabled="true"', signup_html)
+        self.assertIn('id="oauth-microsoft" onclick="signInWithMicrosoft()" disabled aria-disabled="true"', signup_html)
+        self.assertIn('id="oauth-apple" onclick="signInWithApple()" disabled aria-disabled="true"', signup_html)
+        self.assertIn('id="oauth-github" onclick="signInWithGithub()" disabled aria-disabled="true"', signup_html)
+        self.assertNotIn('id="role"', signup_html)
+        self.assertNotIn("Select your role", signup_html)
+
+        self.assertIn("TURNSTILE_SCRIPT_SRC", auth_js)
+        self.assertIn("postAuth('/createAccount'", auth_js)
+        self.assertIn("turnstileToken", auth_js)
+        self.assertIn("consent: consentPayload()", auth_js)
+        self.assertIn("loadAuthConfig()", auth_js)
+        self.assertIn("function updateSignupOauthState()", auth_js)
+        self.assertIn("button.disabled = !accepted", auth_js)
+        self.assertIn("addEventListener('change', updateSignupOauthState)", auth_js)
+        self.assertIn(".official-signup-form", auth_css)
+        self.assertIn(".consent-group", auth_css)
+        self.assertIn("appearance: none", auth_css)
+        self.assertIn("min-height: 46px", auth_css)
+        self.assertIn(".oauth-btn:disabled", auth_css)
+
+        self.assertIn("@app.route('/legal/terms')", server_py)
+        self.assertIn("@app.route('/legal/privacy')", server_py)
+        self.assertIn("@app.route('/legal/eeccd')", server_py)
+        self.assertIn("CLEANHOUSE_TERMS_OF_SERVICE.md", server_py)
+        self.assertIn("CLEANHOUSE_PRIVACY_NOTICE.md", server_py)
+        self.assertIn("CLEANHOUSE_EUROPEAN_ELECTRONIC_COMMUNICATIONS_CODE_DISCLOSURE.md", server_py)
+
+        self.assertIn("_verify_turnstile_token", auth_api)
+        self.assertIn("TURNSTILE_SECRET_KEY", auth_api)
+        self.assertIn("turnstileToken", auth_api)
+        self.assertIn("cleanhouse:terms", auth_api)
+        self.assertIn("cleanhouse:privacy", auth_api)
+        self.assertIn("cleanhouse:eeccd", auth_api)
+
+        self.assertIn("/legal/terms", simple_webview_auth)
+        self.assertIn("/legal/privacy", simple_webview_auth)
+        self.assertIn("/legal/eeccd", simple_webview_auth)
+        self.assertIn("turnstileToken", simple_webview_auth)
+        self.assertNotIn("Turnstile disabled", simple_webview_auth)
+        self.assertNotIn("AI-friendly signup", simple_webview_auth)
+        self.assertNotIn('id="role"', simple_webview_auth)
+        self.assertNotIn("Select your role", simple_webview_auth)
+
+        self.assertEqual(cleanhouse_auth_config["app"]["id"], "cleanhouse")
+        self.assertEqual(cleanhouse_auth_config["redirects"]["postLoginPath"], "/dashboard")
+        self.assertIn("http://localhost:3333", cleanhouse_auth_config["allowedOrigins"])
+        self.assertIn("http://127.0.0.1:3333", cleanhouse_auth_config["allowedOrigins"])
+        self.assertTrue(cleanhouse_auth_config["turnstile"]["required"])
+        self.assertTrue(cleanhouse_auth_config["turnstile"]["enabled"])
+        doc_keys = {doc["key"] for doc in cleanhouse_auth_config["docs"]}
+        self.assertEqual(doc_keys, {"cleanhouse:terms", "cleanhouse:privacy", "cleanhouse:eeccd"})
+        provider_ids = {provider["provider"] for provider in cleanhouse_auth_config["providers"]}
+        self.assertEqual(provider_ids, {"google", "microsoft", "apple", "github"})
+
     def test_dashboard_receipt_scope_panel_exposes_receipt_evidence(self):
         repo_root = Path(__file__).resolve().parents[1]
+        login_html = (repo_root / "frontend" / "login.html").read_text(encoding="utf-8")
         html = (repo_root / "frontend" / "dashboard.html").read_text(encoding="utf-8")
         js = (repo_root / "frontend" / "js" / "dashboard.js").read_text(encoding="utf-8")
         api_js = (repo_root / "frontend" / "js" / "api-client.js").read_text(encoding="utf-8")
         auth_js = (repo_root / "frontend" / "js" / "auth.js").read_text(encoding="utf-8")
         css = (repo_root / "frontend" / "css" / "dashboard.css").read_text(encoding="utf-8")
+        auth_css = (repo_root / "frontend" / "css" / "auth.css").read_text(encoding="utf-8")
         runtime_gate = (repo_root / "scripts" / "tier1_runtime_gate.py").read_text(encoding="utf-8")
+        legacy_signup_py = (repo_root / "ui" / "signup.py").read_text(encoding="utf-8")
+        legacy_signup_webview_py = (repo_root / "ui" / "signup_webview.py").read_text(encoding="utf-8")
+        legacy_simple_webview_auth_py = (repo_root / "ui" / "simple_webview_auth.py").read_text(encoding="utf-8")
+        legacy_webview_auth_py = (repo_root / "ui" / "webview_auth.py").read_text(encoding="utf-8")
+        server_py = (repo_root / "backend" / "server.py").read_text(encoding="utf-8")
 
         self.assertIn('id="receipt-scope-panel"', html)
+        self.assertIn('class="brand-wordmark"', login_html)
+        self.assertIn('/assets/cleanhouse.png', login_html)
+        self.assertNotIn("Test API Connection", login_html)
         self.assertIn('id="scope-cluster-count"', html)
         self.assertIn('id="receipt-scope-body"', html)
         self.assertIn('id="operator-workstation"', html)
@@ -127,6 +551,12 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn('id="operator-session-input"', html)
         self.assertIn('id="objective-declaration-form"', html)
         self.assertIn('id="objective-text"', html)
+        self.assertIn("const AUTH_BASE_PATH = '/api/auth'", auth_js)
+        self.assertIn("postAuth('/login'", auth_js)
+        self.assertIn("/oauth/${encodeURIComponent(provider)}", auth_js)
+        self.assertNotIn("showError('Authentication backend unavailable. Enable auth routes and retry.');", auth_js)
+        self.assertIn("os.environ.get('CLEANHOUSE_ENABLE_AUTH', '1')", server_py)
+        self.assertIn("{'0', 'false', 'no', 'off'}", server_py)
         self.assertIn('id="objective-scope"', html)
         self.assertIn('id="objective-context"', html)
         self.assertIn('id="objective-tool"', html)
@@ -134,9 +564,16 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn('id="operational-presence-panel"', html)
         self.assertIn('id="operational-presence-state"', html)
         self.assertIn('id="operational-presence-body"', html)
+        self.assertIn('id="active-context-panel"', html)
+        self.assertIn('id="active-context-state"', html)
+        self.assertIn('id="active-context-body"', html)
+        self.assertIn('id="active-context-follow-btn"', html)
         self.assertIn('id="native-report-panel"', html)
         self.assertIn('id="native-report-count"', html)
         self.assertIn('id="native-report-body"', html)
+        self.assertIn('id="runtime-presence-panel"', html)
+        self.assertIn('id="runtime-presence-count"', html)
+        self.assertIn('id="runtime-presence-body"', html)
         self.assertIn('id="continuity-provenance-panel"', html)
         self.assertIn('id="continuity-provenance-state"', html)
         self.assertIn('id="continuity-provenance-body"', html)
@@ -166,7 +603,10 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("fetchReceiptScope(currentSessionId)", js)
         self.assertIn("fetchWorkstation(currentSessionId)", js)
         self.assertIn("fetchNativeReports()", js)
+        self.assertIn("fetchRuntime()", js)
         self.assertIn("function renderWorkstation(data)", js)
+        self.assertIn("function renderRuntime(runtime)", js)
+        self.assertIn("function focusRuntimeNotification(notificationId)", js)
         self.assertIn("function renderOperationalPresence(presence)", js)
         self.assertIn("function renderNativeReports(reports)", js)
         self.assertIn("function openStoredReport(reportId)", js)
@@ -197,6 +637,7 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("data.operational_presence", js)
         self.assertIn("function declareObjective(event)", js)
         self.assertIn("window.CleanHouseAPI.submitPrompt", js)
+        self.assertIn("window.CleanHouseAPI.startObjective", js)
         self.assertIn("function startSelectedSession()", js)
         self.assertIn("startOperatorSession", js)
         self.assertIn("function renderObjectiveFeed(objectives)", js)
@@ -264,6 +705,7 @@ class CleanHouseIntegrationTests(unittest.TestCase):
 
         self.assertIn("async getReceiptReplay(receiptId)", api_js)
         self.assertIn("async submitPrompt(text", api_js)
+        self.assertIn("async startObjective(sessionId", api_js)
         self.assertIn("options = {}", api_js)
         self.assertIn("payload.prompt_type", api_js)
         self.assertIn("payload.parent_intervention_id", api_js)
@@ -278,6 +720,10 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("/cleanhouse/session/stop", api_js)
         self.assertIn("async getWorkstation(sessionId", api_js)
         self.assertIn("/cleanhouse/workstation", api_js)
+        self.assertIn("async getActiveContext(refresh", api_js)
+        self.assertIn("/cleanhouse/active-context", api_js)
+        self.assertIn("async setActiveContextFollow(enabled)", api_js)
+        self.assertIn("async ignoreActiveContext(dedupeKey", api_js)
         self.assertIn("async getContinuity(sessionId", api_js)
         self.assertIn("/cleanhouse/continuity", api_js)
         self.assertIn("async pinContinuityContext(sessionId", api_js)
@@ -287,6 +733,7 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("async searchContinuity(sessionId", api_js)
         self.assertIn("/cleanhouse/continuity/search", api_js)
         self.assertIn("async getStatus(refresh", api_js)
+        self.assertIn("async getRuntime()", api_js)
         self.assertIn("async getCollectorManifest(refresh", api_js)
         self.assertIn("function cleanHouseHttpOrigin()", api_js)
         self.assertIn("window.location.origin", api_js)
@@ -306,10 +753,15 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("/cleanhouse/login-report", api_js)
         self.assertIn("dashboardRedirectWithLoginReport", auth_js)
         self.assertIn("data.login_report", auth_js)
+        self.assertIn("AUTH_UNAVAILABLE_MESSAGE", auth_js)
+        self.assertNotIn("admin@cleanhouse.local' && password === 'admin123'", auth_js)
 
         self.assertIn("#receipt-scope-panel", css)
+        self.assertIn("backdrop-filter: blur(28px) saturate(145%)", auth_css)
+        self.assertIn(".brand-wordmark", auth_css)
         self.assertIn(".workstation", css)
         self.assertIn(".presence-panel", css)
+        self.assertIn(".active-context-panel", css)
         self.assertIn(".continuity-panel", css)
         self.assertIn(".continuity-row", css)
         self.assertIn(".continuity-actions", css)
@@ -357,6 +809,13 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn('"/cleanhouse/receipt-bundle?', runtime_gate)
         self.assertIn('"no_browser_operator_verification": True', runtime_gate)
         self.assertIn('"browser_automation_used": False', runtime_gate)
+
+        self.assertNotIn("Fallback simulation", legacy_signup_py)
+        self.assertNotIn("Fallback simulation", legacy_simple_webview_auth_py)
+        self.assertNotIn("simulate a successful login", legacy_webview_auth_py)
+        self.assertNotIn("simulate success", legacy_signup_webview_py)
+        self.assertIn("Authentication backend unavailable", legacy_signup_py)
+        self.assertIn("Authentication backend unavailable", legacy_simple_webview_auth_py)
 
     def test_acceptance_chain_success_declared_prompt_command_diff_network(self):
         import tempfile

@@ -1,10 +1,14 @@
 import json
 import base64
+import hashlib
+import hmac
 import unittest
 import sys
 import types
 import os
 import tempfile
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,6 +34,18 @@ if "flask" not in sys.modules:
     flask_stub.request = types.SimpleNamespace(args={}, headers={})
     sys.modules["flask"] = flask_stub
 
+if "jwt" not in sys.modules:
+    jwt_stub = types.ModuleType("jwt")
+
+    class _JwtError(Exception):
+        pass
+
+    jwt_stub.ExpiredSignatureError = _JwtError
+    jwt_stub.InvalidTokenError = _JwtError
+    jwt_stub.encode = lambda payload, secret, algorithm=None: "stub-jwt"
+    jwt_stub.decode = lambda token, secret, algorithms=None: {"user_id": "stub-user"}
+    sys.modules["jwt"] = jwt_stub
+
 from backend.api import cleanhouse as cleanhouse_module
 from backend.api import cleanhouse_monitoring as monitoring_module
 from backend.api.cleanhouse_monitoring import (
@@ -37,11 +53,13 @@ from backend.api.cleanhouse_monitoring import (
     CleanHouseEvent,
     EvidenceRef,
     IntentRecord,
+    LoginReportCoordinator,
     PersistenceBackend,
     SessionEnvelope,
 )
-from corefiles.collectors.command_observer import get_observer
+from corefiles.collectors.command_observer import CommandResult, get_observer
 from corefiles import config
+from corefiles.notifications import NotificationManager
 
 
 class FakeAdapter:
@@ -166,8 +184,12 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self._data_tmp = tempfile.TemporaryDirectory()
         self._old_data_dir = config.DATA_DIR
         self._old_native_notifications = os.environ.get("CLEANHOUSE_NATIVE_NOTIFICATIONS")
+        self._old_active_context_codex = os.environ.get("CLEANHOUSE_ACTIVE_CONTEXT_CODEX")
+        self._old_presence_mode = os.environ.get("CLEANHOUSE_PRESENCE_MODE")
         config.DATA_DIR = Path(self._data_tmp.name) / "data"
         os.environ["CLEANHOUSE_NATIVE_NOTIFICATIONS"] = "0"
+        os.environ["CLEANHOUSE_ACTIVE_CONTEXT_CODEX"] = "0"
+        os.environ["CLEANHOUSE_PRESENCE_MODE"] = "0"
         cleanhouse_module.request = types.SimpleNamespace(
             args={},
             headers={},
@@ -180,6 +202,14 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
             os.environ.pop("CLEANHOUSE_NATIVE_NOTIFICATIONS", None)
         else:
             os.environ["CLEANHOUSE_NATIVE_NOTIFICATIONS"] = self._old_native_notifications
+        if self._old_active_context_codex is None:
+            os.environ.pop("CLEANHOUSE_ACTIVE_CONTEXT_CODEX", None)
+        else:
+            os.environ["CLEANHOUSE_ACTIVE_CONTEXT_CODEX"] = self._old_active_context_codex
+        if self._old_presence_mode is None:
+            os.environ.pop("CLEANHOUSE_PRESENCE_MODE", None)
+        else:
+            os.environ["CLEANHOUSE_PRESENCE_MODE"] = self._old_presence_mode
         self._data_tmp.cleanup()
 
     def _set_request_json(self, payload):
@@ -208,6 +238,13 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         body, status = response
         self.assertEqual(status, 400)
         self.assertIn(reason, body.get("message", ""))
+
+    def _unwrap_response_tuple(self, response):
+        self.assertIsInstance(response, tuple, response)
+        body, status = response
+        if hasattr(body, "get_json"):
+            body = body.get_json()
+        return body, status
 
     def test_local_origin_cors_header_is_set(self):
         response = type("Resp", (), {"headers": {}})()
@@ -240,6 +277,7 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
             "anomalies": {"status": "critical", "issues": [{"id": "anomalies:1", "source": "anomalies", "severity": "critical", "message": "anom", "detectedAt": "2026-04-17T00:00:00"}]},
         }
         fake = FakeAdapter(payload)
+        self._set_request_args({"full": "1"})
 
         with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=fake):
             response = cleanhouse_module.status()
@@ -251,12 +289,90 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertIn("sections", body["data"])
         self.assertEqual(fake.calls[0][0], "status")
 
+    def test_status_fast_path_uses_runtime_supervisor_payload(self):
+        self._set_request_args({})
+        runtime_payload = {
+            "status": "healthy",
+            "runtime_state": "healthy",
+            "operator_ready": True,
+            "reason_codes": [],
+            "supervisor": {"pid": 111},
+            "backend": {"pid": 222},
+            "listener": {"pids": [222]},
+            "heartbeat": {"at": "2026-05-30T00:00:00Z"},
+            "last_probe": {"status": "ok"},
+            "interpreter": {},
+            "last_start_attempt": {},
+            "blocked_recovery": {},
+            "recovery_receipts": ["runtime_recovery:abc123"],
+            "state_path": "/tmp/state.json",
+            "updated_at": "2026-05-30T00:00:00Z",
+        }
+        with patch("backend.runtime_supervisor.current_runtime_payload", return_value=runtime_payload):
+            response = cleanhouse_module.status()
+
+        self.assertIn(response["status"], {"safe", "warning"})
+        self.assertEqual(response["response_mode"], "fast")
+        self.assertEqual(response["data"]["runtime"]["runtime_state"], "healthy")
+        self.assertEqual(response["data"]["runtime"]["recovery_receipts"][0]["id"], "runtime_recovery:abc123")
+        self.assertIn("event_writer", response["data"]["collector_manifest"]["surfaces"])
+        self.assertIn("filesystem_watcher", response["data"]["collector_manifest"]["surfaces"])
+        self.assertEqual(
+            response["data"]["collector_manifest"]["notification_policy_contract"]["codex_prompt_sent"],
+            "persist_only",
+        )
+
+    def test_operator_fast_routes_degrade_without_adapter_when_supervisor_unavailable(self):
+        def fail_if_adapter_constructed():
+            raise AssertionError("fast operator routes must not construct monitoring adapter")
+
+        with patch(
+            "backend.runtime_supervisor.current_runtime_payload",
+            side_effect=RuntimeError("supervisor down"),
+        ), patch.object(
+            cleanhouse_module,
+            "get_cleanhouse_monitoring_adapter",
+            side_effect=fail_if_adapter_constructed,
+        ):
+            self._set_request_args({})
+            status_response = cleanhouse_module.status()
+            runtime_response = cleanhouse_module.runtime()
+            workstation_response = cleanhouse_module.workstation()
+
+        self.assertEqual(status_response["response_mode"], "fast")
+        self.assertEqual(status_response["status"], "critical")
+        self.assertEqual(status_response["data"]["runtime"]["runtime_state"], "unhealthy")
+        self.assertEqual(
+            status_response["data"]["runtime"]["reason_codes"],
+            ["runtime_supervisor_unavailable"],
+        )
+
+        self.assertEqual(runtime_response["response_mode"], "fast")
+        self.assertEqual(runtime_response["status"], "unhealthy")
+        self.assertEqual(runtime_response["runtime_state"], "unhealthy")
+        self.assertFalse(runtime_response["operator_ready"])
+        self.assertEqual(runtime_response["reason_codes"], ["runtime_supervisor_unavailable"])
+
+        self.assertEqual(workstation_response["response_mode"], "fast")
+        self.assertEqual(workstation_response["runtime_state"], "unhealthy")
+        self.assertFalse(workstation_response["operator_ready"])
+        self.assertEqual(workstation_response["deviation"]["status"], "degraded")
+        self.assertEqual(
+            workstation_response["deviation"]["reason_codes"],
+            ["runtime_supervisor_unavailable"],
+        )
+
     def test_ready_status_remains_readiness_only(self):
         self._set_request_args({"ready": "1"})
 
         response = cleanhouse_module.status()
 
-        self.assertEqual(response, {"status": "ok", "ready": True})
+        self.assertEqual(response["status"], "ok")
+        self.assertTrue(response["ready"])
+        self.assertIn("event_spine", response)
+        self.assertIn("surfaces", response["event_spine"])
+        self.assertIn("event_writer", response["event_spine"]["surfaces"])
+        self.assertEqual(response["notification_policy_contract"]["codex_prompt_sent"], "persist_only")
 
     def test_status_full_path_exposes_runtime_health(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
@@ -289,6 +405,53 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertIn("queue", surfaces["event_writer"])
         self.assertIn("metrics", surfaces["event_writer"])
         self.assertIn("degradation", surfaces["event_writer"])
+
+    def test_login_report_coordinator_returns_bounded_timeout(self):
+        blocker = threading.Event()
+
+        def blocked_builder(**kwargs):
+            blocker.wait(timeout=0.25)
+            return {"status": "ok", "id": "late-report"}
+
+        coordinator = LoginReportCoordinator(
+            blocked_builder,
+            max_queue_size=1,
+            max_jobs=4,
+            job_timeout_seconds=0.01,
+        )
+
+        accepted = coordinator.submit(user_id="timeout-user", wait_timeout_seconds=0.0)
+        self.assertEqual(accepted["status"], "accepted")
+        time.sleep(0.03)
+        result = coordinator.poll(accepted["job_id"])
+
+        self.assertEqual(result["status"], "error")
+        self.assertIn("timed out", result["message"])
+        self.assertEqual(result["job"]["state"], "failed")
+        self.assertIn(result["job"]["blocking_phase"], {"queue", "report_builder"})
+
+    def test_runtime_and_workstation_do_not_force_active_context_refresh(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        calls: list[tuple[bool, bool]] = []
+
+        def fake_active_context(*, refresh: bool = False, attach: bool = False):
+            calls.append((refresh, attach))
+            return {
+                "status": "ok",
+                "follow_enabled": False,
+                "ignored_count": 0,
+                "active_context": None,
+                "updated_at": "2026-05-30T00:00:00Z",
+            }
+
+        with patch.object(adapter, "get_active_context", side_effect=fake_active_context):
+            runtime = adapter.get_runtime()
+            workstation = adapter.get_workstation()
+
+        self.assertEqual(runtime["active_context"]["status"], "ok")
+        self.assertEqual(workstation["active_context"]["status"], "ok")
+        self.assertGreaterEqual(len(calls), 2)
+        self.assertTrue(all(refresh is False for refresh, _ in calls))
 
     def test_runtime_event_write_failure_is_status_visible(self):
         monitoring_module._reset_runtime_event_write_failures_for_tests()
@@ -1078,10 +1241,15 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertEqual(approval["status"], "pending")
         self.assertEqual(approval["reviewer_note"], "hold for operator review")
         self.assertEqual(approval["history"][0]["action"], "created")
+        self.assertEqual(approval["mediation_proof"]["schema"], "cleanhouse.approval_mediation_proof.v1")
+        self.assertEqual(approval["mediation_proof"]["approval_id"], approval["id"])
+        self.assertEqual(approval["mediation_proof"]["history_count"], 1)
+        created_proof_hash = approval["mediation_proof"]["proof_hash"]
 
         listed = adapter.get_approval_queue(session_id="session-approval", status="pending")
         self.assertEqual(listed["count"], 1)
         self.assertEqual(listed["approval_queue"][0]["id"], approval["id"])
+        self.assertEqual(listed["approval_queue"][0]["mediation_proof"]["proof_hash"], created_proof_hash)
 
         resolved = adapter.resolve_approval_queue_item(
             approval_id=approval["id"],
@@ -1095,10 +1263,18 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertEqual(resolved["approval"]["reviewer"], "dashboard")
         self.assertEqual(resolved["approval"]["reviewer_note"], "requested avatar target did not match observed mutation")
         self.assertEqual([h["action"] for h in resolved["approval"]["history"]], ["created", "rejected"])
+        self.assertEqual(resolved["approval"]["mediation_proof"]["history_count"], 2)
+        self.assertNotEqual(resolved["approval"]["mediation_proof"]["proof_hash"], created_proof_hash)
 
         stored = PersistenceBackend.read("approval", approval["id"])
         self.assertIsNotNone(stored)
         self.assertEqual(stored["data"]["approval"]["status"], "rejected")
+        stored_proof = PersistenceBackend.read("approval_mediation_proof", approval["id"])
+        self.assertIsNotNone(stored_proof)
+        self.assertEqual(
+            stored_proof["data"]["proof"]["proof_hash"],
+            resolved["approval"]["mediation_proof"]["proof_hash"],
+        )
 
     def test_receipt_state_replay_reconstructs_rejected_operator_decision(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
@@ -1190,6 +1366,23 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertEqual(exported["verification"]["signature_status"], "verified")
         self.assertEqual(bundle["manifest"]["replay_hash"], replay["integrity"]["replay_hash"])
         self.assertEqual(bundle["manifest_signature"]["manifest_hash"], bundle["integrity"]["manifest_hash"])
+        expected_custody_hash = monitoring_module._stable_json_hash(bundle["chain_of_custody"])
+        self.assertEqual(bundle["manifest"]["chain_of_custody_hash"], expected_custody_hash)
+        self.assertEqual(
+            bundle["manifest"]["chain_of_custody_hop_count"],
+            len(bundle["chain_of_custody"]["hops"]),
+        )
+        self.assertEqual(
+            bundle["manifest"]["chain_of_custody_traceable_hop_count"],
+            sum(
+                1
+                for hop in bundle["chain_of_custody"]["hops"]
+                if str(hop.get("ref", "")).startswith("local://cleanhouse/")
+            ),
+        )
+        self.assertTrue(exported["verification"]["chain_of_custody_hash_match"])
+        self.assertTrue(exported["verification"]["chain_of_custody_hop_count_match"])
+        self.assertTrue(exported["verification"]["chain_of_custody_traceable_hop_count_match"])
         self.assertEqual(
             bundle["manifest"]["signer"]["key_id"],
             exported["verification"]["signer_key_id"],
@@ -1268,6 +1461,13 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertEqual(rejected_key["status"], "failed")
         self.assertFalse(rejected_key["verification"]["signature_verified"])
 
+        tampered_custody_manifest = json.loads(json.dumps(bundle))
+        tampered_custody_manifest["manifest"]["chain_of_custody_hash"] = "0" * 64
+        rejected_custody_manifest = offline_adapter.import_receipt_timeline_bundle(tampered_custody_manifest)
+        self.assertEqual(rejected_custody_manifest["status"], "failed")
+        self.assertFalse(rejected_custody_manifest["verification"]["chain_of_custody_hash_match"])
+        self.assertFalse(rejected_custody_manifest["verification"]["manifest_contents_match"])
+
         stripped_signed = json.loads(json.dumps(bundle))
         stripped_signed.pop("manifest", None)
         stripped_signed.pop("manifest_signature", None)
@@ -1297,6 +1497,74 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         response = cleanhouse_module.create_approval_queue_item()
         self._assert_bad_request(response, "evidence_refs must be a list")
 
+    def test_scope_approval_policy_receipt_specific(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        prompt = adapter.submit_prompt(
+            text="Modify only requested avatar",
+            context="receipt-scoped approval mediation",
+            scope="assets/avatars/requested/",
+            session_id="session-scope-approval-receipt-specific",
+            objective_id="objective-scope-approval-receipt-specific",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            requested = root / "assets" / "avatars" / "requested"
+            substituted = root / "assets" / "avatars" / "substituted"
+            requested.mkdir(parents=True)
+            substituted.mkdir(parents=True)
+            (requested / "avatar.png").write_text("requested-v1")
+            substituted_file = substituted / "avatar.png"
+            substituted_file.write_text("substituted-v1")
+
+            before_first = adapter.create_snapshot(
+                repo_path=str(root),
+                label="before-first",
+                session_id=prompt["session_id"],
+            )
+            substituted_file.write_text("substituted-v2")
+            after_first = adapter.create_snapshot(
+                repo_path=str(root),
+                label="after-first",
+                session_id=prompt["session_id"],
+            )
+            adapter.compute_diff(before_first["id"], after_first["id"], session_id=prompt["session_id"])
+
+            receipt_one = adapter.build_receipt(session_id=prompt["session_id"])
+
+            before_second = adapter.create_snapshot(
+                repo_path=str(root),
+                label="before-second",
+                session_id=prompt["session_id"],
+            )
+            substituted_file.write_text("substituted-v3")
+            after_second = adapter.create_snapshot(
+                repo_path=str(root),
+                label="after-second",
+                session_id=prompt["session_id"],
+            )
+            adapter.compute_diff(before_second["id"], after_second["id"], session_id=prompt["session_id"])
+
+            receipt_two = adapter.build_receipt(session_id=prompt["session_id"])
+
+        approval_one = receipt_one["approval_policy"]["approval_id"]
+        approval_two = receipt_two["approval_policy"]["approval_id"]
+        self.assertNotEqual(approval_one, approval_two)
+
+        queue = adapter.get_approval_queue(session_id=prompt["session_id"])
+        self.assertEqual(queue["count"], 2)
+
+        replay_one = adapter.replay_receipt_state(receipt_one["id"])
+        replay_two = adapter.replay_receipt_state(receipt_two["id"])
+        self.assertEqual(replay_one["status"], "ok")
+        self.assertEqual(replay_two["status"], "ok")
+        self.assertEqual(replay_one["state"]["status"], "pending")
+        self.assertEqual(replay_two["state"]["status"], "pending")
+        self.assertEqual(replay_one["state"]["approval_id"], approval_one)
+        self.assertEqual(replay_two["state"]["approval_id"], approval_two)
+        self.assertEqual([entry["action"] for entry in replay_one["approval_history"]], ["created"])
+        self.assertEqual([entry["action"] for entry in replay_two["approval_history"]], ["created"])
+
     def test_receipt_includes_prompt_and_approval_queue_entries(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
         prompt = adapter.submit_prompt(
@@ -1321,6 +1589,197 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertIn("approval_queue", event_types)
         self.assertEqual(receipt["metadata"]["prompt_id"], prompt["id"])
         self.assertEqual(receipt["metadata"]["context"], "approval metadata must appear in receipt timeline")
+
+    def test_replay_evidence_chain_includes_approval_mediation_proof_ref(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        prompt = adapter.submit_prompt(
+            text="replay mediation proof ref fixture",
+            context="approval mediation proof must be chained in replay evidence",
+            scope="src/",
+            session_id="session-replay-mediation-proof",
+            objective_id="objective-replay-mediation-proof",
+        )
+        receipt = adapter.build_receipt(session_id=prompt["session_id"])
+        self.assertEqual(receipt["status"], "ok")
+
+        approval_result = adapter.create_approval_queue_item({
+            "session_id": prompt["session_id"],
+            "requested_action": "review replay mediation proof chain",
+            "reason": "proof chain fixture",
+            "evidence_refs": [f"local://cleanhouse/receipt/{receipt['id']}"],
+            "prompt_id": prompt["id"],
+            "objective_id": "objective-replay-mediation-proof",
+            "metadata": {"receipt_id": receipt["id"]},
+        })
+        self.assertEqual(approval_result["status"], "ok")
+        approval_id = approval_result["approval"]["id"]
+
+        adapter.resolve_approval_queue_item(
+            approval_id=approval_id,
+            status="approved",
+            note="proof chain approved",
+            reviewer="dashboard",
+        )
+        replay = adapter.replay_receipt_state(receipt["id"])
+        self.assertEqual(replay["status"], "ok")
+        self.assertEqual(replay["state"]["approval_id"], approval_id)
+        proof_ref = f"local://cleanhouse/approval-mediation-proof/{approval_id}"
+        self.assertTrue(any(entry["ref"] == proof_ref for entry in replay["evidence_chain"]))
+
+    def test_intervention_workflow_receipt_and_replay_chain(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        session_id = "session-intervention-workflow"
+        adapter.submit_prompt(
+            text="Only apply confirmed mediator changes",
+            context="intervention workflow chain fixture",
+            scope="workspace/",
+            session_id=session_id,
+            objective_id="objective-intervention-workflow",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            target = root / "notes.txt"
+            target.write_text("before", encoding="utf-8")
+
+            created = adapter.create_operation_proposal({
+                "session_id": session_id,
+                "objective_id": "objective-intervention-workflow",
+                "proposal_type": "mediator",
+                "reason": "operator-reviewed write",
+                "operations": [{"op": "write_file", "path": "notes.txt", "content": "after"}],
+                "metadata": {"repo_path": str(root)},
+                "evidence_refs": ["local://cleanhouse/workflow/notes-write"],
+            })
+            self.assertEqual(created["status"], "ok")
+            proposal_id = created["proposal"]["id"]
+            self.assertEqual(created["intervention_workflow"]["status"], "intervention_requested")
+            approval_id = created["intervention_workflow"]["approval_id"]
+            self.assertTrue(approval_id)
+
+            resolved = adapter.resolve_operation_proposal(
+                proposal_id,
+                "approve",
+                {"confirm": True, "repo_path": str(root), "actor": "dashboard", "approval_note": "approved for apply"},
+            )
+            self.assertEqual(resolved["status"], "ok")
+            self.assertEqual(resolved["proposal"]["status"], "applied")
+            self.assertEqual(resolved["intervention_workflow"]["status"], "outcome_enforced")
+            self.assertEqual(resolved["intervention_workflow"]["approval_id"], approval_id)
+            self.assertEqual(target.read_text(encoding="utf-8"), "after")
+
+            receipt = adapter.build_receipt(session_id=session_id)
+            self.assertEqual(receipt["status"], "ok")
+            self.assertGreaterEqual(len(receipt.get("intervention_workflows", [])), 1)
+            workflow = receipt["intervention_workflows"][0]
+            self.assertEqual(workflow["proposal_id"], proposal_id)
+            self.assertEqual(workflow["approval_id"], approval_id)
+            self.assertEqual(workflow["status"], "outcome_enforced")
+            self.assertTrue(workflow["decision_recorded_at"])
+            self.assertTrue(workflow["outcome_enforced_at"])
+            self.assertEqual(workflow["receipt_id"], receipt["id"])
+            self.assertIn("actor_attribution", workflow)
+            self.assertEqual(workflow["actor_attribution"]["event_detected"]["actor_type"], "operator")
+            self.assertEqual(workflow["actor_attribution"]["decision_recorded"]["actor_id"], "dashboard")
+            self.assertEqual(workflow["actor_attribution"]["outcome_enforced"]["status"], "observed")
+            self.assertTrue(workflow["actor_attribution"]["event_detected"]["attribution_id"].startswith("actor:"))
+            self.assertRegex(workflow["actor_attribution"]["event_detected"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            self.assertIn("channel_attribution", workflow)
+            self.assertEqual(workflow["channel_attribution"]["event_detected"]["execution_channel"], "api")
+            self.assertEqual(workflow["channel_attribution"]["decision_recorded"]["execution_channel"], "human")
+            self.assertRegex(workflow["channel_attribution"]["decision_recorded"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            self.assertIn("trust_attribution", workflow)
+            self.assertEqual(workflow["trust_attribution"]["event_detected"]["trust_classification"], "trusted")
+            self.assertEqual(workflow["trust_attribution"]["decision_recorded"]["trust_classification"], "trusted")
+            self.assertRegex(workflow["trust_attribution"]["decision_recorded"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            self.assertTrue(
+                any(ref == f"local://cleanhouse/operation-proposal/{proposal_id}" for ref in workflow["evidence_refs"])
+            )
+            self.assertTrue(
+                any(ref == f"local://cleanhouse/approval-queue/{approval_id}" for ref in workflow["evidence_refs"])
+            )
+            self.assertIn("chain_of_custody", receipt)
+            self.assertIn("hops", receipt["chain_of_custody"])
+            receipt_hop_names = {hop["hop"] for hop in receipt["chain_of_custody"]["hops"]}
+            self.assertEqual(
+                receipt_hop_names,
+                {"prompt", "objective", "event", "intervention", "decision", "enforcement", "receipt", "replay", "bundle"},
+            )
+            for hop in receipt["chain_of_custody"]["hops"]:
+                self.assertIn("actor", hop)
+                self.assertIn(hop["actor"]["status"], {"observed", "inferred", "unknown"})
+                self.assertTrue(str(hop["actor"].get("attribution_id", "")).startswith("actor:"))
+                self.assertRegex(str(hop["actor"].get("attribution_hash", "")), r"^[0-9a-f]{64}$")
+                self.assertIn("channel", hop)
+                self.assertIn(hop["channel"]["execution_channel"], {"human", "api", "cli", "agent", "process", "service", "unknown"})
+                self.assertRegex(str(hop["channel"].get("attribution_hash", "")), r"^[0-9a-f]{64}$")
+                self.assertIn("trust", hop)
+                self.assertIn(hop["trust"]["trust_classification"], {"trusted", "untrusted", "unknown", "degraded"})
+                self.assertRegex(str(hop["trust"].get("attribution_hash", "")), r"^[0-9a-f]{64}$")
+            self.assertIn("replay", receipt["chain_of_custody"]["missing_hops"])
+            self.assertIn("bundle", receipt["chain_of_custody"]["missing_hops"])
+            self.assertIn("actor_attribution", receipt)
+            self.assertEqual(receipt["actor_attribution"]["artifact_type"], "receipt")
+            self.assertEqual(receipt["actor_attribution"]["artifact_id"], receipt["id"])
+            self.assertEqual(receipt["actor_attribution"]["origin_actor"]["actor_id"], "dashboard")
+            self.assertRegex(receipt["actor_attribution"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            self.assertIn("channel_attribution", receipt)
+            self.assertEqual(receipt["channel_attribution"]["artifact_type"], "receipt")
+            self.assertEqual(receipt["channel_attribution"]["origin_channel"]["execution_channel"], "human")
+            self.assertRegex(receipt["channel_attribution"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            self.assertIn("trust_attribution", receipt)
+            self.assertEqual(receipt["trust_attribution"]["artifact_type"], "receipt")
+            self.assertEqual(receipt["trust_attribution"]["origin_trust"]["trust_classification"], "trusted")
+            self.assertRegex(receipt["trust_attribution"]["attribution_hash"], r"^[0-9a-f]{64}$")
+
+            replay = adapter.replay_receipt_state(receipt["id"])
+            self.assertEqual(replay["status"], "ok")
+            self.assertTrue(any(entry["ref"] == f"local://cleanhouse/intervention-workflow/{workflow['workflow_id']}" for entry in replay["evidence_chain"]))
+            self.assertIn("chain_of_custody", replay)
+            self.assertIn("actor_attribution", replay)
+            self.assertEqual(replay["actor_attribution"]["artifact_type"], "replay")
+            self.assertEqual(replay["actor_attribution"]["origin_actor"]["actor_id"], "dashboard")
+            self.assertRegex(replay["actor_attribution"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            self.assertIn("channel_attribution", replay)
+            self.assertEqual(replay["channel_attribution"]["artifact_type"], "replay")
+            self.assertEqual(replay["channel_attribution"]["origin_channel"]["execution_channel"], "human")
+            self.assertRegex(replay["channel_attribution"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            self.assertIn("trust_attribution", replay)
+            self.assertEqual(replay["trust_attribution"]["artifact_type"], "replay")
+            self.assertEqual(replay["trust_attribution"]["origin_trust"]["trust_classification"], "trusted")
+            self.assertRegex(replay["trust_attribution"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            replay_hops = {hop["hop"]: hop for hop in replay["chain_of_custody"]["hops"]}
+            self.assertEqual(replay_hops["replay"]["ref"], f"local://cleanhouse/receipt-replay/{receipt['id']}")
+            self.assertIn("bundle", replay["chain_of_custody"]["missing_hops"])
+
+            exported = adapter.export_receipt_timeline_bundle(receipt["id"])
+            self.assertEqual(exported["status"], "ok")
+            self.assertIn("chain_of_custody", exported["bundle"])
+            self.assertTrue(exported["bundle"]["chain_of_custody"]["fully_traceable"])
+            self.assertIn("actor_attribution", exported["bundle"])
+            self.assertEqual(exported["bundle"]["actor_attribution"]["artifact_type"], "bundle")
+            self.assertEqual(exported["bundle"]["actor_attribution"]["origin_actor"]["actor_id"], "dashboard")
+            self.assertRegex(exported["bundle"]["actor_attribution"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            self.assertIn("channel_attribution", exported["bundle"])
+            self.assertEqual(exported["bundle"]["channel_attribution"]["artifact_type"], "bundle")
+            self.assertEqual(exported["bundle"]["channel_attribution"]["origin_channel"]["execution_channel"], "human")
+            self.assertRegex(exported["bundle"]["channel_attribution"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            self.assertIn("trust_attribution", exported["bundle"])
+            self.assertEqual(exported["bundle"]["trust_attribution"]["artifact_type"], "bundle")
+            self.assertEqual(exported["bundle"]["trust_attribution"]["origin_trust"]["trust_classification"], "trusted")
+            self.assertRegex(exported["bundle"]["trust_attribution"]["attribution_hash"], r"^[0-9a-f]{64}$")
+            bundle_hops = {hop["hop"]: hop for hop in exported["bundle"]["chain_of_custody"]["hops"]}
+            self.assertEqual(
+                bundle_hops["bundle"]["ref"],
+                f"local://cleanhouse/receipt-bundle/{exported['bundle']['receipt_id']}",
+            )
+            self.assertTrue(exported["verification"]["chain_of_custody_present"])
+            self.assertTrue(exported["verification"]["chain_of_custody_hops_complete"])
+            self.assertTrue(exported["verification"]["chain_of_custody_refs_traceable"])
+            self.assertTrue(exported["verification"]["chain_of_custody_bundle_ref_match"])
+            self.assertTrue(exported["verification"]["actor_attribution_hash_match"])
+            self.assertTrue(exported["verification"]["channel_attribution_hash_match"])
+            self.assertTrue(exported["verification"]["trust_attribution_hash_match"])
 
     def test_diff_temp_file_modification_simulation(self):
         import tempfile
@@ -1366,6 +1825,56 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
             self.assertEqual(changes_by_path["a.py"], "modified")
             self.assertEqual(changes_by_path["c.py"], "created")
             self.assertEqual(changes_by_path["b.py"], "deleted")
+
+    def test_compute_diff_emits_file_mutation_runtime_events_for_timeline_and_receipt(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        session_id = "mutation-events-session"
+        adapter.submit_prompt(
+            text="Track file mutations",
+            context="mutation tracking runtime event fixture",
+            scope="src/",
+            session_id=session_id,
+            objective_id="objective-mutation-events",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            src = root / "src"
+            src.mkdir(parents=True)
+            (src / "a.py").write_text("print('v1')", encoding="utf-8")
+            (src / "b.py").write_text("print('keep')", encoding="utf-8")
+
+            before = adapter.create_snapshot(repo_path=str(root), label="before", session_id=session_id)
+            (src / "a.py").write_text("print('v2')", encoding="utf-8")
+            (src / "c.py").write_text("print('new')", encoding="utf-8")
+            (src / "b.py").unlink()
+            after = adapter.create_snapshot(repo_path=str(root), label="after", session_id=session_id)
+
+            diff = adapter.compute_diff(before["id"], after["id"], session_id=session_id)
+            self.assertEqual(diff["status"], "ok")
+
+        timeline = adapter.build_timeline(session_id=session_id)
+        self.assertEqual(timeline["status"], "ok")
+        mutation_entries = [entry for entry in timeline["entries"] if entry.get("event_type") == "file_mutation"]
+        self.assertGreaterEqual(len(mutation_entries), 3)
+        mutation_types = {
+            entry.get("data", {}).get("persisted_event_type")
+            for entry in mutation_entries
+            if isinstance(entry.get("data"), dict)
+        }
+        self.assertTrue({"created", "modified", "deleted"}.issubset(mutation_types))
+        mutation_refs = {
+            ref
+            for entry in mutation_entries
+            for ref in entry.get("evidence_refs", [])
+            if isinstance(ref, str)
+        }
+        self.assertTrue(any(ref.startswith("local://cleanhouse/diff/") for ref in mutation_refs))
+
+        receipt = adapter.build_receipt(session_id=session_id)
+        self.assertEqual(receipt["status"], "ok")
+        receipt_event_types = [entry.get("event_type") for entry in receipt["events"]]
+        self.assertIn("file_mutation", receipt_event_types)
 
     def test_correlation_full_chain(self):
         import tempfile
@@ -1579,6 +2088,40 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         alert = scope_alerts[0]
         self.assertEqual(alert["severity"], "low")
         self.assertGreaterEqual(alert["confidence"], 0.45)
+
+    def test_generate_alerts_autoclassifies_scope_expansion_without_manual_classify(self):
+        import tempfile
+        from pathlib import Path
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        intent_result = adapter.submit_intent("edit code", scope="src")
+        intent_id = intent_result["id"]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "src").mkdir()
+            (root / "src" / "a.py").write_text("ok")
+            (root / "config.ini").write_text("setting=1")
+
+            before = adapter.create_snapshot(repo_path=str(root), label="before", session_id=intent_id)
+            (root / "src" / "a.py").write_text("ok2")
+            (root / "config.ini").write_text("setting=2")
+            after = adapter.create_snapshot(repo_path=str(root), label="after", session_id=intent_id)
+            adapter.compute_diff(before["id"], after["id"], session_id=intent_id)
+
+        adapter.build_timeline(session_id=intent_id)
+        adapter.correlate(session_id=intent_id)
+        result = adapter.generate_alerts(session_id=intent_id)
+
+        self.assertEqual(result["status"], "ok")
+        scope_alerts = [a for a in result["alerts"] if a["alert_type"] == "scope_expansion"]
+        self.assertGreater(len(scope_alerts), 0)
+        fallback_alerts = [
+            a for a in result["alerts"]
+            if a["alert_type"] == "endpoint_drift"
+            and "No classified signals available for alert generation" in a.get("description", "")
+        ]
+        self.assertEqual(fallback_alerts, [])
 
     def test_alert_prompt_action_medium(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
@@ -1879,6 +2422,123 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
             "persisted login report should load through get_reports",
         )
 
+    def test_login_report_coordinator_accepts_two_queued_jobs_then_backpressures(self):
+        started = threading.Event()
+        release = threading.Event()
+
+        def build_report(**payload):
+            started.set()
+            release.wait(timeout=2.0)
+            return {
+                "status": "ok",
+                "id": f"report:{payload['user_id']}",
+                "report_type": "login_summary",
+            }
+
+        coordinator = LoginReportCoordinator(build_report)
+        first = coordinator.submit(user_id="user-1")
+        self.assertEqual(first["status"], "accepted")
+        self.assertTrue(started.wait(timeout=1.0), "worker should start the first job")
+
+        second = coordinator.submit(user_id="user-2")
+        third = coordinator.submit(user_id="user-3")
+        fourth = coordinator.submit(user_id="user-4")
+
+        self.assertEqual(second["status"], "accepted")
+        self.assertEqual(third["status"], "accepted")
+        self.assertEqual(fourth["status"], "rate_limited")
+        self.assertEqual(fourth["job"]["state"], "rejected")
+        release.set()
+
+    def test_submit_login_report_waits_and_poll_returns_completed_job(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        with patch.object(monitoring_module.cleanhouse_events, "list_events", return_value=[]), patch.object(
+            monitoring_module.cleanhouse_events, "insert_event_async"
+        ):
+            result = adapter.submit_login_report(
+                user_id="user-1",
+                email="user@example.com",
+                previous_login_at="2026-05-26T09:00:00",
+                current_login_at="2026-05-26T11:00:00",
+                trigger="auth/login",
+                wait_timeout_seconds=1.0,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["report_type"], "login_summary")
+        self.assertEqual(result["job"]["state"], "succeeded")
+
+        polled = adapter.poll_login_report(result["job_id"])
+        self.assertEqual(polled["status"], "ok")
+        self.assertEqual(polled["id"], result["id"])
+        self.assertEqual(polled["job"]["state"], "succeeded")
+
+    def test_get_reports_filters_limits_and_summarizes_login_reports(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        events = [
+            {
+                "id": 2,
+                "timestamp": "2026-05-26T09:15:00",
+                "session_id": "session-a",
+                "event_type": "shell_event",
+                "summary": "inside window",
+                "evidence_refs": ["local://cleanhouse/command/demo"],
+            },
+        ]
+
+        with patch.object(monitoring_module.cleanhouse_events, "list_events", return_value=events), patch.object(
+            monitoring_module.cleanhouse_events, "insert_event_async"
+        ):
+            result = adapter.build_login_report(
+                user_id="user-1",
+                email="user@example.com",
+                previous_login_at="2026-05-26T09:00:00",
+                current_login_at="2026-05-26T11:00:00",
+                trigger="auth/login",
+            )
+
+        reports = adapter.get_reports(report_type="login_summary", limit=1, summary_only=True)
+        self.assertEqual(reports["count"], 1)
+        report = reports["reports"][0]
+        self.assertEqual(report["id"], result["id"])
+        self.assertEqual(report["report_type"], "login_summary")
+        self.assertIn("summary", report["receipt"])
+        self.assertNotIn("events", report["receipt"])
+        self.assertNotIn("receipts", report["receipt"])
+        self.assertNotIn("reports", report["receipt"])
+
+    def test_login_report_route_status_codes_follow_job_state(self):
+        self._set_request_json({"user_id": "user-1", "email": "user@example.com"})
+
+        class RouteAdapter:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def submit_login_report(self, **kwargs):
+                return self.payload
+
+        cases = [
+            ({"status": "ok", "id": "report:done", "job": {"state": "succeeded"}}, 200),
+            ({"status": "accepted", "job_id": "job:queued", "job": {"state": "queued"}}, 202),
+            ({"status": "rate_limited", "job_id": "job:full", "job": {"state": "rejected"}}, 429),
+        ]
+        for payload, expected_status in cases:
+            with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=RouteAdapter(payload)):
+                body, status = self._unwrap_response_tuple(cleanhouse_module.build_login_report())
+            self.assertEqual(status, expected_status)
+            self.assertEqual(body["status"], payload["status"])
+
+    def test_poll_login_report_route_returns_queued_status(self):
+        class RouteAdapter:
+            def poll_login_report(self, job_id):
+                return {"status": "accepted", "job_id": job_id, "job": {"state": "running"}}
+
+        with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=RouteAdapter()):
+            body, status = self._unwrap_response_tuple(cleanhouse_module.poll_login_report("job:1"))
+
+        self.assertEqual(status, 202)
+        self.assertEqual(body["job"]["state"], "running")
+
     def test_zaelith_unavailable_returns_graceful_unknown(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
         with patch(
@@ -2067,6 +2727,75 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertGreaterEqual(len(event_list), 1)
         self.assertEqual(event_list[0]["tool_identity"], "tool_unknown")
 
+    def test_tool_event_only_receipt_includes_unsupported_shell_gap(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter.submit_prompt(
+            text="Observe external tool action",
+            context="unsupported shell gap fixture",
+            scope="src/",
+            session_id="unsupported-shell-session",
+            objective_id="objective-unsupported-shell",
+        )
+        adapter.submit_tool_event({
+            "tool_identity": "cursor",
+            "command": "npm run build",
+            "args": ["npm", "run", "build"],
+            "exit_code": 0,
+            "session_id": "unsupported-shell-session",
+            "objective_id": "objective-unsupported-shell",
+        })
+        receipt = adapter.build_receipt("unsupported-shell-session")
+        self.assertEqual(receipt["status"], "ok")
+        unsupported_shell_gaps = [
+            gap for gap in receipt["gaps"]
+            if gap.get("source") == "command_observer"
+            and gap.get("label") == "unknown"
+            and "unsupported-shell action observed outside owned command observer" in gap.get("description", "")
+        ]
+        self.assertEqual(len(unsupported_shell_gaps), 1)
+        self.assertTrue(unsupported_shell_gaps[0]["event_id"].startswith("unsupported-shell:"))
+        self.assertTrue(any(ref.startswith("local://cleanhouse/tool-event/") for ref in unsupported_shell_gaps[0].get("evidence_refs", [])))
+
+    def test_tool_event_with_owned_command_observer_has_no_unsupported_shell_gap(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter.submit_prompt(
+            text="Observe owned command and tool action",
+            context="owned shell command fixture",
+            scope="src/",
+            session_id="owned-shell-session",
+            objective_id="objective-owned-shell",
+        )
+        adapter._on_command_completed(CommandResult(
+            command="npm",
+            args=("npm", "run", "build"),
+            cwd=str(Path.cwd()),
+            user="dev",
+            returncode=0,
+            duration=0.5,
+            timestamp="2026-05-29T12:00:00",
+            stdout_preview="ok",
+            stderr_preview="",
+            session_id="owned-shell-session",
+            objective_id="objective-owned-shell",
+            child_pid=32100,
+        ))
+        adapter.submit_tool_event({
+            "tool_identity": "cursor",
+            "command": "npm run build",
+            "args": ["npm", "run", "build"],
+            "exit_code": 0,
+            "session_id": "owned-shell-session",
+            "objective_id": "objective-owned-shell",
+        })
+        receipt = adapter.build_receipt("owned-shell-session")
+        self.assertEqual(receipt["status"], "ok")
+        unsupported_shell_gaps = [
+            gap for gap in receipt["gaps"]
+            if gap.get("source") == "command_observer"
+            and "unsupported-shell action observed outside owned command observer" in gap.get("description", "")
+        ]
+        self.assertEqual(unsupported_shell_gaps, [])
+
     def test_cloud_usage_returns_adapter_status(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
         result = adapter.get_cloud_usage(refresh=True)
@@ -2150,6 +2879,54 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
 
         original = adapter.get_settings()
         self.assertEqual(original["settings"]["risk_thresholds"]["alert_confidence_min"], 0.45)
+
+    def test_notification_policy_settings_accepts_reminder_and_bypass_keys(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        result = adapter.update_settings({
+            "notification_policy": {
+                "max_native_reminders_per_notification": 3,
+                "cooldown_bypass_types": ["approval_required"],
+            }
+        })
+        self.assertEqual(result["status"], "ok")
+        policy = result["settings"]["notification_policy"]
+        self.assertEqual(policy["max_native_reminders_per_notification"], 3)
+        self.assertEqual(policy["cooldown_bypass_types"], ["approval_required"])
+
+        bad_int = adapter.update_settings({
+            "notification_policy": {"max_native_reminders_per_notification": "3"}
+        })
+        self.assertEqual(bad_int["status"], "error")
+        self.assertIn("must be a positive integer", bad_int["message"])
+
+        bad_list = adapter.update_settings({
+            "notification_policy": {"cooldown_bypass_types": "approval_required"}
+        })
+        self.assertEqual(bad_list["status"], "error")
+        self.assertIn("must be a list", bad_list["message"])
+
+    def test_notification_policy_defaults_cover_required_agent_notifications(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        policy = adapter.get_settings()["settings"]["notification_policy"]
+        self.assertTrue(policy["fanout_all_backends"])
+        self.assertEqual(policy["backend_order"], "osascript_first")
+        self.assertFalse(policy["codex_activity_native_enabled"])
+        self.assertEqual(
+            set(policy["hard_interrupt_types"]),
+            {
+                "session_started",
+                "session_ended",
+                "scope_drift_detected",
+            },
+        )
+        self.assertEqual(
+            set(policy["cooldown_bypass_types"]),
+            {
+                "session_started",
+                "session_ended",
+                "scope_drift_detected",
+            },
+        )
 
     def test_scope_high_confidence_mismatch(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
@@ -2582,6 +3359,169 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
             1,
         )
 
+    def test_runtime_gaps_classify_known_collector_failures_without_unknown(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        manifest = {
+            "surfaces": {
+                "filesystem_watcher": {"collector_status": "dependency_missing"},
+                "event_writer": {"collector_status": "inactive"},
+                "integrity": {"collector_status": "no_baseline"},
+                "network": {"collector_status": "permission_denied"},
+                "commands": {"collector_status": "unknown"},
+                "processes": {"collector_status": "ok"},
+            }
+        }
+
+        gaps = adapter._runtime_gaps_from_manifest(manifest)
+        by_source = {gap["source"]: gap for gap in gaps}
+
+        self.assertEqual(by_source["filesystem_watcher"]["label"], "unsupported")
+        self.assertEqual(by_source["event_writer"]["label"], "partial")
+        self.assertEqual(by_source["integrity"]["label"], "partial")
+        self.assertEqual(by_source["network"]["label"], "permission_blocked")
+        self.assertEqual(by_source["commands"]["label"], "unknown")
+        self.assertNotIn("processes", by_source)
+
+    def test_collect_processes_emits_critical_issue_when_memory_budget_exceeded(self):
+        class ProcessMonitorStub:
+            def __init__(self, show_all=True):
+                self.show_all = show_all
+
+            def get_processes(self):
+                # RSS in KB (as returned by ps on macOS): total 11 GB.
+                return [
+                    {
+                        "pid": "100",
+                        "user": "dev",
+                        "cpu": 1.0,
+                        "mem": 0.5,
+                        "rss": str(7 * 1024 * 1024),
+                        "command": "codex run",
+                    },
+                    {
+                        "pid": "101",
+                        "user": "dev",
+                        "cpu": 0.8,
+                        "mem": 0.3,
+                        "rss": str(4 * 1024 * 1024),
+                        "command": "python worker.py",
+                    },
+                ]
+
+            def identify_platform_detail(self, command):
+                return None
+
+            def is_agent_process_detail(self, command):
+                return (False, None)
+
+            def is_system_process(self, command, user):
+                return False
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        with patch.object(monitoring_module, "_get_process_monitor_class", return_value=ProcessMonitorStub):
+            payload = adapter.get_processes(refresh=True)
+        issues = payload.get("issues", [])
+        counts = payload.get("data", {}).get("counts", {})
+        budget_issue = next(
+            (
+                item
+                for item in issues
+                if "process memory budget exceeded" in str(item.get("message", "")).lower()
+            ),
+            None,
+        )
+        self.assertIsNotNone(budget_issue)
+        self.assertEqual(budget_issue.get("severity"), "critical")
+        self.assertTrue(bool(counts.get("memory_budget_exceeded")))
+        self.assertGreater(int(counts.get("over_budget_bytes", 0)), 0)
+
+    def test_collect_processes_does_not_emit_budget_issue_when_under_cap(self):
+        class ProcessMonitorStub:
+            def __init__(self, show_all=True):
+                self.show_all = show_all
+
+            def get_processes(self):
+                # RSS in KB (as returned by ps on macOS): total 3 GB.
+                return [
+                    {
+                        "pid": "200",
+                        "user": "dev",
+                        "cpu": 0.4,
+                        "mem": 0.2,
+                        "rss": str(3 * 1024 * 1024),
+                        "command": "python monitor.py",
+                    }
+                ]
+
+            def identify_platform_detail(self, command):
+                return None
+
+            def is_agent_process_detail(self, command):
+                return (False, None)
+
+            def is_system_process(self, command, user):
+                return False
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        with patch.object(monitoring_module, "_get_process_monitor_class", return_value=ProcessMonitorStub):
+            payload = adapter.get_processes(refresh=True)
+        issues = payload.get("issues", [])
+        counts = payload.get("data", {}).get("counts", {})
+        budget_issue = next(
+            (
+                item
+                for item in issues
+                if "process memory budget exceeded" in str(item.get("message", "")).lower()
+            ),
+            None,
+        )
+        self.assertIsNone(budget_issue)
+        self.assertFalse(bool(counts.get("memory_budget_exceeded")))
+        self.assertEqual(int(counts.get("over_budget_bytes", 0)), 0)
+
+    def test_collect_processes_preserves_quiet_terminal_process(self):
+        class ProcessMonitorStub:
+            def __init__(self, show_all=True):
+                self.show_all = show_all
+
+            def get_processes(self):
+                busy = [
+                    {
+                        "pid": str(3000 + index),
+                        "user": "dev",
+                        "cpu": 200 - index,
+                        "mem": 0.1,
+                        "rss": "100",
+                        "command": f"/usr/bin/busy-{index}",
+                    }
+                    for index in range(101)
+                ]
+                busy.append({
+                    "pid": "4242",
+                    "user": "dev",
+                    "cpu": 0.0,
+                    "mem": 0.1,
+                    "rss": "100",
+                    "command": "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal",
+                })
+                return busy
+
+            def identify_platform_detail(self, command):
+                return None
+
+            def is_agent_process_detail(self, command):
+                return (False, None)
+
+            def is_system_process(self, command, user):
+                return False
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        with patch.object(monitoring_module, "_get_process_monitor_class", return_value=ProcessMonitorStub):
+            payload = adapter.get_processes(refresh=True)
+        rows = payload.get("data", {}).get("processes", [])
+        self.assertGreater(len(rows), 100)
+        self.assertTrue(any("Terminal.app" in row.get("command", "") for row in rows))
+
     def test_operator_session_start_stop_persistence(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
         started = adapter.start_operator_session({
@@ -2661,6 +3601,76 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         notifications = adapter.get_operator_notifications("notification-dedupe")
         self.assertEqual(notifications["count"], 1)
 
+    def test_operator_notifications_dedupe_persists_across_timestamp_buckets(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        refs = ["local://cleanhouse/receipt/receipt:dedupe-time"]
+        first = adapter._ensure_operator_notification(
+            notification_type="approval_required",
+            session_id="notification-dedupe-time",
+            objective_id=None,
+            severity="warning",
+            summary="dedupe first",
+            evidence_refs=refs,
+            source="test",
+            metadata={"timestamp": "2026-05-28T12:00:01Z"},
+        )
+        second = adapter._ensure_operator_notification(
+            notification_type="approval_required",
+            session_id="notification-dedupe-time",
+            objective_id=None,
+            severity="warning",
+            summary="dedupe second later",
+            evidence_refs=refs,
+            source="test",
+            metadata={"timestamp": "2026-05-28T12:02:35Z"},
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.id, second.id)
+        notifications = adapter.get_operator_notifications("notification-dedupe-time")
+        self.assertEqual(notifications["count"], 1)
+
+    def test_notification_system_emits_supported_operator_types(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        emitted_approval = adapter._ensure_operator_notification(
+            notification_type="approval_required",
+            session_id="essential-types-session",
+            objective_id=None,
+            severity="warning",
+            summary="approval should emit",
+            evidence_refs=["local://cleanhouse/test/essential/suppressed"],
+            source="test",
+        )
+        self.assertIsNotNone(emitted_approval)
+
+        emitted = adapter._ensure_operator_notification(
+            notification_type="scope_drift_detected",
+            session_id="essential-types-session",
+            objective_id=None,
+            severity="warning",
+            summary="scope drift should emit",
+            evidence_refs=["local://cleanhouse/test/essential/emitted"],
+            source="test",
+        )
+        self.assertIsNotNone(emitted)
+
+    def test_stop_operator_session_emits_session_ended_notification(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        started = adapter.start_operator_session({
+            "session_id": "session-ended-notify",
+            "objective_id": "objective-session-ended",
+            "summary": "session started for ended notification test",
+        })
+        self.assertEqual(started["status"], "ok")
+        stopped = adapter.stop_operator_session({
+            "session_id": "session-ended-notify",
+            "summary": "session ended for test",
+            "finalize": True,
+        })
+        self.assertEqual(stopped["status"], "ok")
+        ended = [item for item in stopped["notifications"] if item.get("notification_type") == "session_ended"]
+        self.assertEqual(len(ended), 1)
+
     def test_operator_notification_creation_for_four_event_types(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
         prompt = adapter.submit_prompt(
@@ -2718,11 +3728,11 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
             for ref in notification["evidence_refs"]:
                 self.assertTrue(ref.startswith("local://cleanhouse/"))
 
-    def test_native_operator_notification_allowlist_excludes_low_noise_types(self):
+    def test_native_operator_notification_allowlist_is_noise_controlled_to_objective_and_drift(self):
         sent = []
 
         class FakeNotificationManager:
-            def send_notification(self, title, message, level="info", metadata=None, click_url=None):
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False):
                 sent.append({
                     "title": title,
                     "message": message,
@@ -2730,27 +3740,53 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
                     "metadata": metadata or {},
                     "click_url": click_url,
                 })
+                return {"status": "delivered", "backend": "fake-native", "timestamp": "2026-05-27T00:00:00"}
 
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
         native_types = {
+            "session_started",
+            "session_ended",
             "scope_drift_detected",
+        }
+        non_native_types = {
+            "excessive_traversal",
+            "codex_prompt_sent",
             "approval_required",
             "destructive_command_attempt",
             "replay_or_signature_failure",
-            "continuity_degraded",
             "runtime_recovery_failure",
+            "runtime_state_transition",
+            "runtime_connection_lost",
+            "runtime_connection_restored",
+            "receipt_finalized",
         }
-        all_types = native_types | {"session_started", "receipt_finalized"}
-        with patch.dict(os.environ, {"CLEANHOUSE_NATIVE_NOTIFICATIONS": "1"}), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+        all_types = native_types | non_native_types
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+                "CLEANHOUSE_NATIVE_DESKTOP_ALLOWLIST_ONLY": "1",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
             for notification_type in sorted(all_types):
+                metadata = {}
+                source = "test"
+                if notification_type == "codex_prompt_sent":
+                    metadata["prompt_id"] = "prompt:native-allowlist"
+                    source = "prompt"
+                if notification_type == "scope_drift_detected":
+                    metadata["alert_id"] = "alert:native-allowlist"
                 created = adapter._ensure_operator_notification(
                     notification_type=notification_type,
                     session_id="native-allowlist",
                     objective_id="objective-native-allowlist",
-                    severity="critical" if notification_type in native_types else "info",
+                    severity="critical" if notification_type in {"scope_drift_detected", "excessive_traversal"} else "info",
                     summary=f"{notification_type} summary",
                     evidence_refs=[f"local://cleanhouse/test/{notification_type}"],
-                    source="test",
+                    source=source,
+                    metadata=metadata,
                 )
                 self.assertIsNotNone(created)
 
@@ -2760,6 +3796,704 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
             self.assertIn("localhost:3333/dashboard", item["click_url"])
             self.assertIn("notification_id=", item["click_url"])
             self.assertIn("session_id=native-allowlist", item["click_url"])
+
+    def test_only_started_completed_and_drift_are_production_operator_dispatch(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        production_types = {
+            "session_started",
+            "session_ended",
+            "scope_drift_detected",
+        }
+        sample_types = {
+            "session_started",
+            "session_ended",
+            "scope_drift_detected",
+            "codex_prompt_sent",
+            "approval_required",
+            "incident_action_required",
+            "receipt_finalized",
+        }
+
+        dispatch_by_type = {}
+        for notification_type in sorted(sample_types):
+            created = adapter._ensure_operator_notification(
+                notification_type=notification_type,
+                session_id="production-dispatch-contract",
+                objective_id="objective-production-dispatch-contract",
+                severity="warning" if notification_type == "scope_drift_detected" else "info",
+                summary=f"{notification_type} summary",
+                evidence_refs=[f"local://cleanhouse/test/{notification_type}"],
+                source="test",
+                metadata={"event_id": f"event:{notification_type}"},
+            )
+            self.assertIsNotNone(created)
+            dispatch_by_type[notification_type] = created.metadata.get("dispatch_class")
+
+        for notification_type in production_types:
+            self.assertEqual(dispatch_by_type.get(notification_type), "production_operator")
+        for notification_type in sample_types - production_types:
+            self.assertEqual(dispatch_by_type.get(notification_type), "persist_only")
+
+    def test_active_context_attaches_prompt_session_and_survives_restart(self):
+        class FakeActiveContextCollector:
+            def collect(self, *, follow_enabled, ignored_keys=(), explicit_pickup=None):
+                return {
+                    "id": "active_context:restart",
+                    "dedupe_key": "restart-key",
+                    "source_type": "clipboard",
+                    "source_labels": ["active_window_observed", "clipboard_observed"],
+                    "truth_classification": "observed_context",
+                    "frontmost_app": {"app_name": "ChatGPT", "window_title": "CleanHouse"},
+                    "current_repo": str(Path.cwd()),
+                    "current_objective": "Implement active context",
+                    "active_prompt": "Implement active context",
+                    "active_prompt_preview": "Implement active context",
+                    "last_agent_action": "",
+                    "session_id": "active-context-restart",
+                    "objective_id": "objective-active-context-restart",
+                    "tool_identity": "chatgpt",
+                    "context": "clipboard-gated prompt",
+                    "source_ref": "",
+                    "evidence_refs": ["local://cleanhouse/active-context/active_context:restart"],
+                    "metadata": {"active_context_source": "clipboard"},
+                    "updated_at": "2026-05-28T12:00:00Z",
+                    "attachable": True,
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter._active_context_collector = FakeActiveContextCollector()
+        with patch.dict(os.environ, {"CLEANHOUSE_NATIVE_NOTIFICATIONS": "1"}), patch.object(monitoring_module, "NotificationManager") as notification_manager:
+            result = adapter.set_active_context_follow(True)
+            self.assertGreaterEqual(notification_manager.return_value.send_notification.call_count, 1)
+
+        context = result["active_context"]
+        self.assertEqual(result["follow_enabled"], True)
+        self.assertTrue(context["attached"])
+        self.assertTrue(context["prompt_id"].startswith("prompt:"))
+        self.assertEqual(context["session_id"], "active-context-restart")
+        self.assertEqual(context["session_status"], "active")
+
+        prompt_records = adapter.get_prompts(session_id="active-context-restart")["prompts"]
+        self.assertEqual(prompt_records[0]["source"], "active_context")
+        self.assertEqual(prompt_records[0]["metadata"]["truth_classification"], "observed_context")
+
+        restarted = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        restarted._active_context_collector = FakeActiveContextCollector()
+        restarted_context = restarted.get_active_context(refresh=True)["active_context"]
+        self.assertEqual(restarted_context["prompt_id"], context["prompt_id"])
+        self.assertEqual(restarted_context["session_id"], "active-context-restart")
+        workstation = restarted.get_workstation("active-context-restart")
+        self.assertEqual(workstation["active_context"]["active_context"]["id"], "active_context:restart")
+        self.assertEqual(
+            workstation["operational_presence"]["active_work_context"]["truth_classification"],
+            "observed_context",
+        )
+        provenance = restarted.get_continuity_provenance("active-context-restart")
+        self.assertEqual(provenance["continuity_truth"]["label"], "observed_context")
+        self.assertIn("active_context", {claim["source_type"] for claim in provenance["claims"]})
+
+    def test_active_context_notification_metadata_and_reconnect_dedupe(self):
+        sent = []
+
+        class FakeNotificationManager:
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False):
+                sent.append({"metadata": metadata or {}, "click_url": click_url})
+                return {"status": "delivered", "backend": "fake-native", "timestamp": "2026-05-28T12:00:00Z"}
+
+        class FakeActiveContextCollector:
+            def collect(self, *, follow_enabled, ignored_keys=(), explicit_pickup=None):
+                return {
+                    "id": "active_context:metadata",
+                    "dedupe_key": "metadata-key",
+                    "source_type": "codex_artifact",
+                    "source_labels": ["codex_session_index_observed", "codex_rollout_observed"],
+                    "truth_classification": "observed_context",
+                    "frontmost_app": {"app_name": "Codex", "window_title": "CleanHouse"},
+                    "current_repo": str(Path.cwd()),
+                    "current_objective": "Metadata linked context",
+                    "active_prompt": "Metadata linked context",
+                    "active_prompt_preview": "Metadata linked context",
+                    "last_agent_action": "editing tests",
+                    "session_id": "active-context-metadata",
+                    "objective_id": "objective-active-context-metadata",
+                    "tool_identity": "codex",
+                    "context": "codex artifact context",
+                    "source_ref": "local://cleanhouse/codex-session/active-context-metadata",
+                    "evidence_refs": ["local://cleanhouse/active-context/active_context:metadata"],
+                    "metadata": {"active_context_source": "codex_artifact"},
+                    "updated_at": "2026-05-28T12:00:00Z",
+                    "attachable": True,
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter._active_context_collector = FakeActiveContextCollector()
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            active = adapter.get_active_context(refresh=True)["active_context"]
+            created = adapter.create_approval_queue_item({
+                "session_id": "active-context-metadata",
+                "requested_action": "review active context linked approval",
+                "reason": "approval-required notification should deep-link to context",
+                "evidence_refs": ["local://cleanhouse/test/active-context-approval"],
+                "metadata": {"receipt_id": "receipt:active-context"},
+            })
+            self.assertEqual(created["status"], "ok")
+            notification = created["notification"]
+            self.assertEqual(notification["metadata"]["active_context_id"], "active_context:metadata")
+            self.assertEqual(notification["metadata"]["prompt_id"], active["prompt_id"])
+            self.assertEqual(notification["metadata"]["objective_id"], "objective-active-context-metadata")
+            self.assertIn("active_context_id=active_context%3Ametadata", notification["metadata"]["click_url"])
+            self.assertIn("prompt_id=" + active["prompt_id"].replace(":", "%3A"), notification["metadata"]["click_url"])
+            self.assertIn("receipt_id=receipt%3Aactive-context", notification["metadata"]["click_url"])
+            self.assertGreaterEqual(len(sent), 1)
+
+            restarted = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+            restarted._active_context_collector = FakeActiveContextCollector()
+            restarted.get_active_context(refresh=True)
+            duplicate = restarted.create_approval_queue_item({
+                "session_id": "active-context-metadata",
+                "requested_action": "review active context linked approval again",
+                "reason": "same evidence should not redispatch",
+                "evidence_refs": ["local://cleanhouse/test/active-context-approval"],
+                "metadata": {"receipt_id": "receipt:active-context"},
+            })
+            self.assertEqual(duplicate["notification"]["id"], notification["id"])
+            self.assertGreaterEqual(len(sent), 1)
+
+    def test_active_context_reconnect_only_emits_when_agent_action_changes(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        previous_context = {
+            "id": "active_context:reconnect-notify",
+            "dedupe_key": "reconnect-notify-key",
+            "prompt_id": "prompt:reconnect-notify",
+            "session_id": "active-context-reconnect-notify",
+            "objective_id": "objective-active-context-reconnect-notify",
+            "last_agent_action": "editing tests",
+        }
+        unchanged_context = {
+            "id": "active_context:reconnect-notify",
+            "dedupe_key": "reconnect-notify-key",
+            "session_id": "active-context-reconnect-notify",
+            "objective_id": "objective-active-context-reconnect-notify",
+            "last_agent_action": "editing tests",
+        }
+        changed_context = {
+            "id": "active_context:reconnect-notify",
+            "dedupe_key": "reconnect-notify-key",
+            "session_id": "active-context-reconnect-notify",
+            "objective_id": "objective-active-context-reconnect-notify",
+            "last_agent_action": "running tests",
+        }
+
+        with patch.object(adapter, "_emit_codex_active_context_response_notification") as emit_mock:
+            attached_unchanged = adapter._attach_active_context(unchanged_context, previous_context)  # noqa: SLF001
+            self.assertTrue(attached_unchanged["attached"])
+            self.assertEqual(attached_unchanged["prompt_id"], "prompt:reconnect-notify")
+            emit_mock.assert_not_called()
+
+            attached_changed = adapter._attach_active_context(changed_context, previous_context)  # noqa: SLF001
+            self.assertTrue(attached_changed["attached"])
+            self.assertEqual(attached_changed["prompt_id"], "prompt:reconnect-notify")
+            emit_mock.assert_called_once()
+
+    def test_notification_manager_returns_bounded_delivery_results(self):
+        manager = NotificationManager()
+        with patch.object(manager.notification_queue, "put") as put:
+            queued = manager.send_notification(
+                "Queued",
+                "queued message",
+                level="warning",
+                metadata={"notification_id": "notification:queued", "notification_type": "approval_required"},
+                click_url="http://localhost:3333/dashboard",
+            )
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["backend"], "notification_queue")
+        self.assertEqual(queued["notification_id"], "notification:queued")
+        self.assertEqual(manager.get_latest_delivery_result()["status"], "queued")
+        put.assert_called_once()
+
+        delivered = {
+            "status": "delivered",
+            "backend": "fake-native",
+            "notification_id": "notification:delivered",
+            "timestamp": "2026-05-27T00:00:00",
+        }
+        with patch.object(manager, "_show_notification", return_value=delivered):
+            result = manager.send_notification(
+                "Delivered",
+                "delivered message",
+                metadata={"notification_id": "notification:delivered"},
+                wait_for_delivery=True,
+            )
+        self.assertEqual(result, delivered)
+        self.assertEqual(manager.get_latest_delivery_result(), delivered)
+
+    def test_notification_manager_macos_fanout_records_attempts(self):
+        manager = NotificationManager()
+        with patch("corefiles.notifications.platform.system", return_value="Darwin"):
+            with patch("corefiles.notifications.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"):
+                with patch("corefiles.notifications.subprocess.run") as run:
+                    run.side_effect = [
+                        types.SimpleNamespace(returncode=0),
+                        types.SimpleNamespace(returncode=0),
+                    ]
+                    result = manager._show_macos_notification(  # noqa: SLF001
+                        "Fanout",
+                        "fanout test",
+                        level="info",
+                        metadata={"notification_id": "notification:fanout", "notification_type": "codex_prompt_sent"},
+                        fanout_all_backends=True,
+                    )
+        self.assertEqual(result["status"], "delivered")
+        attempts = result.get("attempts", [])
+        self.assertGreaterEqual(len(attempts), 2)
+        self.assertEqual(attempts[0]["backend"], "terminal-notifier")
+        self.assertEqual(attempts[1]["backend"], "osascript")
+
+    def test_native_operator_notification_persists_delivery_result_metadata(self):
+        class FakeNotificationManager:
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-27T00:00:00",
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            created = adapter._ensure_operator_notification(
+                notification_type="approval_required",
+                session_id="native-delivery-result",
+                objective_id="objective-native-delivery",
+                severity="warning",
+                summary="approval requires native delivery evidence",
+                evidence_refs=["local://cleanhouse/test/native-delivery"],
+                source="test",
+            )
+
+        self.assertIsNotNone(created)
+        delivery_result = created.metadata["native_delivery_result"]
+        self.assertEqual(delivery_result["status"], "delivered")
+        self.assertEqual(delivery_result["backend"], "fake-native")
+        self.assertEqual(delivery_result["notification_id"], created.id)
+        self.assertEqual(created.metadata["native_delivery"]["status"], "delivered")
+        self.assertEqual(created.metadata["native_delivery"]["channel"], "fake-native")
+        stored = PersistenceBackend.read("operator_notification", created.id)
+        self.assertEqual(
+            stored["data"]["notification"]["metadata"]["native_delivery_result"]["status"],
+            "delivered",
+        )
+
+    def test_native_operator_notification_tracks_visibility_phases_and_ack(self):
+        class FakeNotificationManager:
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-27T00:00:00",
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter.update_settings({"notification_policy": {"codex_activity_native_enabled": True}})
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            created = adapter._ensure_operator_notification(
+                notification_type="codex_prompt_sent",
+                session_id="visibility-phase-session",
+                objective_id="objective-visibility-phase",
+                severity="info",
+                summary="codex prompt visibility phase test",
+                evidence_refs=["local://cleanhouse/test/visibility-phase"],
+                source="prompt",
+                metadata={"prompt_id": "prompt:visibility-phase"},
+            )
+        self.assertIsNotNone(created)
+        phases = created.metadata.get("delivery_phases", {})
+        self.assertTrue(phases.get("dispatch_attempted"))
+        self.assertTrue(phases.get("backend_accepted"))
+        self.assertIn(created.metadata.get("visibility_state"), {"backend_accepted", "visibility_risk"})
+
+        acked = adapter.ack_operator_notification(created.id)
+        acked_meta = acked["notification"]["metadata"]
+        acked_phases = acked_meta.get("delivery_phases", {})
+        self.assertTrue(acked_phases.get("operator_acknowledged"))
+        self.assertTrue(acked_phases.get("visibility_confirmed"))
+        self.assertEqual(acked_meta.get("visibility_state"), "visibility_confirmed")
+
+    def test_hard_interrupt_bypasses_generic_cooldown_when_allowlisted(self):
+        class FakeNotificationManager:
+            send_calls = 0
+
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                FakeNotificationManager.send_calls += 1
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-27T00:00:00",
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter.update_settings({
+            "notification_policy": {
+                "codex_activity_native_enabled": True,
+                "cooldown_bypass_types": ["codex_prompt_sent"],
+            }
+        })
+        FakeNotificationManager.send_calls = 0
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            created = adapter._ensure_operator_notification(
+                notification_type="codex_prompt_sent",
+                session_id="cooldown-bypass-session",
+                objective_id=None,
+                severity="info",
+                summary="codex prompt notification",
+                evidence_refs=["local://cleanhouse/test/cooldown-bypass"],
+                source="test",
+                metadata={"prompt_id": "prompt:cooldown-bypass"},
+            )
+            resent = adapter._dispatch_native_operator_notification(created)  # noqa: SLF001
+        self.assertEqual(FakeNotificationManager.send_calls, 2)
+        self.assertEqual(resent.metadata.get("native_delivery_result", {}).get("status"), "delivered")
+
+    def test_cooldown_bypass_types_controls_allowlist_behavior(self):
+        class FakeNotificationManager:
+            send_calls = 0
+
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                FakeNotificationManager.send_calls += 1
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-27T00:00:00",
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        FakeNotificationManager.send_calls = 0
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            default_created = adapter._ensure_operator_notification(
+                notification_type="approval_required",
+                session_id="cooldown-allowlist-default",
+                objective_id=None,
+                severity="warning",
+                summary="cooldown default gate",
+                evidence_refs=["local://cleanhouse/test/cooldown/default"],
+                source="test",
+            )
+            default_redispatch = adapter._dispatch_native_operator_notification(default_created)  # noqa: SLF001
+            self.assertEqual(default_redispatch.metadata["native_delivery_result"]["status"], "skipped")
+            self.assertEqual(default_redispatch.metadata["native_delivery_result"]["reason"], "cooldown_active")
+            self.assertEqual(FakeNotificationManager.send_calls, 1)
+
+            adapter.update_settings({"notification_policy": {"cooldown_bypass_types": ["approval_required"]}})
+            bypass_created = adapter._ensure_operator_notification(
+                notification_type="approval_required",
+                session_id="cooldown-allowlist-bypass",
+                objective_id=None,
+                severity="warning",
+                summary="cooldown bypass gate",
+                evidence_refs=["local://cleanhouse/test/cooldown/bypass"],
+                source="test",
+            )
+            bypass_redispatch = adapter._dispatch_native_operator_notification(bypass_created)  # noqa: SLF001
+            self.assertEqual(bypass_redispatch.metadata["native_delivery_result"]["status"], "delivered")
+            self.assertEqual(FakeNotificationManager.send_calls, 3)
+
+    def test_non_hard_interrupt_respects_burst_cap(self):
+        class FakeNotificationManager:
+            send_calls = 0
+
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                FakeNotificationManager.send_calls += 1
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-27T00:00:00",
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter.update_settings({"notification_policy": {"burst_cap": 1, "burst_window_seconds": 60}})
+        FakeNotificationManager.send_calls = 0
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            first = adapter._ensure_operator_notification(
+                notification_type="approval_required",
+                session_id="burst-cap-session",
+                objective_id=None,
+                severity="warning",
+                summary="approval notification one",
+                evidence_refs=["local://cleanhouse/test/burst-cap/1"],
+                source="test",
+                metadata={"timestamp": "2026-05-27T00:00:01"},
+            )
+            second = adapter._ensure_operator_notification(
+                notification_type="approval_required",
+                session_id="burst-cap-session",
+                objective_id=None,
+                severity="warning",
+                summary="approval notification two",
+                evidence_refs=["local://cleanhouse/test/burst-cap/2"],
+                source="test",
+                metadata={"timestamp": "2026-05-27T00:00:02"},
+            )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(FakeNotificationManager.send_calls, 1)
+        self.assertEqual(first.metadata["native_delivery_result"]["status"], "delivered")
+        self.assertEqual(second.metadata["native_delivery_result"]["status"], "skipped")
+        self.assertEqual(second.metadata["native_delivery_result"]["reason"], "burst_cap_active")
+
+    def test_hard_interrupt_reminder_cycle_redispatches_until_ack(self):
+        class FakeNotificationManager:
+            send_calls = 0
+
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                FakeNotificationManager.send_calls += 1
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-27T00:00:00",
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter.update_settings({
+            "notification_policy": {
+                "hard_interrupt_reminder_seconds": 15,
+                "codex_activity_native_enabled": True,
+                "cooldown_bypass_types": ["codex_prompt_sent"],
+            }
+        })
+        FakeNotificationManager.send_calls = 0
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            created = adapter._ensure_operator_notification(
+                notification_type="codex_prompt_sent",
+                session_id="reminder-cycle-session",
+                objective_id=None,
+                severity="info",
+                summary="reminder cycle test",
+                evidence_refs=["local://cleanhouse/test/reminder-cycle"],
+                source="test",
+                metadata={"prompt_id": "prompt:reminder-cycle"},
+            )
+            metadata = dict(created.metadata)
+            visibility = dict(metadata.get("visibility", {}))
+            visibility["next_reminder_at"] = "2000-01-01T00:00:00"
+            metadata["visibility"] = visibility
+            stale = monitoring_module.OperatorNotificationRecord(
+                id=created.id,
+                notification_type=created.notification_type,
+                session_id=created.session_id,
+                objective_id=created.objective_id,
+                severity=created.severity,
+                summary=created.summary,
+                evidence_refs=created.evidence_refs,
+                created_at=created.created_at,
+                acknowledged=created.acknowledged,
+                acknowledged_at=created.acknowledged_at,
+                source=created.source,
+                metadata=metadata,
+            )
+            adapter._operator_notifications[stale.id] = stale  # noqa: SLF001
+            adapter._run_notification_visibility_cycle()  # noqa: SLF001
+        refreshed = adapter.get_operator_notifications("reminder-cycle-session")["notifications"][0]
+        self.assertGreaterEqual(FakeNotificationManager.send_calls, 2)
+        self.assertGreaterEqual(refreshed["metadata"]["visibility"].get("reminder_count", 0), 1)
+
+    def test_reminder_cycle_suppresses_after_max_native_reminders(self):
+        class FakeNotificationManager:
+            send_calls = 0
+
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                FakeNotificationManager.send_calls += 1
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-27T00:00:00",
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter.update_settings({
+            "notification_policy": {
+                "hard_interrupt_reminder_seconds": 15,
+                "max_native_reminders_per_notification": 1,
+                "codex_activity_native_enabled": True,
+                "cooldown_bypass_types": ["codex_prompt_sent"],
+            }
+        })
+        FakeNotificationManager.send_calls = 0
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            created = adapter._ensure_operator_notification(
+                notification_type="codex_prompt_sent",
+                session_id="reminder-suppressed-session",
+                objective_id=None,
+                severity="info",
+                summary="reminder suppression test",
+                evidence_refs=["local://cleanhouse/test/reminder-suppressed"],
+                source="test",
+                metadata={"prompt_id": "prompt:reminder-suppressed"},
+            )
+            metadata = dict(created.metadata)
+            visibility = dict(metadata.get("visibility", {}))
+            visibility["next_reminder_at"] = "2000-01-01T00:00:00"
+            metadata["visibility"] = visibility
+            due = monitoring_module.OperatorNotificationRecord(
+                id=created.id,
+                notification_type=created.notification_type,
+                session_id=created.session_id,
+                objective_id=created.objective_id,
+                severity=created.severity,
+                summary=created.summary,
+                evidence_refs=created.evidence_refs,
+                created_at=created.created_at,
+                acknowledged=created.acknowledged,
+                acknowledged_at=created.acknowledged_at,
+                source=created.source,
+                metadata=metadata,
+            )
+            adapter._operator_notifications[due.id] = due  # noqa: SLF001
+            adapter._run_notification_visibility_cycle()  # noqa: SLF001
+            self.assertEqual(FakeNotificationManager.send_calls, 2)
+
+            first_pass = adapter.get_operator_notifications("reminder-suppressed-session")["notifications"][0]
+            metadata2 = dict(first_pass["metadata"])
+            visibility2 = dict(metadata2.get("visibility", {}))
+            visibility2["next_reminder_at"] = "2000-01-01T00:00:00"
+            metadata2["visibility"] = visibility2
+            due_again = monitoring_module.OperatorNotificationRecord(
+                id=first_pass["id"],
+                notification_type=first_pass["notification_type"],
+                session_id=first_pass["session_id"],
+                objective_id=first_pass.get("objective_id"),
+                severity=first_pass["severity"],
+                summary=first_pass["summary"],
+                evidence_refs=tuple(first_pass["evidence_refs"]),
+                created_at=first_pass["created_at"],
+                acknowledged=first_pass["acknowledged"],
+                acknowledged_at=first_pass.get("acknowledged_at"),
+                source=first_pass["source"],
+                metadata=metadata2,
+            )
+            adapter._operator_notifications[due_again.id] = due_again  # noqa: SLF001
+            adapter._run_notification_visibility_cycle()  # noqa: SLF001
+
+        suppressed = adapter.get_operator_notifications("reminder-suppressed-session")["notifications"][0]
+        visibility = suppressed["metadata"]["visibility"]
+        self.assertEqual(FakeNotificationManager.send_calls, 2)
+        self.assertTrue(visibility.get("reminder_suppressed"))
+        self.assertEqual(visibility.get("suppressed_reason"), "max_native_reminders_reached")
+
+    def test_native_operator_notification_failure_creates_runtime_recovery_artifact(self):
+        class FakeNotificationManager:
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False):
+                return {
+                    "status": "failed",
+                    "backend": "fake-native",
+                    "reason": "fixture delivery failure",
+                    "notification_id": metadata["notification_id"],
+                    "timestamp": "2026-05-27T00:00:00",
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_REMINDERS": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            created = adapter._ensure_operator_notification(
+                notification_type="runtime_recovery_failure",
+                session_id="native-delivery-failure",
+                objective_id="objective-native-failure",
+                severity="critical",
+                summary="runtime recovery failure requires native delivery evidence",
+                evidence_refs=["local://cleanhouse/runtime/recovery-failure"],
+                source="test",
+            )
+
+        self.assertIsNotNone(created)
+        delivery_result = created.metadata["native_delivery_result"]
+        self.assertEqual(delivery_result["status"], "failed")
+        self.assertEqual(delivery_result["reason"], "fixture delivery failure")
+        self.assertIn("runtime_recovery_artifact_id", delivery_result)
+        self.assertIn("runtime_recovery_evidence_ref", delivery_result)
+
+        artifact = PersistenceBackend.read("runtime_recovery", delivery_result["runtime_recovery_artifact_id"])
+        self.assertIsNotNone(artifact)
+        recovery = artifact["data"]
+        self.assertEqual(recovery["failure_type"], "native_notification_delivery")
+        self.assertEqual(recovery["action"], "native_notification_delivery")
+        self.assertEqual(recovery["notification_id"], created.id)
+        self.assertEqual(recovery["delivery_result"]["status"], "failed")
+        self.assertEqual(recovery["final_state"]["status"], "failed")
+        self.assertIn("local://cleanhouse/operator_notification/" + created.id, recovery["evidence_refs"])
 
     def test_operator_notification_preserves_unknown_persisted_type(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
@@ -2819,6 +4553,205 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         }
         self.assertIn("destructive_command_attempt", restored_types)
 
+    def test_runtime_transition_notification_dedupes_and_uses_runtime_focus(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        healthy = {
+            "status": "healthy",
+            "runtime_state": "healthy",
+            "reason_codes": [],
+            "blocked_recovery": {},
+            "recovery_receipts": [],
+            "notifications": {"status": "ok", "failure_count": 0},
+            "report_executor": {"status": "ok"},
+        }
+        degraded = {
+            "status": "degraded",
+            "runtime_state": "degraded",
+            "reason_codes": ["readiness_probe_failed"],
+            "blocked_recovery": {"type": "readiness_probe_failed", "reason": "probe failed", "receipt_id": "runtime_recovery:abc"},
+            "recovery_receipts": [{"id": "runtime_recovery:abc", "action": "backend_restart_blocked", "timestamp": "2026-05-27T00:00:00", "final_state": {"runtime_state": "degraded"}, "integrity": {}}],
+            "notifications": {"status": "ok", "failure_count": 0},
+            "report_executor": {"status": "ok"},
+        }
+
+        with patch.dict(os.environ, {"CLEANHOUSE_NATIVE_NOTIFICATIONS": "1"}):
+            with patch("backend.runtime_supervisor.current_runtime_payload", side_effect=[healthy, degraded, degraded]):
+                first = adapter.get_runtime()
+                second = adapter.get_runtime()
+                third = adapter.get_runtime()
+
+        self.assertEqual(first["runtime_state"], "healthy")
+        self.assertEqual(second["runtime_state"], "degraded")
+        runtime_notifications = adapter.get_operator_notifications("runtime-global")["notifications"]
+        transitions = [item for item in runtime_notifications if item["notification_type"] == "runtime_state_transition"]
+        self.assertEqual(len(transitions), 1)
+        self.assertTrue(transitions[0]["incident_key"])
+        self.assertEqual(transitions[0]["visibility_proof"], "transport_only")
+        self.assertIn("runtime_focus=1", transitions[0]["metadata"]["click_url"])
+        self.assertNotIn("session_id=", transitions[0]["metadata"]["click_url"])
+        self.assertEqual(third["runtime_notifications"][0]["notification_type"], "runtime_state_transition")
+
+    def test_runtime_payload_exposes_operator_ready_and_visibility_summary(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        healthy = {
+            "status": "healthy",
+            "runtime_state": "healthy",
+            "reason_codes": [],
+            "operator_ready": True,
+            "blocked_recovery": {},
+            "recovery_receipts": [],
+            "notifications": {"status": "ok", "failure_count": 0},
+            "report_executor": {"status": "ok"},
+        }
+        with patch("backend.runtime_supervisor.current_runtime_payload", return_value=healthy):
+            runtime = adapter.get_runtime()
+        self.assertTrue(runtime["operator_ready"])
+        self.assertIn("visibility_proof_summary", runtime)
+        self.assertIn("transport_only", runtime["visibility_proof_summary"])
+        self.assertIn("operator_confirmed", runtime["visibility_proof_summary"])
+
+    def test_runtime_restoration_notification_survives_restart(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        degraded = {
+            "status": "degraded",
+            "runtime_state": "degraded",
+            "reason_codes": ["readiness_probe_failed"],
+            "blocked_recovery": {},
+            "recovery_receipts": [],
+            "notifications": {"status": "ok", "failure_count": 0},
+            "report_executor": {"status": "ok"},
+        }
+        healthy = {
+            "status": "healthy",
+            "runtime_state": "healthy",
+            "reason_codes": [],
+            "blocked_recovery": {},
+            "recovery_receipts": [],
+            "notifications": {"status": "ok", "failure_count": 0},
+            "report_executor": {"status": "ok"},
+        }
+        with patch("backend.runtime_supervisor.current_runtime_payload", side_effect=[degraded, healthy]):
+            adapter.get_runtime()
+            adapter.get_runtime()
+
+        restarted = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        notifications = restarted.get_operator_notifications("runtime-global")["notifications"]
+        restored = [item for item in notifications if item["notification_type"] == "runtime_connection_restored"]
+        self.assertEqual(len(restored), 1)
+        self.assertTrue(all(ref.startswith("local://cleanhouse/") for ref in restored[0]["evidence_refs"]))
+
+    def test_excessive_traversal_notification_is_distinct_from_scope_drift(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        prompt = adapter.submit_prompt(
+            text="Traverse only requested avatar path",
+            context="excessive traversal notification fixture",
+            scope="assets/avatars/requested/",
+            tool_identity="Codex",
+            session_id="excessive-traversal-session",
+            objective_id="objective-excessive-traversal",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            requested = root / "assets" / "avatars" / "requested"
+            substituted = root / "assets" / "avatars" / "substituted"
+            requested.mkdir(parents=True)
+            substituted.mkdir(parents=True)
+            (requested / "avatar.png").write_text("requested-v1")
+            changed = substituted / "avatar.png"
+            changed.write_text("substituted-v1")
+            before = adapter.create_snapshot(str(root), "before", session_id=prompt["session_id"])
+            changed.write_text("substituted-v2")
+            after = adapter.create_snapshot(str(root), "after", session_id=prompt["session_id"])
+            adapter.compute_diff(before["id"], after["id"], session_id=prompt["session_id"])
+
+        adapter.build_timeline(prompt["session_id"])
+        adapter.correlate(prompt["session_id"])
+        adapter.classify(prompt["session_id"])
+        adapter.generate_alerts(prompt["session_id"])
+        workstation = adapter.get_workstation(prompt["session_id"])
+        notification_types = {item["notification_type"] for item in workstation["notifications"]}
+        self.assertIn("scope_drift_detected", notification_types)
+        self.assertIn("excessive_traversal", notification_types)
+        traversal = [item for item in workstation["notifications"] if item["notification_type"] == "excessive_traversal"]
+        self.assertEqual(len(traversal), 1)
+        self.assertEqual(traversal[0]["severity"], "critical")
+        self.assertEqual(traversal[0]["metadata"]["scope_relation"], "outside_declared_scope")
+
+    def test_scope_drift_incident_key_reuses_same_evidence_refs(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        refs = [
+            "local://cleanhouse/receipt/receipt:scope-drift",
+            "local://cleanhouse/diff/diff:scope-drift",
+        ]
+        first_key = adapter._notification_incident_key(  # noqa: SLF001
+            notification_type="scope_drift_detected",
+            session_id="scope-drift-key-session",
+            evidence_refs=refs,
+            metadata={"timestamp": "2026-05-28T12:00:00Z"},
+        )
+        second_key = adapter._notification_incident_key(  # noqa: SLF001
+            notification_type="scope_drift_detected",
+            session_id="scope-drift-key-session",
+            evidence_refs=list(reversed(refs)),
+            metadata={"timestamp": "2026-05-28T12:00:00Z"},
+        )
+        self.assertEqual(first_key, second_key)
+
+        first = adapter._ensure_operator_notification(
+            notification_type="scope_drift_detected",
+            session_id="scope-drift-key-session",
+            objective_id=None,
+            severity="critical",
+            summary="scope drift first",
+            evidence_refs=refs,
+            source="test",
+        )
+        second = adapter._ensure_operator_notification(
+            notification_type="scope_drift_detected",
+            session_id="scope-drift-key-session",
+            objective_id=None,
+            severity="critical",
+            summary="scope drift second",
+            evidence_refs=list(reversed(refs)),
+            source="test",
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.id, second.id)
+
+    def test_scope_drift_dedupe_across_emit_paths_with_same_evidence_refs(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        refs = [
+            "local://cleanhouse/receipt/receipt:scope-drift-emit-path",
+            "local://cleanhouse/diff/diff:scope-drift-emit-path",
+        ]
+        first = adapter._ensure_operator_notification(
+            notification_type="scope_drift_detected",
+            session_id="scope-drift-emit-path-session",
+            objective_id="objective-scope-drift-emit-path",
+            severity="warning",
+            summary="scope drift from workstation path",
+            evidence_refs=refs,
+            source="workstation",
+            metadata={"receipt_id": "receipt:scope-drift-emit-path"},
+        )
+        second = adapter._ensure_operator_notification(
+            notification_type="scope_drift_detected",
+            session_id="scope-drift-emit-path-session",
+            objective_id="objective-scope-drift-emit-path",
+            severity="warning",
+            summary="scope drift from alert path",
+            evidence_refs=list(reversed(refs)),
+            source="alert",
+            metadata={"alert_id": "alert:scope-drift-emit-path"},
+        )
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.id, second.id)
+        notifications = adapter.get_operator_notifications("scope-drift-emit-path-session")
+        scoped = [item for item in notifications["notifications"] if item.get("notification_type") == "scope_drift_detected"]
+        self.assertEqual(len(scoped), 1)
+
     def test_continuity_degraded_notification_has_local_evidence(self):
         with patch.dict(os.environ, {"CLEANHOUSE_CONTINUITY_PICKUP_FAILURE": "pickup_runtime_failure"}):
             adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
@@ -2835,6 +4768,297 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertEqual(len(degraded), 1)
         self.assertGreater(len(degraded[0]["evidence_refs"]), 0)
         self.assertTrue(all(ref.startswith("local://cleanhouse/") for ref in degraded[0]["evidence_refs"]))
+
+    def test_continuity_degraded_native_delivery_metadata(self):
+        class FakeNotificationManager:
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False):
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-28T00:00:00",
+                }
+
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_CONTINUITY_PICKUP_FAILURE": "pickup_runtime_failure",
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+            adapter.start_operator_session({
+                "session_id": "continuity-native-session",
+                "objective_id": "objective-continuity-native",
+                "summary": "continuity native delivery session",
+            })
+            workstation = adapter.get_workstation("continuity-native-session")
+
+        notifications = workstation["notifications"]
+        degraded = [item for item in notifications if item["notification_type"] == "continuity_degraded"]
+        self.assertEqual(len(degraded), 1)
+        self.assertEqual(degraded[0]["metadata"]["native_delivery_result"]["status"], "delivered")
+        self.assertEqual(degraded[0]["metadata"]["native_delivery_result"]["backend"], "fake-native")
+
+    def test_collector_failure_notifications_use_hard_interrupt_delivery(self):
+        class FakeNotificationManager:
+            send_calls = 0
+
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False):
+                FakeNotificationManager.send_calls += 1
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-28T00:00:00",
+                }
+
+        FakeNotificationManager.send_calls = 0
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        with patch.dict(os.environ, {"CLEANHOUSE_NATIVE_NOTIFICATIONS": "1"}), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            first = adapter._ensure_operator_notification(
+                notification_type="collector_failure",
+                session_id="runtime-global",
+                objective_id=None,
+                severity="critical",
+                summary="collector failure: filesystem_watcher status=failure",
+                evidence_refs=["local://cleanhouse/collector/filesystem_watcher/failure/a"],
+                source="test",
+                metadata={"collector_name": "filesystem_watcher", "collector_status": "failure"},
+            )
+            second = adapter._ensure_operator_notification(
+                notification_type="collector_failure",
+                session_id="runtime-global",
+                objective_id=None,
+                severity="critical",
+                summary="collector failure: filesystem_watcher status=failure",
+                evidence_refs=["local://cleanhouse/collector/filesystem_watcher/failure/b"],
+                source="test",
+                metadata={"collector_name": "filesystem_watcher", "collector_status": "failure"},
+            )
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.metadata["native_delivery_result"]["status"], "delivered")
+        self.assertEqual(second.metadata["native_delivery_result"]["status"], "skipped")
+        self.assertEqual(second.metadata["native_delivery_result"].get("reason"), "cooldown_active")
+        self.assertEqual(FakeNotificationManager.send_calls, 1)
+
+    def test_hard_interrupt_delivery_persists_across_restart(self):
+        class FakeNotificationManager:
+            send_calls = 0
+
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False):
+                FakeNotificationManager.send_calls += 1
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-28T00:00:00",
+                }
+
+        FakeNotificationManager.send_calls = 0
+        with patch.dict(os.environ, {"CLEANHOUSE_NATIVE_NOTIFICATIONS": "1"}), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+            adapter.update_settings({"notification_policy": {"cooldown_bypass_types": ["collector_failure"]}})
+            first = adapter._ensure_operator_notification(
+                notification_type="collector_failure",
+                session_id="runtime-global",
+                objective_id=None,
+                severity="critical",
+                summary="collector failure: runtime_event_writer status=failure",
+                evidence_refs=["local://cleanhouse/collector/runtime_event_writer/failure/1"],
+                source="test",
+                metadata={"collector_name": "runtime_event_writer", "collector_status": "failure"},
+            )
+            restarted = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+            restarted.update_settings({"notification_policy": {"cooldown_bypass_types": ["collector_failure"]}})
+            second = restarted._ensure_operator_notification(
+                notification_type="collector_failure",
+                session_id="runtime-global",
+                objective_id=None,
+                severity="critical",
+                summary="collector failure: runtime_event_writer status=failure",
+                evidence_refs=["local://cleanhouse/collector/runtime_event_writer/failure/2"],
+                source="test",
+                metadata={"collector_name": "runtime_event_writer", "collector_status": "failure"},
+            )
+
+        self.assertEqual(first.metadata["native_delivery_result"]["status"], "delivered")
+        self.assertEqual(second.metadata["native_delivery_result"]["status"], "delivered")
+        self.assertEqual(FakeNotificationManager.send_calls, 2)
+
+    def test_critical_filesystem_mutation_notification_for_out_of_scope_delete(self):
+        class FakeNotificationManager:
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False):
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-28T00:00:00",
+                }
+
+        with patch.dict(os.environ, {"CLEANHOUSE_NATIVE_NOTIFICATIONS": "1"}), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+            prompt = adapter.submit_prompt(
+                text="Only mutate requested avatar scope",
+                context="critical filesystem mutation fixture",
+                scope="assets/avatars/requested/",
+                tool_identity="Codex",
+                session_id="critical-mutation-session",
+                objective_id="objective-critical-mutation",
+            )
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                requested = root / "assets" / "avatars" / "requested"
+                substituted = root / "assets" / "avatars" / "substituted"
+                requested.mkdir(parents=True)
+                substituted.mkdir(parents=True)
+                (requested / "avatar.png").write_text("requested-v1")
+                deleted_target = substituted / "avatar.png"
+                deleted_target.write_text("substituted-v1")
+                before = adapter.create_snapshot(str(root), "before", session_id=prompt["session_id"])
+                deleted_target.unlink()
+                after = adapter.create_snapshot(str(root), "after", session_id=prompt["session_id"])
+                adapter.compute_diff(before["id"], after["id"], session_id=prompt["session_id"])
+            adapter.build_timeline(prompt["session_id"])
+            adapter.correlate(prompt["session_id"])
+            adapter.classify(prompt["session_id"])
+            adapter.generate_alerts(prompt["session_id"])
+            workstation = adapter.get_workstation(prompt["session_id"])
+
+        notifications = workstation["notifications"]
+        critical = [item for item in notifications if item["notification_type"] == "critical_filesystem_mutation"]
+        self.assertEqual(len(critical), 1)
+        self.assertEqual(critical[0]["severity"], "critical")
+        self.assertIn(critical[0]["metadata"]["scope_relation"], {"out_of_scope", "unknown"})
+        self.assertEqual(critical[0]["metadata"]["mutation_change_type"], "deleted")
+        self.assertEqual(critical[0]["metadata"]["native_delivery_result"]["status"], "delivered")
+
+    def test_rollback_needed_notification_when_scope_policy_requires_review(self):
+        class FakeNotificationManager:
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False):
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-28T00:00:00",
+                }
+
+        with patch.dict(os.environ, {"CLEANHOUSE_NATIVE_NOTIFICATIONS": "1"}), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+            prompt = adapter.submit_prompt(
+                text="Mutate only requested avatar scope",
+                context="rollback needed fixture",
+                scope="assets/avatars/requested/",
+                tool_identity="Codex",
+                session_id="rollback-needed-session",
+                objective_id="objective-rollback-needed",
+            )
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                requested = root / "assets" / "avatars" / "requested"
+                substituted = root / "assets" / "avatars" / "substituted"
+                requested.mkdir(parents=True)
+                substituted.mkdir(parents=True)
+                (requested / "avatar.png").write_text("requested-v1")
+                changed = substituted / "avatar.png"
+                changed.write_text("substituted-v1")
+                before = adapter.create_snapshot(str(root), "before", session_id=prompt["session_id"])
+                changed.write_text("substituted-v2")
+                after = adapter.create_snapshot(str(root), "after", session_id=prompt["session_id"])
+                adapter.compute_diff(before["id"], after["id"], session_id=prompt["session_id"])
+
+            adapter.build_timeline(prompt["session_id"])
+            adapter.correlate(prompt["session_id"])
+            adapter.classify(prompt["session_id"])
+            adapter.generate_alerts(prompt["session_id"])
+            receipt = adapter.build_receipt(prompt["session_id"])
+            notifications = adapter.get_operator_notifications(prompt["session_id"])["notifications"]
+
+        self.assertEqual(receipt["status"], "ok")
+        rollback_needed = [item for item in notifications if item["notification_type"] == "rollback_needed"]
+        self.assertEqual(len(rollback_needed), 1)
+        self.assertEqual(rollback_needed[0]["metadata"]["receipt_id"], receipt["id"])
+        self.assertNotEqual(rollback_needed[0]["metadata"]["rollback_status"], "executed_verified")
+
+    def test_scope_enforcement_generates_mediation_events_and_deviation_records(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        prompt = adapter.submit_prompt(
+            text="Mutate only requested avatar scope",
+            context="scope enforcement fixture",
+            scope="assets/avatars/requested/",
+            tool_identity="Codex",
+            session_id="scope-enforcement-session",
+            objective_id="objective-scope-enforcement",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            requested = root / "assets" / "avatars" / "requested"
+            substituted = root / "assets" / "avatars" / "substituted"
+            requested.mkdir(parents=True)
+            substituted.mkdir(parents=True)
+            (requested / "avatar.png").write_text("requested-v1")
+            changed = substituted / "avatar.png"
+            changed.write_text("substituted-v1")
+            before = adapter.create_snapshot(str(root), "before-scope-enforcement", session_id=prompt["session_id"])
+            changed.write_text("substituted-v2")
+            after = adapter.create_snapshot(str(root), "after-scope-enforcement", session_id=prompt["session_id"])
+            adapter.compute_diff(before["id"], after["id"], session_id=prompt["session_id"])
+
+        receipt = adapter.build_receipt(prompt["session_id"])
+        self.assertEqual(receipt["status"], "ok")
+        self.assertIn("scope_enforcement", receipt)
+        enforcement = receipt["scope_enforcement"]
+        self.assertEqual(enforcement["policy_id"], "scope_enforcement_v1")
+        self.assertEqual(enforcement["enforcement_status"], "blocked_pending_approval")
+        self.assertGreaterEqual(len(enforcement["deviation_records"]), 3)
+        boundary_status = {entry["boundary"]: entry["status"] for entry in enforcement["boundaries"]}
+        self.assertEqual(boundary_status["declared_objective"], "exceeded")
+        self.assertEqual(boundary_status["approved_scope"], "exceeded")
+        self.assertEqual(boundary_status["authorization_boundary"], "exceeded")
+        self.assertGreaterEqual(len(enforcement["mediation_events"]), 1)
+        self.assertEqual(enforcement["mediation_events"][0]["event_type"], "scope_enforcement_mediation")
+        self.assertTrue(enforcement["mediation_events"][0]["event_ref"].startswith("local://cleanhouse/scope-enforcement/"))
+        for deviation in enforcement["deviation_records"]:
+            self.assertEqual(deviation["record_type"], "scope_boundary_exceeded")
+            self.assertTrue(deviation["enforceable"])
+            self.assertTrue(any(ref.startswith("local://cleanhouse/") for ref in deviation["evidence_refs"]))
+        self.assertIn("approval_policy", receipt)
+        self.assertEqual(receipt["approval_policy"]["policy_id"], "scope_out_of_scope_v1")
+
+        approvals = adapter.get_approval_queue(session_id=prompt["session_id"])
+        self.assertEqual(approvals["count"], 1)
+        approval = approvals["approval_queue"][0]
+        self.assertTrue(approval["metadata"]["enforcement_required"])
+        self.assertEqual(approval["metadata"]["enforcement_action"], "block_scope_expansion_until_review")
+        self.assertEqual(approval["metadata"]["boundary_type"], "scope_authorization")
+
+        timeline = adapter.get_timelines(session_id=prompt["session_id"])
+        entries = timeline["timelines"][0]["entries"] if timeline["timelines"] else []
+        enforcement_events = [entry for entry in entries if entry.get("event_type") == "scope_enforcement_mediation"]
+        self.assertGreaterEqual(len(enforcement_events), 1)
+
+        replay = adapter.replay_receipt_state(receipt["id"])
+        self.assertEqual(replay["status"], "ok")
+        self.assertIn("scope_enforcement", replay)
+        self.assertEqual(
+            len(replay["scope_enforcement"]["deviation_records"]),
+            len(enforcement["deviation_records"]),
+        )
+
+        exported = adapter.export_receipt_timeline_bundle(receipt["id"])
+        self.assertEqual(exported["status"], "ok")
+        self.assertIn("scope_enforcement", exported["bundle"]["receipt"])
+        self.assertEqual(
+            len(exported["bundle"]["receipt"]["scope_enforcement"]["deviation_records"]),
+            len(enforcement["deviation_records"]),
+        )
 
     def test_replay_or_signature_failure_notification_from_tampered_bundle(self):
         adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
@@ -3021,7 +5245,10 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
 
         workstation = adapter.get_workstation(prompt["session_id"])
         provenance = workstation["continuity_provenance"]
-        self.assertIn(provenance["status"], {"ok", "degraded", "inferred", "unknown"})
+        self.assertIn(provenance["status"], {"ok", "ok_with_pickup_degraded", "degraded", "inferred", "unknown"})
+        self.assertIn("continuity", workstation)
+        self.assertIn(workstation["continuity"]["active_source_status"], {"ok", "degraded", "inferred", "unknown"})
+        self.assertIn(workstation["continuity"]["pickup_channel_status"], {"ok", "degraded"})
         self.assertIn("active_source", provenance)
         self.assertIn("freshness", provenance)
         self.assertIn("confidence_basis", provenance)
@@ -3282,3 +5509,667 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self._set_request_json({"session_id": "route-session", "finalize": "yes"})
         response = cleanhouse_module.stop_operator_session()
         self._assert_bad_request(response, "finalize must be a boolean")
+
+    def test_active_context_routes_validate_and_pickup(self):
+        class PickupCollector:
+            def collect(self, *, follow_enabled, ignored_keys=(), explicit_pickup=None):
+                pickup = explicit_pickup or {}
+                text = str(pickup.get("text") or pickup.get("context") or "route pickup")
+                return {
+                    "id": "active_context:route",
+                    "dedupe_key": "route-key",
+                    "source_type": "operator_pickup",
+                    "source_labels": ["operator_pickup_observed"],
+                    "truth_classification": "observed_context",
+                    "frontmost_app": {"app_name": "Codex", "window_title": "route"},
+                    "current_repo": str(pickup.get("repo_path") or ""),
+                    "current_objective": str(pickup.get("objective") or text),
+                    "active_prompt": text,
+                    "active_prompt_preview": text,
+                    "last_agent_action": "",
+                    "session_id": str(pickup.get("session_id") or "active-context-route"),
+                    "objective_id": str(pickup.get("objective_id") or "objective-active-context-route"),
+                    "tool_identity": str(pickup.get("tool_identity") or "codex"),
+                    "context": str(pickup.get("context") or ""),
+                    "source_ref": str(pickup.get("source_ref") or ""),
+                    "evidence_refs": ["local://cleanhouse/active-context/active_context:route"],
+                    "metadata": {"active_context_source": "operator_pickup"},
+                    "updated_at": "2026-05-28T12:00:00Z",
+                    "attachable": bool(text),
+                }
+
+        old_adapter = cleanhouse_module._adapter
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter._active_context_collector = PickupCollector()
+        cleanhouse_module._adapter = adapter
+        try:
+            self._set_request_json({"enabled": "yes"})
+            self._assert_bad_request(cleanhouse_module.active_context_follow(), "enabled must be a boolean")
+
+            self._set_request_json({})
+            self._assert_bad_request(cleanhouse_module.active_context_pickup(), "text or context is required")
+
+            self._set_request_json({"text": "route pickup", "session_id": "bad session id"})
+            self._assert_bad_request(cleanhouse_module.active_context_pickup(), "session_id format is invalid")
+
+            self._set_request_json({"text": "route pickup", "repo_path": "/definitely/not/a/real/path"})
+            self._assert_bad_request(cleanhouse_module.active_context_pickup(), "repo_path does not exist")
+
+            self._set_request_json({"enabled": True})
+            follow = cleanhouse_module.active_context_follow()
+            self.assertEqual(follow["status"], "ok")
+            self.assertTrue(follow["follow_enabled"])
+
+            self._set_request_json({
+                "text": "route pickup",
+                "context": "approved route pickup",
+                "repo_path": str(Path.cwd()),
+                "session_id": "active-context-route",
+                "objective_id": "objective-active-context-route",
+                "source_ref": "local://cleanhouse/test/active-context-route",
+            })
+            pickup = cleanhouse_module.active_context_pickup()
+            self.assertEqual(pickup["status"], "ok")
+            self.assertEqual(pickup["active_context"]["source_type"], "operator_pickup")
+            self.assertEqual(pickup["active_context"]["session_id"], "active-context-route")
+
+            self._set_request_args({"refresh": "1"})
+            active = cleanhouse_module.active_context()
+            self.assertEqual(active["status"], "ok")
+            self.assertEqual(active["active_context"]["id"], "active_context:route")
+
+            self._set_request_json({"dedupe_key": "route-key"})
+            ignored = cleanhouse_module.active_context_ignore()
+            self.assertEqual(ignored["status"], "ok")
+            self.assertEqual(ignored["ignored_key"], "route-key")
+        finally:
+            cleanhouse_module._adapter = old_adapter
+
+    def test_domain_event_flow_creates_incident_policy_and_notification(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        emitted = adapter.emit_domain_event({
+            "domain": "coding_agents",
+            "surface": "tool_events",
+            "event_type": "unexpected_deletion",
+            "severity": "critical",
+            "session_id": "ambient-domain-event-session",
+            "objective_id": "objective-ambient-domain-event",
+            "actor": {"type": "agent", "name": "codex"},
+            "resource": {"path": "assets/logo.svg"},
+            "observed_vs_expected": {"status": "unexpected", "details": "delete outside scope"},
+            "evidence_refs": ["local://cleanhouse/test/domain-event/unexpected-delete"],
+        })
+        self.assertEqual(emitted["status"], "ok")
+        self.assertEqual(emitted["event"]["event_type"], "unexpected_deletion")
+        self.assertEqual(emitted["incident"]["status"], "open")
+        self.assertEqual(emitted["incident"]["notification_type"], "unexpected_deletion_detected")
+        self.assertEqual(emitted["policy_decision"]["notification_type"], "unexpected_deletion_detected")
+
+        incidents = adapter.get_incident_cases(session_id="ambient-domain-event-session")
+        self.assertGreaterEqual(incidents["count"], 1)
+        self.assertEqual(incidents["incidents"][0]["source_event_id"], emitted["event"]["id"])
+
+        decisions = adapter.notification_policy_audit(limit=20)
+        self.assertTrue(any(row.get("event_id") == emitted["event"]["id"] for row in decisions["decisions"]))
+
+        deliveries = adapter.notification_delivery_audit(limit=20)
+        self.assertGreaterEqual(deliveries["count"], 1)
+
+    def test_workstation_includes_ambient_presence_sections(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        session_id = "ambient-workstation-session"
+        adapter.start_operator_session({
+            "session_id": session_id,
+            "objective_id": "objective-ambient-workstation",
+            "summary": "ambient workstation lane",
+        })
+        adapter.emit_domain_event({
+            "domain": "local_runtime",
+            "surface": "network",
+            "event_type": "port_reopened_unknown_process",
+            "severity": "critical",
+            "session_id": session_id,
+            "objective_id": "objective-ambient-workstation",
+            "actor": {"type": "runtime", "name": "watcher"},
+            "resource": {"port": 5050},
+            "observed_vs_expected": {"status": "unexpected", "details": "port reopened"},
+            "evidence_refs": ["local://cleanhouse/test/workstation/port-reopen"],
+        })
+        workstation = adapter.get_workstation(session_id)
+
+        self.assertIn("domain_observer_matrix", workstation)
+        self.assertIn("active_incident_queue", workstation)
+        self.assertIn("notification_history", workstation)
+        self.assertIn("action_history", workstation)
+        self.assertIn("unresolved_gaps", workstation)
+        self.assertGreaterEqual(len(workstation["active_incident_queue"]), 1)
+        self.assertIn("observer_coverage", workstation["unresolved_gaps"])
+        self.assertIn("runtime", workstation["unresolved_gaps"])
+
+    def test_domain_events_route_validates_limit(self):
+        self._set_request_args({"limit": "abc"})
+        response = cleanhouse_module.domain_events()
+        self._assert_bad_request(response, "limit must be an integer")
+
+    def test_emit_domain_event_route_calls_adapter(self):
+        class RouteAdapter:
+            def __init__(self):
+                self.payload = None
+
+            def emit_domain_event(self, payload):
+                self.payload = payload
+                return {"status": "ok", "event": payload}
+
+        adapter = RouteAdapter()
+        payload = {
+            "domain": "coding_agents",
+            "surface": "tool_events",
+            "event_type": "scope_drift_detected",
+            "session_id": "ambient-route-session",
+            "actor": {},
+            "resource": {},
+            "observed_vs_expected": {},
+            "unknown_fields": [],
+            "evidence_refs": [],
+            "metadata": {},
+        }
+        self._set_request_json(payload)
+        with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=adapter):
+            response = cleanhouse_module.emit_domain_event()
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(adapter.payload["domain"], "coding_agents")
+        self.assertEqual(adapter.payload["event_type"], "scope_drift_detected")
+
+    def test_incident_action_route_calls_adapter(self):
+        class RouteAdapter:
+            def __init__(self):
+                self.calls = []
+
+            def update_incident_case(self, incident_id, action, note="", actor="operator"):
+                self.calls.append((incident_id, action, note, actor))
+                return {"status": "ok", "incident": {"id": incident_id, "status": "acknowledged"}}
+
+        adapter = RouteAdapter()
+        self._set_request_json({"note": "ack", "actor": "dashboard"})
+        with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=adapter):
+            response = cleanhouse_module.incident_action("incident:123", "ack")
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(adapter.calls, [("incident:123", "ack", "ack", "dashboard")])
+
+    def test_notification_probe_route_calls_adapter(self):
+        class RouteAdapter:
+            def __init__(self):
+                self.calls = []
+
+            def send_test_operator_notification(self, **kwargs):
+                self.calls.append(kwargs)
+                return {"status": "ok", "notification": {"id": "notification:probe"}}
+
+        adapter = RouteAdapter()
+        self._set_request_json({
+            "session_id": "probe-session",
+            "notification_type": "codex_prompt_sent",
+            "severity": "info",
+            "summary": "probe test",
+        })
+        with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=adapter):
+            response = cleanhouse_module.notification_probe()
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(adapter.calls[0]["session_id"], "probe-session")
+        self.assertEqual(adapter.calls[0]["notification_type"], "codex_prompt_sent")
+
+    def test_notification_unack_and_snooze_routes_validate_and_call_adapter(self):
+        class RouteAdapter:
+            def __init__(self):
+                self.unack_calls = []
+                self.snooze_calls = []
+
+            def set_operator_notification_acknowledged(self, notification_id, *, acknowledged):
+                self.unack_calls.append((notification_id, acknowledged))
+                return {"status": "ok", "notification": {"id": notification_id, "acknowledged": acknowledged}}
+
+            def snooze_operator_notification(self, notification_id, *, minutes):
+                self.snooze_calls.append((notification_id, minutes))
+                return {"status": "ok", "notification": {"id": notification_id}}
+
+        adapter = RouteAdapter()
+        self._set_request_json({})
+        with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=adapter):
+            response = cleanhouse_module.unack_notification("notification:test")
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(adapter.unack_calls, [("notification:test", False)])
+
+        self._set_request_json({"minutes": 15})
+        with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=adapter):
+            response = cleanhouse_module.snooze_notification("notification:test")
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(adapter.snooze_calls, [("notification:test", 15)])
+
+        self._set_request_json({"minutes": 0})
+        response = cleanhouse_module.snooze_notification("notification:test")
+        self._assert_bad_request(response, "minutes must be a positive integer")
+
+    def test_codex_prompt_sent_creates_notification(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        result = adapter.submit_prompt(
+            text="Fix runtime drift",
+            context="operator prompt",
+            scope="backend/",
+            tool_identity="codex",
+            session_id="codex-prompt-notify-session",
+            objective_id="objective-codex-prompt-notify",
+        )
+        self.assertEqual(result["status"], "ok")
+        notifications = adapter.get_operator_notifications("codex-prompt-notify-session")["notifications"]
+        codex_notifications = [item for item in notifications if item.get("notification_type") == "codex_prompt_sent"]
+        self.assertEqual(len(codex_notifications), 1)
+        self.assertIn("prompt sent to codex", codex_notifications[0]["summary"])
+
+    def test_codex_prompt_notification_does_not_scan_active_context_history(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        events_db_path = str(Path(self._data_tmp.name) / "events.db")
+
+        def list_artifacts_without_active_context(kind):
+            if kind == "active_context":
+                raise AssertionError("prompt notification hot path scanned active_context history")
+            return []
+
+        with patch.dict(os.environ, {"CLEANHOUSE_EVENTS_DB": events_db_path}), patch.object(
+            PersistenceBackend,
+            "list_artifacts",
+            side_effect=list_artifacts_without_active_context,
+        ):
+            result = adapter.submit_prompt(
+                text="Fix runtime drift without active context scan",
+                context="operator prompt",
+                scope="backend/",
+                tool_identity="codex",
+                session_id="codex-prompt-no-active-context-scan",
+                objective_id="objective-codex-prompt-no-active-context-scan",
+            )
+            self.assertEqual(result["status"], "ok")
+            notifications = adapter.get_operator_notifications("codex-prompt-no-active-context-scan")["notifications"]
+
+        codex_notifications = [item for item in notifications if item.get("notification_type") == "codex_prompt_sent"]
+        self.assertEqual(len(codex_notifications), 1)
+
+    def test_required_agent_notification_classes_record_delivery_or_policy_skip(self):
+        class FakeNotificationManager:
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-28T12:00:00Z",
+                    "attempts": [
+                        {"backend": "terminal-notifier", "status": "delivered"},
+                        {"backend": "osascript", "status": "delivered"},
+                    ],
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_NATIVE_NOTIFICATIONS": "1",
+                "CLEANHOUSE_NATIVE_CODEX_ACTIVITY": "1",
+                "CLEANHOUSE_NATIVE_LIVE_ONLY": "0",
+                "CLEANHOUSE_NATIVE_DESKTOP_ALLOWLIST_ONLY": "1",
+            },
+        ), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            prompt = adapter.submit_prompt(
+                text="verify required classes",
+                context="operator prompt",
+                scope="backend/",
+                tool_identity="codex",
+                session_id="required-classes-default-session",
+                objective_id="objective-required-classes-default",
+            )
+            self.assertEqual(prompt["status"], "ok")
+            start = adapter._ensure_operator_notification(
+                notification_type="session_started",
+                session_id="required-classes-default-session",
+                objective_id="objective-required-classes-default",
+                severity="info",
+                summary="agent started",
+                evidence_refs=["local://cleanhouse/test/required/start"],
+                source="test",
+            )
+            finish = adapter._ensure_operator_notification(
+                notification_type="session_ended",
+                session_id="required-classes-default-session",
+                objective_id="objective-required-classes-default",
+                severity="info",
+                summary="agent finished",
+                evidence_refs=["local://cleanhouse/test/required/finish"],
+                source="test",
+            )
+            deviation = adapter._ensure_operator_notification(
+                notification_type="scope_drift_detected",
+                session_id="required-classes-default-session",
+                objective_id="objective-required-classes-default",
+                severity="warning",
+                summary="scope drift detected",
+                evidence_refs=["local://cleanhouse/test/required/deviation"],
+                source="test",
+            )
+        self.assertIsNotNone(start)
+        self.assertIsNotNone(finish)
+        self.assertIsNotNone(deviation)
+        notifications = adapter.get_operator_notifications("required-classes-default-session")["notifications"]
+        required = {item["notification_type"]: item for item in notifications if item.get("notification_type") in {
+            "codex_prompt_sent",
+            "session_started",
+            "session_ended",
+            "scope_drift_detected",
+        }}
+        self.assertEqual(set(required.keys()), {"codex_prompt_sent", "session_started", "session_ended", "scope_drift_detected"})
+        for item in required.values():
+            result = item["metadata"]["native_delivery_result"]
+            if item["notification_type"] in {"session_started", "session_ended", "scope_drift_detected"}:
+                self.assertEqual(result["status"], "delivered")
+                self.assertEqual(result["backend"], "fake-native")
+                self.assertGreaterEqual(len(result.get("attempts", [])), 2)
+            else:
+                self.assertEqual(result["status"], "skipped")
+                self.assertEqual(result["backend"], "native_noise_control_policy")
+
+    def test_codex_tool_event_creates_response_notification(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        result = adapter.submit_tool_event({
+            "tool_identity": "codex",
+            "command": "codex apply patch",
+            "args": ["codex", "apply", "patch"],
+            "exit_code": 0,
+            "cwd": str(Path.cwd()),
+            "session_id": "codex-tool-notify-session",
+            "objective_id": "objective-codex-tool-notify",
+            "duration": 1.2,
+        })
+        self.assertEqual(result["status"], "ok")
+        notifications = adapter.get_operator_notifications("codex-tool-notify-session")["notifications"]
+        codex_notifications = [item for item in notifications if item.get("notification_type") == "codex_response_observed"]
+        self.assertEqual(len(codex_notifications), 1)
+        self.assertIn("codex responded", codex_notifications[0]["summary"])
+
+    def test_codex_command_completion_creates_response_notification(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter._on_command_completed(CommandResult(
+            command="codex",
+            args=("codex", "exec", "task"),
+            cwd=str(Path.cwd()),
+            user="dev",
+            returncode=0,
+            duration=0.8,
+            timestamp="2026-05-28T12:00:00",
+            stdout_preview="ok",
+            stderr_preview="",
+            session_id="codex-command-notify-session",
+            objective_id="objective-codex-command-notify",
+            child_pid=12345,
+        ))
+        notifications = adapter.get_operator_notifications("codex-command-notify-session")["notifications"]
+        codex_notifications = [item for item in notifications if item.get("notification_type") == "codex_response_observed"]
+        self.assertEqual(len(codex_notifications), 1)
+        self.assertIn("codex responded", codex_notifications[0]["summary"])
+
+    def test_codex_active_context_response_creates_notification(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        adapter._emit_codex_active_context_response_notification(
+            context={
+                "id": "active_context:codex-response",
+                "source_type": "codex_artifact",
+                "tool_identity": "codex",
+                "last_agent_action": "Applied patch to notification pipeline",
+                "evidence_refs": ["local://cleanhouse/codex-session/test-thread"],
+            },
+            session_id="codex-active-context-session",
+            objective_id="objective-codex-active-context",
+            prompt_id="prompt:test",
+        )
+        notifications = adapter.get_operator_notifications("codex-active-context-session")["notifications"]
+        codex_notifications = [item for item in notifications if item.get("notification_type") == "codex_response_observed"]
+        self.assertEqual(len(codex_notifications), 1)
+        self.assertIn("Applied patch to notification pipeline", codex_notifications[0]["summary"])
+
+    def test_codex_native_notifications_can_be_suppressed_via_env_override(self):
+        class FakeNotificationManager:
+            send_calls = 0
+
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                FakeNotificationManager.send_calls += 1
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-28T12:00:00Z",
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        FakeNotificationManager.send_calls = 0
+        with patch.dict(os.environ, {"CLEANHOUSE_NATIVE_NOTIFICATIONS": "1", "CLEANHOUSE_NATIVE_CODEX_ACTIVITY": "0"}), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            created = adapter._ensure_operator_notification(
+                notification_type="codex_prompt_sent",
+                session_id="codex-native-suppressed-session",
+                objective_id=None,
+                severity="info",
+                summary="codex prompt should be suppressed when codex native activity is disabled",
+                evidence_refs=["local://cleanhouse/test/codex-native-suppressed"],
+                source="prompt",
+                metadata={"prompt_id": "prompt:test-codex-native-suppressed"},
+            )
+        self.assertIsNotNone(created)
+        self.assertEqual(FakeNotificationManager.send_calls, 0)
+        self.assertEqual(created.metadata["native_delivery_result"]["status"], "skipped")
+        self.assertEqual(created.metadata["native_delivery_result"]["reason"], "codex_activity_native_disabled")
+
+    def test_native_notification_fanout_defaults_all_backends(self):
+        class FakeNotificationManager:
+            fanout_flags = []
+
+            def send_notification(self, title, message, level="info", metadata=None, click_url=None, wait_for_delivery=False, **kwargs):
+                FakeNotificationManager.fanout_flags.append(bool(kwargs.get("fanout_all_backends", False)))
+                return {
+                    "status": "delivered",
+                    "backend": "fake-native",
+                    "notification_id": metadata["notification_id"],
+                    "notification_type": metadata["notification_type"],
+                    "timestamp": "2026-05-28T12:00:00Z",
+                    "attempts": [
+                        {"backend": "terminal-notifier", "status": "delivered"},
+                        {"backend": "osascript", "status": "delivered"},
+                    ],
+                }
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        FakeNotificationManager.fanout_flags = []
+        with patch.dict(os.environ, {"CLEANHOUSE_NATIVE_NOTIFICATIONS": "1"}), patch.object(monitoring_module, "NotificationManager", FakeNotificationManager):
+            first = adapter._ensure_operator_notification(
+                notification_type="session_started",
+                session_id="fanout-default-session",
+                objective_id=None,
+                severity="info",
+                summary="fanout default should dispatch all backends",
+                evidence_refs=["local://cleanhouse/test/fanout/default"],
+                source="test",
+            )
+            self.assertIsNotNone(first)
+            self.assertGreaterEqual(len(first.metadata.get("native_delivery_result", {}).get("attempts", [])), 2)
+        self.assertEqual(FakeNotificationManager.fanout_flags, [True])
+
+    def test_connected_account_lifecycle_connect_list_disconnect(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        started = adapter.start_connected_account_connect(
+            cleanhouse_user_id="user-1",
+            provider="github",
+            connection_method="oauth",
+            consent_version="v1",
+        )
+        self.assertEqual(started["status"], "ok")
+        connected = adapter.complete_connected_account_connect(
+            cleanhouse_user_id="user-1",
+            provider="github",
+            connection_method="oauth",
+            connect_session_token=started["connect_session_token"],
+            provider_account_id="octocat",
+            scopes=["repo", "read:user"],
+            access_token="gh-access-token",
+            refresh_token="gh-refresh-token",
+        )
+        self.assertEqual(connected["status"], "ok")
+        account_id = connected["account"]["account_id"]
+        listed = adapter.list_connected_accounts(cleanhouse_user_id="user-1")
+        self.assertEqual(listed["status"], "ok")
+        self.assertEqual(listed["count"], 1)
+        self.assertEqual(listed["accounts"][0]["account_id"], account_id)
+        disconnected = adapter.disconnect_connected_account(cleanhouse_user_id="user-1", account_id=account_id)
+        self.assertEqual(disconnected["status"], "ok")
+        self.assertEqual(disconnected["account"]["status"], "disconnected")
+
+    def test_connected_account_token_secrets_are_encrypted_and_not_exposed(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        connected = adapter.complete_connected_account_connect(
+            cleanhouse_user_id="user-2",
+            provider="github",
+            connection_method="oauth",
+            provider_account_id="octocat",
+            scopes=["repo"],
+            access_token="plain-access-token",
+            refresh_token="plain-refresh-token",
+            metadata={"lane": "test"},
+        )
+        self.assertEqual(connected["status"], "ok")
+        account_id = connected["account"]["account_id"]
+        artifact = PersistenceBackend.read("connected_account", account_id)
+        payload = artifact.get("data", {}) if isinstance(artifact, dict) else {}
+        row = payload.get("account", payload)
+        self.assertIsInstance(row, dict)
+        self.assertNotIn("plain-access-token", json.dumps(row, sort_keys=True))
+        self.assertNotIn("plain-refresh-token", json.dumps(row, sort_keys=True))
+        listed = adapter.list_connected_accounts(cleanhouse_user_id="user-2")
+        public_row = listed["accounts"][0]
+        self.assertNotIn("secrets", public_row)
+        self.assertNotIn("access_token", json.dumps(public_row, sort_keys=True))
+
+    def test_provider_event_import_dedupes_by_provider_and_provider_event_id(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        connected = adapter.complete_connected_account_connect(
+            cleanhouse_user_id="user-3",
+            provider="github",
+            connection_method="oauth",
+            provider_account_id="octocat",
+            scopes=["repo"],
+        )
+        account_id = connected["account"]["account_id"]
+        payload = [
+            {"provider_event_id": "evt-1", "event_type": "prompt_submitted", "content": "hello world"},
+            {"provider_event_id": "evt-1", "event_type": "prompt_submitted", "content": "hello world again"},
+        ]
+        first = adapter.import_provider_events(
+            cleanhouse_user_id="user-3",
+            provider="github",
+            account_id=account_id,
+            events=payload,
+            capture_method="oauth",
+        )
+        self.assertEqual(first["accepted_count"], 1)
+        self.assertEqual(first["dedupe_count"], 1)
+        second = adapter.import_provider_events(
+            cleanhouse_user_id="user-3",
+            provider="github",
+            account_id=account_id,
+            events=payload,
+            capture_method="oauth",
+        )
+        self.assertEqual(second["accepted_count"], 0)
+        self.assertEqual(second["dedupe_count"], 2)
+
+    def test_chatgpt_connector_signature_verification_rejects_bad_signature(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        connected = adapter.complete_connected_account_connect(
+            cleanhouse_user_id="user-4",
+            provider="chatgpt",
+            connection_method="browser_connector",
+            provider_account_id="chatgpt-user",
+            connector_signing_secret="shared-secret",
+        )
+        account_id = connected["account"]["account_id"]
+        events_batch = [{"provider_event_id": "evt-1", "event_type": "prompt_submitted", "content": "hello"}]
+        rejected = adapter.import_provider_events(
+            cleanhouse_user_id="user-4",
+            provider="chatgpt",
+            account_id=account_id,
+            events=events_batch,
+            signature="bad-signature",
+            nonce="n-1",
+            capture_method="browser_connector",
+        )
+        self.assertEqual(rejected["status"], "forbidden")
+        accepted = adapter.import_provider_events(
+            cleanhouse_user_id="user-4",
+            provider="chatgpt",
+            account_id=account_id,
+            events=events_batch,
+            signature=hmac.new(
+                b"shared-secret",
+                json.dumps(
+                    {
+                        "provider": "chatgpt",
+                        "account_id": account_id,
+                        "nonce": "n-1",
+                        "events": events_batch,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("ascii"),
+                hashlib.sha256,
+            ).hexdigest(),
+            nonce="n-1",
+            capture_method="browser_connector",
+        )
+        self.assertEqual(accepted["status"], "ok")
+        self.assertEqual(accepted["accepted_count"], 1)
+
+    def test_connected_accounts_routes_require_auth_and_scope_by_user(self):
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=adapter):
+            cleanhouse_module.request = types.SimpleNamespace(
+                args={},
+                headers={},
+                get_json=lambda silent=True: {"provider": "github", "connection_method": "oauth"},
+            )
+            unauthorized = cleanhouse_module.connected_account_connect_start()
+            self.assertEqual(unauthorized[1], 401)
+            with patch.object(cleanhouse_module, "get_user_from_token", return_value={"user_id": "user-route"}):
+                cleanhouse_module.request = types.SimpleNamespace(
+                    args={},
+                    headers={"Authorization": "Bearer token"},
+                    get_json=lambda silent=True: {"provider": "github", "connection_method": "oauth"},
+                )
+                started = cleanhouse_module.connected_account_connect_start()
+                self.assertEqual(started["status"], "ok")
+                token = started["connect_session_token"]
+                cleanhouse_module.request = types.SimpleNamespace(
+                    args={},
+                    headers={"Authorization": "Bearer token"},
+                    get_json=lambda silent=True: {
+                        "provider": "github",
+                        "connection_method": "oauth",
+                        "connect_session_token": token,
+                        "provider_account_id": "octocat",
+                        "access_token": "token-1",
+                    },
+                )
+                connected = cleanhouse_module.connected_account_connect_callback()
+                self.assertEqual(connected["status"], "ok")
+                cleanhouse_module.request = types.SimpleNamespace(
+                    args={},
+                    headers={"Authorization": "Bearer token"},
+                    get_json=lambda silent=True: None,
+                )
+                listed = cleanhouse_module.connected_accounts_list()
+                self.assertEqual(listed["status"], "ok")
+                self.assertEqual(listed["count"], 1)

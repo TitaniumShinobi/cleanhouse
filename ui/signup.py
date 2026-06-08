@@ -626,12 +626,7 @@ class SignupUI:
                             return { success: false, message: error.message || 'Account creation failed.' };
                         }
                     } else {
-                        // Fallback simulation
-                        return new Promise((resolve) => {
-                            setTimeout(() => {
-                                resolve({ success: true, message: 'Account created successfully!' });
-                            }, 2000);
-                        });
+                        return { success: false, message: 'Authentication backend unavailable. Enable auth routes and retry.' };
                     }
                 }
 

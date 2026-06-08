@@ -68,9 +68,6 @@ class IntegrityMonitor:
         self.activity_log = []
         self.stats = {
             'files_scanned': 0,
-            'unauthorized_sessions': 0,
-            'integrity_restorations': 0,
-            'cloud_uploads': 0,
             'timestamps': []
         }
         self._initialize_baseline()
@@ -169,11 +166,8 @@ class IntegrityMonitor:
             fig = canvas.figure
             fig.clear()
 
-            # Create subplots for different metrics
-            ax1 = fig.add_subplot(221)  # Files Scanned
-            ax2 = fig.add_subplot(222)  # Unauthorized Sessions
-            ax3 = fig.add_subplot(223)  # Integrity Restorations
-            ax4 = fig.add_subplot(224)  # Cloud Uploads
+            # Only render metrics backed by runtime data.
+            ax1 = fig.add_subplot(111)  # Files Scanned
 
             # Plot data
             timestamps = [t.strftime('%H:%M:%S') for t in self.stats['timestamps']]
@@ -181,18 +175,6 @@ class IntegrityMonitor:
             ax1.plot(timestamps, [self.stats['files_scanned']] * len(timestamps), 'b-')
             ax1.set_title('Files Scanned')
             ax1.tick_params(axis='x', rotation=45)
-
-            ax2.plot(timestamps, [self.stats['unauthorized_sessions']] * len(timestamps), 'r-')
-            ax2.set_title('Unauthorized Sessions')
-            ax2.tick_params(axis='x', rotation=45)
-
-            ax3.plot(timestamps, [self.stats['integrity_restorations']] * len(timestamps), 'g-')
-            ax3.set_title('Integrity Restorations')
-            ax3.tick_params(axis='x', rotation=45)
-
-            ax4.plot(timestamps, [self.stats['cloud_uploads']] * len(timestamps), 'y-')
-            ax4.set_title('Cloud Uploads')
-            ax4.tick_params(axis='x', rotation=45)
 
             fig.tight_layout()
             if hasattr(canvas, 'draw'):
@@ -376,7 +358,7 @@ def verify_integrity(root_dir: Path) -> List[str]:
 
     # Return a summary
     if not changes and not security_issues:
-        return ["No issues found. Your system is protected."]
+        return ["No integrity or policy signals observed."]
     return changes + security_issues
 
 

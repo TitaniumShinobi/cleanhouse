@@ -1,0 +1,5 @@
+[
+  "Scope is local-first runtime evidence; no external provider trust authority is asserted.",
+  "Chain-of-custody is partial; this bundle proves local evidence continuity only.",
+  "Desktop notification lane is noise-controlled and not treated as visibility guarantee."
+]

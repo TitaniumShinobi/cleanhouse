@@ -18,20 +18,28 @@ let _lastCollectorManifest = null;
 let _lastLineageGraph = null;
 let _lastRollbackReplayState = null;
 let _lastOperatorVerification = null;
+let _lastRuntime = null;
+let _lastActiveContextPayload = null;
+let _lastActiveContext = null;
+let _lastMinimalWorkflow = null;
 let _notifiedNotificationIds = new Set();
 let _dashboardNotificationsEnabled = false;
 let _browserNotificationWindowStart = 0;
 let _browserNotificationCount = 0;
+let _browserNotificationsLiveStartSeconds = Math.floor(Date.now() / 1000);
 let _backendDisconnectCount = 0;
 let _lastWorkstationOkAt = null;
 let _pendingDashboardFocus = null;
 let _activeLoginReportId = '';
+let _autoAckedDeepLinkNotifications = new Set();
 const OPERATOR_STATE_KEY = 'cleanhouse.operatorState.v1';
 const BROWSER_NOTIFICATION_WINDOW_MS = 30000;
 const BROWSER_NOTIFICATION_MAX_PER_WINDOW = 3;
+const DASHBOARD_DEEP_LINK_TIMEOUT_MS = 20000;
+const CLEANHOUSE_REPO_PATH = '/Users/devonwoodson/Documents/GitHub/cleanhouse';
 
 document.addEventListener('DOMContentLoaded', () => {
-    _pendingDashboardFocus = readDashboardDeepLink();
+    setPendingDashboardFocus(readDashboardDeepLink());
     restoreOperatorState();
     applyDashboardDeepLinkToInputs();
     initOperatorSessionInput();
@@ -68,12 +76,31 @@ function readDashboardDeepLink() {
         const params = new URLSearchParams(window.location.search || '');
         const sessionId = (params.get('session_id') || '').trim();
         const notificationId = (params.get('notification_id') || '').trim();
+        const activeContextId = (params.get('active_context_id') || '').trim();
+        const promptId = (params.get('prompt_id') || '').trim();
+        const objectiveId = (params.get('objective_id') || '').trim();
+        const receiptId = (params.get('receipt_id') || '').trim();
+        const incidentId = (params.get('incident_id') || '').trim();
+        const domainEventId = (params.get('domain_event_id') || '').trim();
         const loginReportId = (params.get('login_report_id') || params.get('report_id') || '').trim();
+        const runtimeFocus = (params.get('runtime_focus') || '').trim();
         if (loginReportId) {
             _activeLoginReportId = loginReportId;
         }
-        if (!sessionId && !notificationId && !loginReportId) return null;
-        return { session_id: sessionId, notification_id: notificationId, login_report_id: loginReportId };
+        if (!sessionId && !notificationId && !activeContextId && !promptId && !objectiveId && !receiptId && !incidentId && !domainEventId && !loginReportId && !runtimeFocus) return null;
+        return {
+            session_id: sessionId,
+            notification_id: notificationId,
+            active_context_id: activeContextId,
+            prompt_id: promptId,
+            objective_id: objectiveId,
+            receipt_id: receiptId,
+            incident_id: incidentId,
+            domain_event_id: domainEventId,
+            login_report_id: loginReportId,
+            runtime_focus: runtimeFocus === '1',
+            pending_started_at: Date.now()
+        };
     } catch (e) {
         return null;
     }
@@ -87,6 +114,14 @@ function applyDashboardDeepLinkToInputs() {
         sessionInput.value = currentSessionId;
     }
     persistOperatorState({ session_id: currentSessionId });
+}
+
+function setPendingDashboardFocus(payload) {
+    if (!payload || typeof payload !== 'object') return;
+    _pendingDashboardFocus = {
+        ...payload,
+        pending_started_at: Number(payload.pending_started_at || Date.now())
+    };
 }
 
 async function loadSessions() {
@@ -143,13 +178,54 @@ function onSessionChange() {
 }
 
 async function refreshAll() {
-    const tasks = [fetchEvents(), fetchNativeReports()];
+    await fetchActiveContext();
+    const tasks = [fetchEvents(), fetchNativeReports(), fetchRuntime()];
     if (currentSessionId) {
         tasks.push(fetchTimeline(currentSessionId), fetchAlerts(currentSessionId), fetchReceiptScope(currentSessionId), fetchWorkstation(currentSessionId), fetchTier1Surfaces(currentSessionId));
     } else {
         tasks.push(fetchTier1Surfaces(null));
     }
     await Promise.all(tasks);
+}
+
+async function fetchRuntime() {
+    try {
+        const data = await window.CleanHouseAPI.getRuntime();
+        _lastRuntime = data || null;
+        renderRuntime(_lastRuntime);
+        if (data?.active_context) {
+            _lastActiveContextPayload = data.active_context;
+            _lastActiveContext = data.active_context.active_context || null;
+            renderActiveContext(_lastActiveContextPayload);
+        }
+    } catch (e) {
+        renderRuntimeDisconnect(e.message || 'runtime unavailable');
+    }
+}
+
+async function fetchActiveContext() {
+    try {
+        const data = await window.CleanHouseAPI.getActiveContext(true);
+        _lastActiveContextPayload = data || null;
+        _lastActiveContext = data?.active_context || null;
+        adoptActiveContextSession(_lastActiveContext);
+        renderActiveContext(_lastActiveContextPayload);
+    } catch (e) {
+        renderActiveContextUnavailable(e.message || 'active context unavailable');
+    }
+}
+
+function adoptActiveContextSession(context) {
+    if (!context || !context.session_id || context.ignored) return;
+    const sessionId = String(context.session_id);
+    if (!sessionId || sessionId === currentSessionId) return;
+    currentSessionId = sessionId;
+    ensureSessionOption(sessionId, sessionId + ' [active]');
+    const select = document.getElementById('session-select');
+    if (select) select.value = sessionId;
+    const sessionInput = document.getElementById('operator-session-input');
+    if (sessionInput) sessionInput.value = sessionId;
+    persistOperatorState({ session_id: sessionId, objective_id: context.objective_id || '' });
 }
 
 async function fetchTimeline(sessionId) {
@@ -225,7 +301,11 @@ async function fetchReceiptScope(sessionId) {
 async function fetchNativeReports() {
     const body = document.getElementById('native-report-body');
     try {
-        const data = await window.CleanHouseAPI.getReports();
+        const data = await window.CleanHouseAPI.getReports(null, {
+            reportType: 'login_summary',
+            limit: 6,
+            summaryOnly: true,
+        });
         _lastReports = data.reports || [];
         renderNativeReports(_lastReports);
     } catch (e) {
@@ -240,7 +320,7 @@ async function fetchNativeReports() {
 
 async function fetchWorkstation(sessionId) {
     try {
-        const data = await window.CleanHouseAPI.getWorkstation(sessionId);
+        const data = await window.CleanHouseAPI.getWorkstation(sessionId, { scopeEvidence: Boolean(sessionId) });
         _lastWorkstation = data && data.status === 'ok' ? data : null;
         _backendDisconnectCount = 0;
         _lastWorkstationOkAt = new Date();
@@ -306,16 +386,24 @@ function renderWorkstation(data) {
         return;
     }
     renderSessionBar(data.session || {});
-    updateRuntimeIndicatorFromWorkstation(data, true);
+    if (data.active_context) {
+        _lastActiveContextPayload = data.active_context;
+        _lastActiveContext = data.active_context.active_context || null;
+        renderActiveContext(_lastActiveContextPayload);
+    }
     renderOperationalPresence(data.operational_presence || null);
     renderContinuityProvenance(data.continuity_provenance || null);
     renderObjectiveFeed(data.objectives || []);
     renderMutationStream(data.mutations || []);
+    renderTaskManager(data.task_manager || {});
+    renderPortMonitor(data.port_monitor || {});
+    renderFileLineage(data.file_lineage || []);
+    renderMinimalWorkflowPanel(data);
+    renderQpbQueue(data.qpb_action_queue || []);
+    renderMediatorQueue(data.mediator_queue || []);
     renderDeviationPanel(data.deviation_signals || {}, data.evidence_summaries || []);
     renderApprovalRequired(data.approvals || []);
     renderWorkstationReplay(data.receipts || [], data.receipt_replays || {});
-    renderNotificationTray(data.notifications || []);
-    maybeSendBrowserNotifications(data.notifications || []);
     applyPendingDashboardFocus();
 }
 
@@ -323,19 +411,30 @@ function renderWorkstationDisconnect(message) {
     const detail = _backendDisconnectCount > 1
         ? 'retrying workstation connection (' + _backendDisconnectCount + ')'
         : 'retrying workstation connection';
+    if (_lastRuntime) {
+        renderRuntimeIndicator(runtimeIndicatorState(_lastRuntime), detail + '; runtime=' + runtimeIndicatorLabel(_lastRuntime));
+    } else if (_lastWorkstation) {
+        renderRuntimeIndicator('degraded', detail);
+    } else {
+        renderRuntimeIndicator('unavailable', 'workstation unavailable: ' + message);
+    }
     if (_lastWorkstation) {
-        updateRuntimeIndicatorFromWorkstation(_lastWorkstation, false, detail);
         setStatus('degraded', detail + ': ' + message);
         return;
     }
     renderSessionBar({ session_id: currentSessionId || '', status: 'unknown' });
-    renderRuntimeIndicator('unavailable', 'workstation unavailable: ' + message);
     const html = '<div class="empty-state"><div class="icon">!</div><div>unavailable: ' + escapeHtml(message) + '</div></div>';
     for (const id of [
         'operational-presence-body',
         'continuity-provenance-body',
         'objective-feed-body',
         'mutation-stream-body',
+        'task-manager-body',
+        'port-monitor-body',
+        'file-lineage-body',
+        'minimal-workflow-body',
+        'qpb-queue-body',
+        'mediator-queue-body',
         'deviation-alert-body',
         'approval-required-body',
         'receipt-replay-body',
@@ -344,8 +443,14 @@ function renderWorkstationDisconnect(message) {
         const el = document.getElementById(id);
         if (el) el.innerHTML = html;
     }
+    const activeContextBody = document.getElementById('active-context-body');
+    if (activeContextBody) activeContextBody.innerHTML = html;
+    const activeContextState = document.getElementById('active-context-state');
+    if (activeContextState) activeContextState.textContent = 'degraded';
     const continuityState = document.getElementById('continuity-provenance-state');
     if (continuityState) continuityState.textContent = 'unknown';
+    const minimalState = document.getElementById('minimal-workflow-state');
+    if (minimalState) minimalState.textContent = 'degraded';
 }
 
 function renderSessionBar(session) {
@@ -366,6 +471,110 @@ function renderSessionBar(session) {
         declareBtn.disabled = !hasSessionInput || status !== 'active';
     }
     updateNotificationButton();
+}
+
+function runtimeIndicatorState(runtime) {
+    const state = String(runtime?.runtime_state || runtime?.status || 'unknown');
+    if (state === 'healthy') return 'monitoring';
+    if (state === 'recovering' || state === 'degraded') return 'degraded';
+    if (state === 'unhealthy') return 'unavailable';
+    if (state === 'idle' || state === 'unknown' || state === 'unavailable') return state;
+    return 'unknown';
+}
+
+function runtimeIndicatorLabel(runtime) {
+    return String(runtime?.runtime_state || runtime?.status || 'unknown');
+}
+
+function runtimeDetailLabel(runtime) {
+    const blocked = runtime?.blocked_recovery || {};
+    const reasons = Array.isArray(runtime?.reason_codes) ? runtime.reason_codes.join(', ') : '';
+    if (blocked.reason) {
+        return blocked.reason;
+    }
+    if (reasons) {
+        return reasons;
+    }
+    const probe = runtime?.last_probe || {};
+    if (probe.status && probe.status !== 'ok') {
+        return 'probe=' + probe.status;
+    }
+    return 'backend reachable';
+}
+
+function renderRuntime(runtime) {
+    const body = document.getElementById('runtime-presence-body');
+    const count = document.getElementById('runtime-presence-count');
+    const notifications = Array.isArray(runtime?.runtime_notifications) ? runtime.runtime_notifications : [];
+    const receipts = Array.isArray(runtime?.recovery_receipts) ? runtime.recovery_receipts : [];
+    if (count) count.textContent = String(notifications.length + receipts.length);
+    if (!runtime) {
+        renderRuntimeDisconnect('runtime unavailable');
+        return;
+    }
+    renderRuntimeIndicator(runtimeIndicatorState(runtime), runtimeDetailLabel(runtime));
+    const blocked = runtime.blocked_recovery || {};
+    const listener = runtime.listener || {};
+    const delivery = runtime.notifications || {};
+    const visibilitySummary = runtime.visibility_proof_summary || {};
+    const notificationRows = notifications.map(item =>
+        '<div class="runtime-notification-row severity-' + cssToken(item.severity || 'info') + (item.acknowledged ? ' acknowledged' : '') + '" data-notification-id="' + escapeHtml(item.id || '') + '">' +
+        '  <div class="workstation-row-head">' +
+        '    <strong>' + escapeHtml(item.notification_type || 'runtime_notification') + '</strong>' +
+        '    <span>' + escapeHtml(formatTime(item.created_at)) + '</span>' +
+        '  </div>' +
+        '  <div class="workstation-summary">' + escapeHtml(item.summary || 'runtime summary unavailable') + '</div>' +
+        '  <div class="workstation-meta">lane=runtime_global · delivery=' + escapeHtml((item.metadata || {}).native_delivery?.status || 'unknown') + '</div>' +
+        renderInlineRefs(item.evidence_refs || []) +
+        '  <button class="notification-ack" onclick="ackNotification(\'' + escapeJsString(item.id || '') + '\')" ' + (item.acknowledged ? 'disabled' : '') + '>Ack</button>' +
+        '</div>'
+    ).join('');
+    const recoveryRows = receipts.map(item =>
+        '<div class="workstation-row rollback-row">' +
+        '  <div class="workstation-row-head">' +
+        '    <strong>' + escapeHtml(item.id || 'runtime_recovery') + '</strong>' +
+        '    <span>' + escapeHtml(formatTime(item.timestamp)) + '</span>' +
+        '  </div>' +
+        '  <div class="workstation-meta">action=' + escapeHtml(item.action || 'unknown') + ' · final_state=' + escapeHtml(valueOrUnavailable(item.final_state?.runtime_state || item.final_state?.status)) + '</div>' +
+        '  <div class="workstation-meta">integrity=' + escapeHtml(valueOrUnavailable(item.integrity?.root_hash)) + '</div>' +
+        '</div>'
+    ).join('');
+    body.innerHTML =
+        '<div class="workstation-row">' +
+        '  <div class="workstation-row-head">' +
+        '    <strong>runtime=' + escapeHtml(runtimeIndicatorLabel(runtime)) + '</strong>' +
+        '    <span>' + escapeHtml(valueOrUnavailable(runtime.updated_at)) + '</span>' +
+        '  </div>' +
+        '  <div class="workstation-meta">connection=' + escapeHtml(valueOrUnavailable(runtime.connection_state || 'reachable')) +
+        ' · supervisor=' + escapeHtml(valueOrUnavailable(runtime.supervisor?.pid)) +
+        ' · backend=' + escapeHtml(valueOrUnavailable(runtime.backend?.pid)) + '</div>' +
+        '  <div class="workstation-meta">listener=' + escapeHtml(String((listener.pids || []).length)) +
+        ' · native_delivery_failures=' + escapeHtml(String(delivery.failure_count || 0)) + '</div>' +
+        '  <div class="workstation-meta">operator_ready=' + escapeHtml(String(Boolean(runtime.operator_ready))) +
+        ' · visibility_proof transport=' + escapeHtml(String(visibilitySummary.transport_only || 0)) +
+        ' / confirmed=' + escapeHtml(String(visibilitySummary.operator_confirmed || 0)) + '</div>' +
+        (blocked.type ? '<div class="workstation-summary">blocked_recovery=' + escapeHtml(blocked.type + ': ' + valueOrUnavailable(blocked.reason)) + '</div>' : '') +
+        '</div>' +
+        (notificationRows || '<div class="empty-state"><div class="icon">•</div><div>No runtime-native notifications recorded.</div></div>') +
+        recoveryRows;
+    renderNotificationTray(notifications);
+    maybeSendBrowserNotifications(notifications);
+    applyPendingDashboardFocus();
+}
+
+function renderRuntimeDisconnect(message) {
+    const body = document.getElementById('runtime-presence-body');
+    const count = document.getElementById('runtime-presence-count');
+    if (count) count.textContent = '0';
+    if (body) {
+        body.innerHTML = '<div class="empty-state"><div class="icon">!</div><div>runtime unavailable: ' + escapeHtml(message) + '</div></div>';
+    }
+    if (_lastRuntime) {
+        renderRuntimeIndicator('degraded', 'runtime unavailable: ' + message + '; last known=' + runtimeIndicatorLabel(_lastRuntime));
+    } else {
+        renderRuntimeIndicator('unavailable', 'runtime unavailable: ' + message);
+    }
+    setStatus('degraded', 'Runtime connection lost: ' + message);
 }
 
 function updateRuntimeIndicatorFromWorkstation(data, backendReachable, overrideDetail = '') {
@@ -493,6 +702,93 @@ function renderOperationalPresence(presence) {
         (focus.type ? '<div class="workstation-meta">focus=' + escapeHtml(focus.type) + ' · id=' + escapeHtml(valueOrUnavailable(focus.id || focus.receipt_id)) + '</div>' : '') +
         renderInlineRefs(presence.evidence_refs || []) +
         '</div>';
+}
+
+function renderActiveContext(payload) {
+    const body = document.getElementById('active-context-body');
+    const stateEl = document.getElementById('active-context-state');
+    const followBtn = document.getElementById('active-context-follow-btn');
+    if (!body || !stateEl) return;
+    const followEnabled = Boolean(payload?.follow_enabled);
+    if (followBtn) {
+        followBtn.textContent = followEnabled ? 'Following Active Work' : 'Follow Active Work';
+        followBtn.classList.toggle('active', followEnabled);
+    }
+    const context = payload?.active_context || null;
+    if (!context) {
+        stateEl.textContent = followEnabled ? 'missing' : 'off';
+        body.innerHTML = '<div class="empty-state"><div class="icon">•</div><div>Active work context unavailable.</div></div>';
+        return;
+    }
+    const truth = context.truth_classification || 'missing_context';
+    const runtimeHealth = _lastWorkstation?.operational_presence?.active_work_context?.runtime_health || {};
+    const pending = _lastWorkstation?.operational_presence?.active_work_context?.pending_review_drift || {};
+    const labels = Array.isArray(context.source_labels) ? context.source_labels : [];
+    stateEl.textContent = truth.replace('_context', '').replace('_continuity', '');
+    const sourceBits = [
+        context.source_type || 'none',
+        truth,
+        ...(labels.slice(0, 4)),
+    ].filter(Boolean);
+    body.innerHTML =
+        '<div class="workstation-row active-context-row truth-' + cssToken(truth) + '" data-active-context-id="' + escapeHtml(context.id || '') + '">' +
+        '  <div class="workstation-row-head">' +
+        '    <strong>' + escapeHtml(valueOrUnavailable(context.current_repo || context.tool_identity || context.source_type)) + '</strong>' +
+        '    <span>' + escapeHtml(formatTime(context.updated_at)) + '</span>' +
+        '  </div>' +
+        '  <div class="workstation-summary">' + escapeHtml(context.current_objective || context.active_prompt_preview || 'No prompt-linked objective observed.') + '</div>' +
+        (context.active_prompt_preview ? '<div class="continuity-snippet">' + escapeHtml(context.active_prompt_preview) + '</div>' : '') +
+        (context.last_agent_action ? '<div class="workstation-meta">last_agent_action=' + escapeHtml(context.last_agent_action) + '</div>' : '') +
+        '  <div class="workstation-meta">source=' + escapeHtml(sourceBits.join(' · ')) + '</div>' +
+        '  <div class="workstation-meta">session=' + escapeHtml(valueOrUnavailable(context.session_id)) +
+        ' · prompt=' + escapeHtml(valueOrUnavailable(context.prompt_id)) +
+        ' · objective=' + escapeHtml(valueOrUnavailable(context.objective_id)) + '</div>' +
+        '  <div class="workstation-meta">pending_approval=' + escapeHtml(String(pending.pending_approvals ?? 0)) +
+        ' · drift=' + escapeHtml(String(pending.scope_drift_summaries ?? 0)) +
+        ' · runtime=' + escapeHtml(valueOrUnavailable(runtimeHealth.runtime_state || _lastRuntime?.runtime_state)) + '</div>' +
+        renderInlineRefs(context.evidence_refs || []) +
+        '  <div class="continuity-actions">' +
+        '    <button onclick="ignoreActiveContext()">Ignore</button>' +
+        '  </div>' +
+        '</div>';
+}
+
+function renderActiveContextUnavailable(message) {
+    const stateEl = document.getElementById('active-context-state');
+    const body = document.getElementById('active-context-body');
+    if (stateEl) stateEl.textContent = 'degraded';
+    if (body) {
+        body.innerHTML = '<div class="empty-state"><div class="icon">!</div><div>' + escapeHtml(message) + '</div></div>';
+    }
+}
+
+async function toggleActiveContextFollow() {
+    const nextEnabled = !Boolean(_lastActiveContextPayload?.follow_enabled);
+    try {
+        const result = await window.CleanHouseAPI.setActiveContextFollow(nextEnabled);
+        _lastActiveContextPayload = result || null;
+        _lastActiveContext = result?.active_context || null;
+        adoptActiveContextSession(_lastActiveContext);
+        renderActiveContext(_lastActiveContextPayload);
+        setStatus(result?.status === 'ok' ? 'clear' : 'unknown', nextEnabled ? 'Active work following enabled.' : 'Active work following disabled.');
+        await refreshAll();
+    } catch (e) {
+        setStatus('degraded', 'Active work follow toggle failed: ' + (e.message || 'unknown error'));
+    }
+}
+
+async function ignoreActiveContext() {
+    const key = _lastActiveContext?.dedupe_key || '';
+    try {
+        const result = await window.CleanHouseAPI.ignoreActiveContext(key);
+        _lastActiveContextPayload = result || _lastActiveContextPayload;
+        _lastActiveContext = result?.active_context || null;
+        renderActiveContext(_lastActiveContextPayload);
+        setStatus(result?.status === 'ok' ? 'clear' : 'unknown', 'Active work context ignored.');
+        await refreshAll();
+    } catch (e) {
+        setStatus('degraded', 'Ignore active context failed: ' + (e.message || 'unknown error'));
+    }
 }
 
 function renderNativeReports(reports) {
@@ -679,7 +975,7 @@ function renderObjectiveFeed(objectives) {
         return;
     }
     body.innerHTML = objectives.map(objective =>
-        '<div class="workstation-row">' +
+        '<div class="workstation-row objective-row" data-objective-id="' + escapeHtml(objective.id || '') + '">' +
         '  <div class="workstation-row-head">' +
         '    <strong>' + escapeHtml(objective.id || 'objective') + '</strong>' +
         '    <span>' + escapeHtml(formatTime(objective.timestamp)) + '</span>' +
@@ -710,6 +1006,203 @@ function renderMutationStream(mutations) {
             '  <div class="workstation-summary">' + escapeHtml(mutation.summary || mutation.path || '') + '</div>' +
             (changes.length ? '<div class="workstation-paths">' + changes.slice(0, 6).map(path => '<code>' + escapeHtml(path) + '</code>').join('') + '</div>' : '') +
             renderInlineRefs(refs) +
+            '</div>';
+    }).join('');
+}
+
+function renderTaskManager(snapshot) {
+    const body = document.getElementById('task-manager-body');
+    const tasks = Array.isArray(snapshot.tasks) ? snapshot.tasks : [];
+    document.getElementById('task-manager-count').textContent = tasks.length;
+    if (tasks.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="icon">⚙</div><div>No process inventory available.</div></div>';
+        return;
+    }
+    body.innerHTML = tasks.slice(0, 20).map(task =>
+        '<div class="workstation-row">' +
+        '  <div class="workstation-row-head"><strong>' + escapeHtml(valueOrUnavailable(task.command)) + '</strong><span>pid=' + escapeHtml(String(task.pid || '')) + '</span></div>' +
+        '  <div class="workstation-meta">cpu=' + escapeHtml(String(task.cpu ?? 0)) + ' · mem=' + escapeHtml(String(task.mem ?? 0)) + ' · user=' + escapeHtml(valueOrUnavailable(task.user)) + '</div>' +
+        '</div>'
+    ).join('');
+}
+
+function renderPortMonitor(snapshot) {
+    const body = document.getElementById('port-monitor-body');
+    const ports = Array.isArray(snapshot.ports) ? snapshot.ports : [];
+    document.getElementById('port-monitor-count').textContent = ports.length;
+    if (ports.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="icon">◍</div><div>No monitored port activity recorded.</div></div>';
+        return;
+    }
+    body.innerHTML = ports.slice(0, 25).map(port =>
+        '<div class="workstation-row">' +
+        '  <div class="workstation-row-head"><strong>' + escapeHtml(valueOrUnavailable(port.host)) + ':' + escapeHtml(String(port.port ?? '')) + '</strong><span>pid=' + escapeHtml(String(port.pid || '')) + '</span></div>' +
+        '  <div class="workstation-meta">process=' + escapeHtml(valueOrUnavailable(port.process)) + ' · reason=' + escapeHtml(valueOrUnavailable(port.reason)) + '</div>' +
+        '</div>'
+    ).join('');
+}
+
+function renderFileLineage(rows) {
+    const body = document.getElementById('file-lineage-body');
+    const lineage = Array.isArray(rows) ? rows : [];
+    document.getElementById('file-lineage-count').textContent = lineage.length;
+    if (lineage.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="icon">⌘</div><div>No file lineage events recorded.</div></div>';
+        return;
+    }
+    body.innerHTML = lineage.slice(0, 30).map(item =>
+        '<div class="workstation-row">' +
+        '  <div class="workstation-row-head"><strong>' + escapeHtml(valueOrUnavailable(item.where)) + '</strong><span>' + escapeHtml(formatTime(item.when)) + '</span></div>' +
+        '  <div class="workstation-meta">who=' + escapeHtml(valueOrUnavailable(item.who)) + ' · what=' + escapeHtml(valueOrUnavailable(item.what)) + '</div>' +
+        '  <div class="workstation-summary">' + escapeHtml(valueOrUnavailable(item.context)) + '</div>' +
+        renderInlineRefs(item.evidence_refs || []) +
+        '</div>'
+    ).join('');
+}
+
+function normalizeWorkflowRelativePath(value) {
+    const raw = String(value || '').trim().replace(/\\/g, '/');
+    if (!raw || raw.startsWith('/')) return '';
+    const parts = raw.split('/').filter(Boolean);
+    if (parts.length === 0) return '';
+    if (parts.some(part => part === '..')) return '';
+    return parts.join('/');
+}
+
+function pathTokenForSession(sessionId) {
+    const token = String(sessionId || '').replace(/[^a-zA-Z0-9._-]/g, '_').replace(/^_+|_+$/g, '').slice(0, 80);
+    return token || 'session';
+}
+
+function deriveMinimalWorkflowCandidate(workstation) {
+    const data = workstation || {};
+    const ports = Array.isArray(data.port_monitor?.ports) ? data.port_monitor.ports : [];
+    const tasks = Array.isArray(data.task_manager?.tasks) ? data.task_manager.tasks : [];
+    const lineage = Array.isArray(data.file_lineage) ? data.file_lineage : [];
+
+    const preferredPort = ports.find(item => Number.isFinite(Number(item?.pid)) && Number(item?.pid) > 0);
+    const preferredTask = tasks.find(item => Number.isFinite(Number(item?.pid)) && Number(item?.pid) > 0);
+    const signal = preferredPort || preferredTask || null;
+    const signalSource = preferredPort ? 'port_monitor' : (preferredTask ? 'task_manager' : 'unavailable');
+    const signalPid = signal ? Number(signal.pid) : null;
+    const signalProcess = signal ? String(signal.process || signal.command || '').trim() : '';
+    const signalReason = signal ? String(signal.reason || '').trim() : '';
+
+    let targetPath = '';
+    if (lineage.length > 0) {
+        targetPath = normalizeWorkflowRelativePath(lineage[0]?.where);
+    }
+    if (!targetPath) {
+        const sessionToken = pathTokenForSession(currentSessionId || data.session?.session_id || 'session');
+        targetPath = `data/minimal_control_workflow/${sessionToken}.txt`;
+    }
+
+    return {
+        signal_source: signalSource,
+        signal_pid: signalPid,
+        signal_process: signalProcess || 'unknown',
+        signal_reason: signalReason || 'no_reason_recorded',
+        target_path: targetPath,
+        signal_available: signalSource !== 'unavailable' && Number.isFinite(signalPid) && signalPid > 0,
+    };
+}
+
+function renderMinimalWorkflowPanel(workstation) {
+    const stateEl = document.getElementById('minimal-workflow-state');
+    const body = document.getElementById('minimal-workflow-body');
+    if (!stateEl || !body) return;
+
+    const sessionId = currentSessionId || workstation?.session?.session_id || '';
+    if (!sessionId) {
+        stateEl.textContent = 'requires-session';
+        body.innerHTML = '<div class="empty-state"><div class="icon">•</div><div>Select a session first.</div></div>';
+        return;
+    }
+
+    const candidate = deriveMinimalWorkflowCandidate(workstation || {});
+    const hasSignal = Boolean(candidate.signal_available);
+    const canStage = hasSignal && candidate.target_path;
+    const staged = _lastMinimalWorkflow && _lastMinimalWorkflow.session_id === sessionId ? _lastMinimalWorkflow : null;
+
+    stateEl.textContent = staged ? 'staged' : (canStage ? 'ready' : 'blocked');
+
+    const workflowIds = staged
+        ? '<div class="workstation-meta">proposal=' + escapeHtml(staged.proposal_id || 'unavailable') +
+          ' · qpb_case=' + escapeHtml(staged.case_id || 'unavailable') + '</div>'
+        : '<div class="workstation-meta">proposal=not_created · qpb_case=not_created</div>';
+    const signalLine = hasSignal
+        ? 'signal=' + escapeHtml(candidate.signal_source) + ' · pid=' + escapeHtml(String(candidate.signal_pid)) + ' · process=' + escapeHtml(candidate.signal_process)
+        : 'signal=unavailable · waiting_for_agent_pid_in_port_or_task_monitor';
+    const reasonLine = 'reason=' + escapeHtml(candidate.signal_reason) + ' · target=' + escapeHtml(candidate.target_path || 'unavailable');
+    const blocker = canStage
+        ? ''
+        : '<div class="workstation-summary">Blocked: refresh workstation and wait for an agent process PID in Port Monitor or Universal Task Manager.</div>';
+
+    body.innerHTML =
+        '<div class="workstation-row">' +
+        '  <div class="workstation-row-head"><strong>Process Mediation + File Integrity + Agent Firewall</strong><span>single run</span></div>' +
+        '  <div class="workstation-meta">' + signalLine + '</div>' +
+        '  <div class="workstation-meta">' + reasonLine + '</div>' +
+        workflowIds +
+        '  <div class="receipt-review-actions">' +
+        '    <button class="receipt-action review" onclick="stageMinimalControlWorkflow()" ' + (canStage ? '' : 'disabled') + '>Stage Minimal Workflow</button>' +
+        '  </div>' +
+        (staged
+            ? '<div class="workstation-summary">Next: Keep Changes (Mediator) -> Quarantine -> Purge (Confirm) -> Bless.</div>'
+            : '<div class="workstation-summary">Creates one linked mediator proposal and one QPB case using the same agent signal and target path.</div>') +
+        blocker +
+        '</div>';
+}
+
+function renderQpbQueue(cases) {
+    const body = document.getElementById('qpb-queue-body');
+    const queue = Array.isArray(cases) ? cases : [];
+    document.getElementById('qpb-queue-count').textContent = queue.length;
+    if (queue.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="icon">⛉</div><div>No QPB actions pending.</div></div>';
+        return;
+    }
+    body.innerHTML = queue.map(item => {
+        const id = item.id || '';
+        const status = item.status || 'unknown';
+        const canPurge = status === 'quarantined' || status === 'purge_pending';
+        const canBless = status === 'purged';
+        return '<div class="workstation-row">' +
+            '  <div class="workstation-row-head"><strong>' + escapeHtml(id) + '</strong><span>' + escapeHtml(status) + '</span></div>' +
+            '  <div class="workstation-meta">target=' + escapeHtml(JSON.stringify(item.target_scope || {})) + '</div>' +
+            '  <div class="receipt-review-actions">' +
+            '    <button class="receipt-action review" onclick="transitionQpbCase(\'' + escapeJsString(id) + '\', \'quarantine\')">Quarantine</button>' +
+            '    <button class="receipt-action reject" ' + (canPurge ? '' : 'disabled') + ' onclick="transitionQpbCase(\'' + escapeJsString(id) + '\', \'purge\')">Purge (Confirm)</button>' +
+            '    <button class="receipt-action approve" ' + (canBless ? '' : 'disabled') + ' onclick="transitionQpbCase(\'' + escapeJsString(id) + '\', \'bless\')">Bless</button>' +
+            '  </div>' +
+            renderInlineRefs(item.evidence_refs || []) +
+            '</div>';
+    }).join('');
+}
+
+function renderMediatorQueue(proposals) {
+    const body = document.getElementById('mediator-queue-body');
+    const queue = Array.isArray(proposals) ? proposals : [];
+    document.getElementById('mediator-queue-count').textContent = queue.length;
+    if (queue.length === 0) {
+        body.innerHTML = '<div class="empty-state"><div class="icon">↺</div><div>No mediator proposals recorded.</div></div>';
+        return;
+    }
+    body.innerHTML = queue.map(item => {
+        const id = item.id || '';
+        const state = item.status || 'unknown';
+        const pending = state === 'pending';
+        const applied = state === 'applied';
+        return '<div class="workstation-row">' +
+            '  <div class="workstation-row-head"><strong>' + escapeHtml(item.proposal_type || 'mediator') + '</strong><span>' + escapeHtml(state) + '</span></div>' +
+            '  <div class="workstation-summary">' + escapeHtml(item.reason || '') + '</div>' +
+            '  <div class="workstation-meta">operations=' + escapeHtml(String((item.operations || []).length)) + '</div>' +
+            '  <div class="receipt-review-actions">' +
+            '    <button class="receipt-action approve" ' + (pending ? '' : 'disabled') + ' onclick="resolveMediatorProposal(\'' + escapeJsString(id) + '\', \'approve\')">Keep Changes</button>' +
+            '    <button class="receipt-action reject" ' + (pending ? '' : 'disabled') + ' onclick="resolveMediatorProposal(\'' + escapeJsString(id) + '\', \'reject\')">Reject</button>' +
+            '    <button class="receipt-action review" ' + (applied ? '' : 'disabled') + ' onclick="undoMediatorProposal(\'' + escapeJsString(id) + '\')">Undo</button>' +
+            '  </div>' +
+            renderInlineRefs(item.evidence_refs || []) +
             '</div>';
     }).join('');
 }
@@ -814,20 +1307,23 @@ function renderNotificationTray(notifications) {
     const pending = (notifications || []).filter(item => !item.acknowledged);
     document.getElementById('notification-tray-count').textContent = pending.length;
     if (!notifications.length) {
-        body.innerHTML = '<div class="empty-state"><div class="icon">•</div><div>No dashboard/browser notifications recorded.</div></div>';
+        body.innerHTML = '<div class="empty-state"><div class="icon">•</div><div>No live notification-center alerts yet.</div></div>';
         return;
     }
     body.innerHTML = notifications.map(item =>
-        '<div class="notification-row severity-' + cssToken(item.severity || 'info') + (item.acknowledged ? ' acknowledged' : '') + '" data-notification-id="' + escapeHtml(item.id || '') + '">' +
+        (function () {
+            const delivery = (item.metadata || {}).native_delivery || {};
+            return '<div class="notification-row severity-' + cssToken(item.severity || 'info') + (item.acknowledged ? ' acknowledged' : '') + '" data-notification-id="' + escapeHtml(item.id || '') + '">' +
         '  <div class="workstation-row-head">' +
         '    <strong>' + escapeHtml(item.notification_type || 'notification') + '</strong>' +
         '    <span>' + escapeHtml(formatTime(item.created_at)) + '</span>' +
         '  </div>' +
         '  <div class="workstation-summary">' + escapeHtml(item.summary || 'notification summary unavailable') + '</div>' +
-        '  <div class="workstation-meta">delivery=dashboard tray · browser_notification=' + escapeHtml(browserNotificationStateLabel()) + '</div>' +
+        '  <div class="workstation-meta">lane=runtime_notification_center · native_delivery=' + escapeHtml(delivery.status || 'none') + ' · browser_notification=' + escapeHtml(browserNotificationStateLabel()) + '</div>' +
         renderInlineRefs(item.evidence_refs || []) +
         '  <button class="notification-ack" onclick="ackNotification(\'' + escapeJsString(item.id || '') + '\')" ' + (item.acknowledged ? 'disabled' : '') + '>Ack</button>' +
-        '</div>'
+        '</div>';
+        })()
     ).join('');
 }
 
@@ -1071,13 +1567,18 @@ async function declareObjective(event) {
     const objectiveId = 'objective-' + sessionId + '-' + Date.now();
     setObjectiveResult('Declaring objective...');
     try {
-        const prompt = await window.CleanHouseAPI.submitPrompt(text, context, scope, '', tool, sessionId, objectiveId);
+        const objectiveStart = await window.CleanHouseAPI.startObjective(sessionId, text, objectiveId);
+        const boundObjectiveId = String(objectiveStart?.objective_id || objectiveId);
+        if (!objectiveStart || objectiveStart.status !== 'ok' || !boundObjectiveId) {
+            throw new Error(objectiveStart?.message || 'objective binding failed');
+        }
+        const prompt = await window.CleanHouseAPI.submitPrompt(text, context, scope, '', tool, sessionId, boundObjectiveId);
         if (!prompt || prompt.status !== 'ok') {
             throw new Error(prompt?.message || 'prompt ingestion failed');
         }
         const sessionResult = await window.CleanHouseAPI.startOperatorSession(
             sessionId,
-            objectiveId,
+            boundObjectiveId,
             'operator objective declared: ' + text,
             {
                 source: 'dashboard',
@@ -1092,7 +1593,7 @@ async function declareObjective(event) {
         currentSessionId = sessionId;
         persistOperatorState({
             session_id: sessionId,
-            objective_id: objectiveId,
+            objective_id: boundObjectiveId,
             objective_text: text,
             objective_scope: scope,
             objective_context: context,
@@ -1100,7 +1601,7 @@ async function declareObjective(event) {
         });
         ensureSessionOption(sessionId, text.substring(0, 60) + (text.length > 60 ? '...' : '') + ' [' + scope + ']');
         document.getElementById('session-select').value = sessionId;
-        setObjectiveResult('Objective declared: ' + (prompt.id || objectiveId));
+        setObjectiveResult('Objective declared: ' + (prompt.id || boundObjectiveId));
         await loadSessions();
         document.getElementById('session-select').value = sessionId;
         currentSessionId = sessionId;
@@ -1125,6 +1626,152 @@ async function handleWorkstationApprovalAction(approvalId, action) {
         await refreshAll();
     } catch (e) {
         setStatus('degraded', 'Approval update failed: ' + (e.message || 'unknown error'));
+    }
+}
+
+async function transitionQpbCase(caseId, action) {
+    if (!caseId || !action) return;
+    try {
+        const payload = {
+            actor: 'dashboard',
+            confirm: action === 'purge',
+        };
+        if (action === 'purge') {
+            const message = 'Confirm purge for case ' + caseId + '?';
+            if (!window.confirm(message)) return;
+        }
+        const result = await window.CleanHouseAPI.transitionQpbCase(caseId, action, payload);
+        if (!result || result.status !== 'ok') {
+            throw new Error(result?.message || 'qpb transition failed');
+        }
+        await refreshAll();
+        setStatus('clear', 'QPB ' + action + ' recorded');
+    } catch (e) {
+        setStatus('degraded', 'QPB transition failed: ' + (e.message || 'unknown error'));
+    }
+}
+
+async function stageMinimalControlWorkflow() {
+    const sessionId = (currentSessionId || _lastWorkstation?.session?.session_id || '').trim();
+    if (!sessionId) {
+        setStatus('unknown', 'Minimal workflow blocked: session is required');
+        return;
+    }
+    const candidate = deriveMinimalWorkflowCandidate(_lastWorkstation || {});
+    if (!candidate.signal_available) {
+        setStatus('degraded', 'Minimal workflow blocked: no agent firewall signal with pid yet');
+        return;
+    }
+    if (!candidate.target_path) {
+        setStatus('degraded', 'Minimal workflow blocked: no target path available');
+        return;
+    }
+    try {
+        const markerContent = [
+            'minimal_control_workflow_marker=true',
+            'session_id=' + sessionId,
+            'agent_signal_source=' + candidate.signal_source,
+            'agent_pid=' + String(candidate.signal_pid),
+            'agent_process=' + candidate.signal_process,
+            'agent_reason=' + candidate.signal_reason,
+            'created_at=' + new Date().toISOString(),
+        ].join('\n') + '\n';
+        const mediator = await window.CleanHouseAPI.createMediatorProposal({
+            session_id: sessionId,
+            proposal_type: 'minimal_control_workflow',
+            reason: 'Stage minimal operator-facing workflow with linked firewall signal and integrity target',
+            operations: [
+                { op: 'write_file', path: candidate.target_path, content: markerContent },
+            ],
+            target_scope: {
+                paths: [candidate.target_path],
+                process_pids: [candidate.signal_pid],
+            },
+            metadata: {
+                repo_path: CLEANHOUSE_REPO_PATH,
+                workflow: 'minimal_control_workflow',
+                agent_signal_source: candidate.signal_source,
+                agent_pid: candidate.signal_pid,
+            },
+            evidence_refs: [
+                'local://cleanhouse/workflow/minimal_control',
+                'local://cleanhouse/agent_signal/' + encodeURIComponent(String(candidate.signal_pid)),
+            ],
+        });
+        if (!mediator || mediator.status !== 'ok' || !mediator.proposal?.id) {
+            throw new Error(mediator?.message || 'mediator proposal create failed');
+        }
+        const qpbCase = await window.CleanHouseAPI.createQpbCase({
+            session_id: sessionId,
+            target_scope: {
+                paths: [candidate.target_path],
+                process_pids: [candidate.signal_pid],
+            },
+            metadata: {
+                repo_path: CLEANHOUSE_REPO_PATH,
+                workflow: 'minimal_control_workflow',
+                linked_proposal_id: mediator.proposal.id,
+                agent_signal_source: candidate.signal_source,
+                agent_pid: candidate.signal_pid,
+            },
+            evidence_refs: [
+                'local://cleanhouse/workflow/minimal_control',
+                'local://cleanhouse/integrity_target/' + encodeURIComponent(candidate.target_path),
+            ],
+        });
+        if (!qpbCase || qpbCase.status !== 'ok' || !qpbCase.case?.id) {
+            throw new Error(qpbCase?.message || 'qpb case create failed');
+        }
+        _lastMinimalWorkflow = {
+            session_id: sessionId,
+            proposal_id: mediator.proposal.id,
+            case_id: qpbCase.case.id,
+            target_path: candidate.target_path,
+            signal_pid: candidate.signal_pid,
+            signal_source: candidate.signal_source,
+            staged_at: new Date().toISOString(),
+        };
+        await refreshAll();
+        setStatus('clear', 'Minimal workflow staged: mediator proposal + QPB case linked');
+    } catch (e) {
+        setStatus('degraded', 'Minimal workflow stage failed: ' + (e.message || 'unknown error'));
+    }
+}
+
+async function resolveMediatorProposal(proposalId, decision) {
+    if (!proposalId) return;
+    try {
+        const payload = { confirm: decision === 'approve', repo_path: CLEANHOUSE_REPO_PATH };
+        if (decision === 'approve') {
+            const ok = window.confirm('Keep and apply changes for proposal ' + proposalId + '?');
+            if (!ok) return;
+        }
+        const result = await window.CleanHouseAPI.resolveMediatorProposal(proposalId, decision, payload);
+        if (!result || result.status !== 'ok') {
+            throw new Error(result?.message || 'proposal resolve failed');
+        }
+        await refreshAll();
+        setStatus('clear', 'Mediator proposal ' + decision + ' completed');
+    } catch (e) {
+        setStatus('degraded', 'Mediator resolve failed: ' + (e.message || 'unknown error'));
+    }
+}
+
+async function undoMediatorProposal(proposalId) {
+    if (!proposalId) return;
+    try {
+        const ok = window.confirm('Undo applied changes for proposal ' + proposalId + '?');
+        if (!ok) return;
+        const result = await window.CleanHouseAPI.undoMediatorProposal(proposalId, {
+            repo_path: CLEANHOUSE_REPO_PATH,
+        });
+        if (!result || result.status !== 'ok') {
+            throw new Error(result?.message || 'proposal undo failed');
+        }
+        await refreshAll();
+        setStatus('clear', 'Mediator undo completed');
+    } catch (e) {
+        setStatus('degraded', 'Mediator undo failed: ' + (e.message || 'unknown error'));
     }
 }
 
@@ -1394,8 +2041,15 @@ function findInterventionTarget(intervention) {
 
 function focusDashboardNotification(notification) {
     if (!notification) return;
-    const notificationId = typeof notification === 'string' ? notification : (notification.id || notification.notification_id || '');
-    const sessionId = typeof notification === 'object' ? (notification.session_id || '') : '';
+    const notificationObject = typeof notification === 'string' ? { id: notification } : notification;
+    const notificationId = notificationObject.id || notificationObject.notification_id || '';
+    const sessionId = notificationObject.session_id || '';
+    const metadata = notificationObject.metadata || {};
+    const dashboardTarget = metadata.dashboard_target || '';
+    if (dashboardTarget === 'runtime' || sessionId === 'runtime-global') {
+        focusRuntimeNotification(notificationId);
+        return;
+    }
     if (sessionId && sessionId !== currentSessionId) {
         currentSessionId = sessionId;
         ensureSessionOption(sessionId, sessionId + ' [operator]');
@@ -1404,10 +2058,16 @@ function focusDashboardNotification(notification) {
         const sessionInput = document.getElementById('operator-session-input');
         if (sessionInput) sessionInput.value = sessionId;
         persistOperatorState({ session_id: sessionId });
-        fetchWorkstation(sessionId).then(() => focusDashboardNotification(notificationId));
+        fetchWorkstation(sessionId).then(() => focusDashboardNotification(notificationObject));
         return;
     }
     focusNotificationRow(notificationId);
+    focusDeepLinkTarget({
+        active_context_id: metadata.active_context_id || '',
+        prompt_id: metadata.prompt_id || '',
+        objective_id: metadata.objective_id || notification.objective_id || '',
+        receipt_id: metadata.receipt_id || '',
+    });
 }
 
 function focusNotificationRow(notificationId) {
@@ -1420,14 +2080,111 @@ function focusNotificationRow(notificationId) {
     return true;
 }
 
+function focusRuntimeNotification(notificationId) {
+    if (notificationId && focusNotificationRow(notificationId)) {
+        const panel = document.getElementById('notification-tray-panel') || document.getElementById('runtime-presence-panel');
+        if (panel) {
+            panel.classList.add('presence-highlight');
+            window.setTimeout(() => panel.classList.remove('presence-highlight'), 3000);
+        }
+        return true;
+    }
+    const runtimeRow = notificationId
+        ? document.querySelector('.runtime-notification-row[data-notification-id="' + cssAttr(notificationId) + '"]')
+        : null;
+    if (runtimeRow) {
+        runtimeRow.classList.add('presence-highlight');
+        runtimeRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        window.setTimeout(() => runtimeRow.classList.remove('presence-highlight'), 3000);
+        const runtimePanel = document.getElementById('runtime-presence-panel');
+        if (runtimePanel) {
+            runtimePanel.classList.add('presence-highlight');
+            window.setTimeout(() => runtimePanel.classList.remove('presence-highlight'), 3000);
+        }
+        return true;
+    }
+    const panel = document.getElementById('notification-tray-panel') || document.getElementById('runtime-presence-panel');
+    if (!panel) return false;
+    panel.classList.add('presence-highlight');
+    panel.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => panel.classList.remove('presence-highlight'), 3000);
+    return true;
+}
+
 function applyPendingDashboardFocus() {
     if (!_pendingDashboardFocus) return;
     const pending = _pendingDashboardFocus;
+    const startedAt = Number(pending.pending_started_at || Date.now());
+    if ((Date.now() - startedAt) > DASHBOARD_DEEP_LINK_TIMEOUT_MS) {
+        _pendingDashboardFocus = null;
+        clearDashboardDeepLinkParams();
+        return;
+    }
     if (pending.session_id && pending.session_id !== currentSessionId) return;
-    if (pending.notification_id && focusNotificationRow(pending.notification_id)) {
+    let notificationFocused = !pending.notification_id;
+    if (pending.runtime_focus) {
+        notificationFocused = focusRuntimeNotification(pending.notification_id || '');
+    } else if (pending.notification_id) {
+        notificationFocused = focusNotificationRow(pending.notification_id);
+    }
+    if (!notificationFocused) return;
+    if (focusDeepLinkTarget(pending)) {
+        if (pending.notification_id && !_autoAckedDeepLinkNotifications.has(pending.notification_id)) {
+            _autoAckedDeepLinkNotifications.add(pending.notification_id);
+            ackNotification(pending.notification_id, { silent: true });
+        }
         _pendingDashboardFocus = null;
         clearDashboardDeepLinkParams();
     }
+}
+
+function focusDeepLinkTarget(pending) {
+    if (!pending) return true;
+    if (pending.active_context_id && focusActiveContext(pending.active_context_id)) return true;
+    if (pending.receipt_id && focusReceipt(pending.receipt_id)) return true;
+    if (pending.objective_id && focusObjective(pending.objective_id)) return true;
+    if (pending.prompt_id && focusActiveContextPrompt(pending.prompt_id)) return true;
+    return !(pending.active_context_id || pending.receipt_id || pending.objective_id || pending.prompt_id);
+}
+
+function focusActiveContext(activeContextId) {
+    if (!activeContextId) return false;
+    const target = document.querySelector('.active-context-row[data-active-context-id="' + cssAttr(activeContextId) + '"]');
+    const panel = document.getElementById('active-context-panel');
+    const el = target || panel;
+    if (!el) return false;
+    el.classList.add('presence-highlight');
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => el.classList.remove('presence-highlight'), 3000);
+    return true;
+}
+
+function focusActiveContextPrompt(promptId) {
+    if (!promptId) return false;
+    if (_lastActiveContext && _lastActiveContext.prompt_id === promptId) {
+        return focusActiveContext(_lastActiveContext.id || '');
+    }
+    return false;
+}
+
+function focusReceipt(receiptId) {
+    if (!receiptId) return false;
+    const target = document.querySelector('.receipt-card[data-receipt-id="' + cssAttr(receiptId) + '"]');
+    if (!target) return false;
+    target.classList.add('presence-highlight');
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => target.classList.remove('presence-highlight'), 3000);
+    return true;
+}
+
+function focusObjective(objectiveId) {
+    if (!objectiveId) return false;
+    const target = document.querySelector('.objective-row[data-objective-id="' + cssAttr(objectiveId) + '"]');
+    if (!target) return false;
+    target.classList.add('presence-highlight');
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    window.setTimeout(() => target.classList.remove('presence-highlight'), 3000);
+    return true;
 }
 
 function clearDashboardDeepLinkParams() {
@@ -1436,21 +2193,37 @@ function clearDashboardDeepLinkParams() {
         const url = new URL(window.location.href);
         url.searchParams.delete('notification_id');
         url.searchParams.delete('session_id');
+        url.searchParams.delete('runtime_focus');
+        url.searchParams.delete('active_context_id');
+        url.searchParams.delete('prompt_id');
+        url.searchParams.delete('objective_id');
+        url.searchParams.delete('receipt_id');
+        url.searchParams.delete('incident_id');
+        url.searchParams.delete('domain_event_id');
+        url.searchParams.delete('runtime_evidence_ref');
+        url.searchParams.delete('runtime_transition_ref');
         window.history.replaceState({}, document.title, url.pathname + url.search + url.hash);
     } catch (e) {
         /* best effort only */
     }
 }
 
-async function ackNotification(notificationId) {
+async function ackNotification(notificationId, options = {}) {
+    const silent = Boolean(options && options.silent);
     try {
         const result = await window.CleanHouseAPI.ackNotification(notificationId);
         if (!result || result.status !== 'ok') {
             throw new Error(result?.message || 'notification ack failed');
         }
-        await fetchWorkstation(currentSessionId);
+        const refreshes = [fetchRuntime()];
+        if (currentSessionId) {
+            refreshes.push(fetchWorkstation(currentSessionId));
+        }
+        await Promise.all(refreshes);
     } catch (e) {
-        setStatus('degraded', 'Notification acknowledgement failed: ' + (e.message || 'unknown error'));
+        if (!silent) {
+            setStatus('degraded', 'Notification acknowledgement failed: ' + (e.message || 'unknown error'));
+        }
     }
 }
 
@@ -1483,9 +2256,12 @@ async function requestDashboardNotificationPermission() {
     try {
         const permission = await Notification.requestPermission();
         _dashboardNotificationsEnabled = permission === 'granted';
+        if (_dashboardNotificationsEnabled) {
+            _browserNotificationsLiveStartSeconds = Math.floor(Date.now() / 1000);
+        }
         updateNotificationButton();
-        if (_lastWorkstation) {
-            maybeSendBrowserNotifications(_lastWorkstation.notifications || []);
+        if (_lastRuntime) {
+            maybeSendBrowserNotifications(_lastRuntime.runtime_notifications || []);
         }
     } catch (e) {
         _dashboardNotificationsEnabled = false;
@@ -1506,6 +2282,12 @@ function maybeSendBrowserNotifications(notifications) {
     }
     for (const item of notifications || []) {
         if (item.acknowledged || _notifiedNotificationIds.has(item.id)) {
+            continue;
+        }
+        const createdMs = Date.parse(String(item.created_at || ''));
+        const createdSeconds = Number.isFinite(createdMs) ? Math.floor(createdMs / 1000) : null;
+        if (createdSeconds === null || createdSeconds < _browserNotificationsLiveStartSeconds) {
+            _notifiedNotificationIds.add(item.id);
             continue;
         }
         if (_browserNotificationCount >= BROWSER_NOTIFICATION_MAX_PER_WINDOW) {
@@ -2363,6 +3145,13 @@ function escapeJsString(value) {
 }
 
 function updateStatus(entries) {
+    if (_lastRuntime && ['degraded', 'recovering', 'unhealthy'].includes(String(_lastRuntime.runtime_state || ''))) {
+        setStatus(
+            _lastRuntime.runtime_state === 'unhealthy' ? 'degraded' : 'unknown',
+            'Runtime ' + String(_lastRuntime.runtime_state || 'unknown') + ': ' + runtimeDetailLabel(_lastRuntime)
+        );
+        return;
+    }
     const collectorState = collectorManifestStatus(_lastCollectorManifest);
     if (collectorState.state === 'degraded') {
         setStatus('degraded', 'Collector status degraded: ' + collectorState.detail);
@@ -2448,25 +3237,41 @@ function clearPanels() {
     document.getElementById('fs-event-count').textContent = '0';
     renderSessionBar({ session_id: '', status: 'stopped' });
     document.getElementById('operational-presence-state').textContent = 'unknown';
+    document.getElementById('active-context-state').textContent = 'missing';
     document.getElementById('continuity-provenance-state').textContent = 'unknown';
     document.getElementById('objective-feed-count').textContent = '0';
     document.getElementById('mutation-stream-count').textContent = '0';
+    document.getElementById('task-manager-count').textContent = '0';
+    document.getElementById('port-monitor-count').textContent = '0';
+    document.getElementById('file-lineage-count').textContent = '0';
+    document.getElementById('minimal-workflow-state').textContent = 'idle';
+    document.getElementById('qpb-queue-count').textContent = '0';
+    document.getElementById('mediator-queue-count').textContent = '0';
     document.getElementById('deviation-alert-count').textContent = '0';
     document.getElementById('approval-required-count').textContent = '0';
     document.getElementById('receipt-replay-count').textContent = '0';
     document.getElementById('notification-tray-count').textContent = '0';
+    document.getElementById('runtime-presence-count').textContent = '0';
     document.getElementById('collector-manifest-count').textContent = '0';
     document.getElementById('lineage-graph-count').textContent = '0';
     document.getElementById('rollback-replay-count').textContent = '0';
     document.getElementById('operator-verification-count').textContent = '0';
     document.getElementById('operational-presence-body').innerHTML = '<div class="empty-state"><div class="icon">•</div><div>Operational presence unavailable.</div></div>';
+    document.getElementById('active-context-body').innerHTML = '<div class="empty-state"><div class="icon">•</div><div>Active work context unavailable.</div></div>';
     document.getElementById('continuity-provenance-body').innerHTML = '<div class="empty-state"><div class="icon">•</div><div>Continuity provenance unavailable.</div></div>';
     document.getElementById('objective-feed-body').innerHTML = '<div class="empty-state"><div class="icon">◎</div><div>No objective evidence recorded for this session.</div></div>';
     document.getElementById('mutation-stream-body').innerHTML = '<div class="empty-state"><div class="icon">≡</div><div>No local controlled mutations recorded for this session.</div></div>';
+    document.getElementById('task-manager-body').innerHTML = '<div class="empty-state"><div class="icon">⚙</div><div>No process inventory available.</div></div>';
+    document.getElementById('port-monitor-body').innerHTML = '<div class="empty-state"><div class="icon">◍</div><div>No monitored port activity recorded.</div></div>';
+    document.getElementById('file-lineage-body').innerHTML = '<div class="empty-state"><div class="icon">⌘</div><div>No file lineage events recorded.</div></div>';
+    document.getElementById('minimal-workflow-body').innerHTML = '<div class="empty-state"><div class="icon">•</div><div>Select a session first.</div></div>';
+    document.getElementById('qpb-queue-body').innerHTML = '<div class="empty-state"><div class="icon">⛉</div><div>No QPB actions pending.</div></div>';
+    document.getElementById('mediator-queue-body').innerHTML = '<div class="empty-state"><div class="icon">↺</div><div>No mediator proposals recorded.</div></div>';
     document.getElementById('deviation-alert-body').innerHTML = '<div class="empty-state"><div class="icon">⚑</div><div>No deviation summaries recorded for this session.</div></div>';
     document.getElementById('approval-required-body').innerHTML = '<div class="empty-state"><div class="icon">✓</div><div>No approval-required records are pending.</div></div>';
     document.getElementById('receipt-replay-body').innerHTML = '<div class="empty-state"><div class="icon">⌁</div><div>No replayable receipts recorded for this session.</div></div>';
-    document.getElementById('notification-tray').innerHTML = '<div class="empty-state"><div class="icon">•</div><div>No dashboard/browser notifications recorded.</div></div>';
+    document.getElementById('notification-tray').innerHTML = '<div class="empty-state"><div class="icon">•</div><div>No live notification-center alerts yet.</div></div>';
+    document.getElementById('runtime-presence-body').innerHTML = '<div class="empty-state"><div class="icon">•</div><div>Runtime presence unavailable.</div></div>';
     document.getElementById('collector-manifest-body').innerHTML = '<div class="empty-state"><div class="icon">▦</div><div>No collector health snapshot available.</div></div>';
     document.getElementById('lineage-graph-body').innerHTML = '<div class="empty-state"><div class="icon">⌬</div><div>No session evidence links available.</div></div>';
     document.getElementById('rollback-replay-body').innerHTML = '<div class="empty-state"><div class="icon">↺</div><div>No rollback/replay/signature state recorded for this session.</div></div>';
@@ -2484,6 +3289,9 @@ function clearPanels() {
     _lastLineageGraph = null;
     _lastRollbackReplayState = null;
     _lastOperatorVerification = null;
+    _lastActiveContextPayload = null;
+    _lastActiveContext = null;
+    _lastMinimalWorkflow = null;
 }
 
 function formatTime(iso) {
@@ -2755,6 +3563,64 @@ function renderSettings(settings) {
     }
     html += '</div>';
 
+    /* Automation */
+    html += '<div class="settings-group"><h3>Automation</h3>';
+    if (settings.automation) {
+        for (const [name, enabled] of Object.entries(settings.automation)) {
+            const label = name.replace(/_/g, ' ');
+            html += '<div class="setting-row">' +
+                '<div><div class="setting-label">' + escapeHtml(label) + '</div></div>' +
+                '<div class="setting-control"><button class="setting-toggle ' + (enabled ? 'on' : '') + '" data-group="automation" data-key="' + escapeHtml(name) + '" onclick="toggleSetting(this)"></button></div>' +
+                '</div>';
+        }
+    }
+    html += '</div>';
+
+    /* QPB Policy */
+    html += '<div class="settings-group"><h3>QPB Policy</h3>';
+    if (settings.qpb_policy) {
+        for (const [key, val] of Object.entries(settings.qpb_policy)) {
+            const label = key.replace(/_/g, ' ');
+            if (typeof val === 'boolean') {
+                html += '<div class="setting-row">' +
+                    '<div><div class="setting-label">' + escapeHtml(label) + '</div></div>' +
+                    '<div class="setting-control"><button class="setting-toggle ' + (val ? 'on' : '') + '" data-group="qpb_policy" data-key="' + escapeHtml(key) + '" onclick="toggleSetting(this)"></button></div>' +
+                    '</div>';
+            } else {
+                html += '<div class="setting-row">' +
+                    '<div><div class="setting-label">' + escapeHtml(label) + '</div></div>' +
+                    '<div class="setting-control"><input class="setting-input" type="number" min="0" max="1" step="0.01" value="' + escapeHtml(String(val)) + '" data-group="qpb_policy" data-key="' + escapeHtml(key) + '"></div>' +
+                    '</div>';
+            }
+        }
+    }
+    html += '</div>';
+
+    /* Mediator */
+    html += '<div class="settings-group"><h3>Mediator</h3>';
+    if (settings.mediator) {
+        for (const [key, val] of Object.entries(settings.mediator)) {
+            const label = key.replace(/_/g, ' ');
+            if (typeof val === 'boolean') {
+                html += '<div class="setting-row">' +
+                    '<div><div class="setting-label">' + escapeHtml(label) + '</div></div>' +
+                    '<div class="setting-control"><button class="setting-toggle ' + (val ? 'on' : '') + '" data-group="mediator" data-key="' + escapeHtml(key) + '" onclick="toggleSetting(this)"></button></div>' +
+                    '</div>';
+            } else if (typeof val === 'number') {
+                html += '<div class="setting-row">' +
+                    '<div><div class="setting-label">' + escapeHtml(label) + '</div></div>' +
+                    '<div class="setting-control"><input class="setting-input" type="number" min="1" step="1" value="' + escapeHtml(String(val)) + '" data-group="mediator" data-key="' + escapeHtml(key) + '"></div>' +
+                    '</div>';
+            } else {
+                html += '<div class="setting-row">' +
+                    '<div><div class="setting-label">' + escapeHtml(label) + '</div></div>' +
+                    '<div class="setting-control"><input class="setting-input" type="text" value="' + escapeHtml(String(val)) + '" data-group="mediator" data-key="' + escapeHtml(key) + '"></div>' +
+                    '</div>';
+            }
+        }
+    }
+    html += '</div>';
+
     html += '<div id="settings-result"></div>';
 
     body.innerHTML = html;
@@ -2788,8 +3654,13 @@ function buildSettingsPayload() {
     for (const input of inputs) {
         const group = input.dataset.group;
         const key = input.dataset.key;
-        let val = parseFloat(input.value);
-        if (Number.isInteger(val)) val = parseInt(input.value, 10);
+        let val;
+        if (input.type === 'text') {
+            val = input.value;
+        } else {
+            const parsed = parseFloat(input.value);
+            val = Number.isInteger(parsed) ? parseInt(input.value, 10) : parsed;
+        }
         if (!payload[group]) payload[group] = {};
         if (key.includes('.')) {
             const [parent, child] = key.split('.');

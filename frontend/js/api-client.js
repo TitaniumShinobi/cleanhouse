@@ -177,15 +177,20 @@ const API = {
     /**
      * Retrieve stored reports, optionally filtered by session_id
      */
-    async getReports(sessionId = null) {
+    async getReports(sessionId = null, options = {}) {
         if (IS_PYWEBVIEW) {
             if (window.pywebview.api.getReports) {
                 return window.pywebview.api.getReports(sessionId);
             }
             return { reports: [], count: 0, message: 'pywebview getReports not available' };
         } else {
-            const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
-            const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/reports${params}`);
+            const params = new URLSearchParams();
+            if (sessionId) params.set('session_id', sessionId);
+            if (options.reportType) params.set('report_type', options.reportType);
+            if (options.limit) params.set('limit', String(options.limit));
+            if (options.summaryOnly) params.set('summary_only', '1');
+            const suffix = params.toString() ? `?${params.toString()}` : '';
+            const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/reports${suffix}`);
             return await response.json();
         }
     },
@@ -202,6 +207,11 @@ const API = {
                 trigger,
             })
         });
+        return await response.json();
+    },
+
+    async pollLoginReport(jobId) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/login-report/${encodeURIComponent(jobId)}`);
         return await response.json();
     },
 
@@ -239,6 +249,84 @@ const API = {
     async getStatus(refresh = false) {
         const suffix = refresh ? '?refresh=1' : '';
         const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/status${suffix}`);
+        return await response.json();
+    },
+
+    async getRuntime() {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/runtime`);
+        return await response.json();
+    },
+
+    async getTaskManager(refresh = false) {
+        const suffix = refresh ? '?refresh=1' : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/task-manager${suffix}`);
+        return await response.json();
+    },
+
+    async getPortMonitor(refresh = false) {
+        const suffix = refresh ? '?refresh=1' : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/port-monitor${suffix}`);
+        return await response.json();
+    },
+
+    async getDomainObserverCatalog() {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/domains`);
+        return await response.json();
+    },
+
+    async getDomainEvents({ domain = null, surface = null, severity = null, status = null, limit = null } = {}) {
+        const params = new URLSearchParams();
+        if (domain) params.set('domain', domain);
+        if (surface) params.set('surface', surface);
+        if (severity) params.set('severity', severity);
+        if (status) params.set('status', status);
+        if (limit) params.set('limit', String(limit));
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/domain-events${suffix}`);
+        return await response.json();
+    },
+
+    async emitDomainEvent(payload) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/domain-events`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        return await response.json();
+    },
+
+    async getIncidents({ sessionId = null, status = null, severity = null, limit = null } = {}) {
+        const params = new URLSearchParams();
+        if (sessionId) params.set('session_id', sessionId);
+        if (status) params.set('status', status);
+        if (severity) params.set('severity', severity);
+        if (limit) params.set('limit', String(limit));
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/incidents${suffix}`);
+        return await response.json();
+    },
+
+    async updateIncident(incidentId, action, { note = '', actor = 'operator' } = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/incidents/${encodeURIComponent(incidentId)}/${encodeURIComponent(action)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ note, actor }),
+        });
+        return await response.json();
+    },
+
+    async getNotificationDelivery(limit = 200) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/notification-delivery?limit=${encodeURIComponent(limit)}`);
+        return await response.json();
+    },
+
+    async getNotificationPolicy(limit = 200) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/notification-policy?limit=${encodeURIComponent(limit)}`);
+        return await response.json();
+    },
+
+    async getActionOutcomes(limit = 200) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/action-outcomes?limit=${encodeURIComponent(limit)}`);
         return await response.json();
     },
 
@@ -400,7 +488,22 @@ const API = {
         if (Array.isArray(options.evidence_refs)) payload.evidence_refs = options.evidence_refs;
         if (Array.isArray(options.evidenceRefs)) payload.evidence_refs = options.evidenceRefs;
         if (options.metadata && typeof options.metadata === 'object') payload.metadata = options.metadata;
+        if (options.source) payload.source = options.source;
         const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/prompt`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        return await response.json();
+    },
+
+    async startObjective(sessionId, objectiveText = '', objectiveId = null) {
+        const payload = {
+            session_id: sessionId,
+            objective: objectiveText || '',
+        };
+        if (objectiveId) payload.objective_id = objectiveId;
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/objective/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -443,9 +546,95 @@ const API = {
         return await response.json();
     },
 
-    async getWorkstation(sessionId = null) {
-        const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
+    async getWorkstation(sessionId = null, options = {}) {
+        const query = new URLSearchParams();
+        if (sessionId) query.set('session_id', sessionId);
+        if (options.scopeEvidence) query.set('scope_evidence', '1');
+        const params = query.toString() ? `?${query.toString()}` : '';
         const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/workstation${params}`);
+        return await response.json();
+    },
+
+    async runApplicationInvestigation(payload = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/investigations/application`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+        });
+        return await response.json();
+    },
+
+    async getProcesses(refresh = false) {
+        const query = new URLSearchParams();
+        if (refresh) query.set('refresh', '1');
+        const params = query.toString() ? `?${query.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/processes${params}`);
+        return await response.json();
+    },
+
+    async getApplications(refresh = false) {
+        const query = new URLSearchParams();
+        if (refresh) query.set('refresh', '1');
+        const params = query.toString() ? `?${query.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/applications${params}`);
+        return await response.json();
+    },
+
+    async runSystemScan() {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/scan/system`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+        return await response.json();
+    },
+
+    async getWiresharkStatus() {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/network/wireshark`);
+        return await response.json();
+    },
+
+    async getNetwork(refresh = false) {
+        const query = new URLSearchParams();
+        if (refresh) query.set('refresh', '1');
+        const params = query.toString() ? `?${query.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/network${params}`);
+        return await response.json();
+    },
+
+    async getActiveContext(refresh = false, attach = false) {
+        const query = new URLSearchParams();
+        if (refresh) query.set('refresh', '1');
+        if (attach) query.set('attach', '1');
+        const params = query.toString() ? `?${query.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/active-context${params}`);
+        return await response.json();
+    },
+
+    async setActiveContextFollow(enabled) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/active-context/follow`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: Boolean(enabled) })
+        });
+        return await response.json();
+    },
+
+    async pickupActiveContext(payload = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/active-context/pickup`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        return await response.json();
+    },
+
+    async ignoreActiveContext(dedupeKey = '') {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/active-context/ignore`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dedupe_key: dedupeKey || '' })
+        });
         return await response.json();
     },
 
@@ -622,6 +811,37 @@ const API = {
         return await response.json();
     },
 
+    async unackNotification(notificationId) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/notifications/${encodeURIComponent(notificationId)}/unack`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        });
+        return await response.json();
+    },
+
+    async snoozeNotification(notificationId, minutes = 10) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/notifications/${encodeURIComponent(notificationId)}/snooze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ minutes }),
+        });
+        return await response.json();
+    },
+
+    async getNotificationTimeline(notificationId) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/notifications/${encodeURIComponent(notificationId)}/timeline`);
+        return await response.json();
+    },
+
+    async sendNotificationProbe(payload = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/notifications/probe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {}),
+        });
+        return await response.json();
+    },
+
     async createApprovalQueueItem(sessionId, requestedAction, reason = '', evidenceRefs = [], promptId = null, objectiveId = null, metadata = {}, reviewerNote = '', reviewer = 'dashboard') {
         const payload = {
             session_id: sessionId,
@@ -656,6 +876,115 @@ const API = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ status, note, reviewer })
+        });
+        return await response.json();
+    },
+
+    async getQpbCases(sessionId = null, status = null) {
+        const params = new URLSearchParams();
+        if (sessionId) params.set('session_id', sessionId);
+        if (status) params.set('status', status);
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/qpb/cases${suffix}`);
+        return await response.json();
+    },
+
+    async createQpbCase(payload) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/qpb/cases`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+        });
+        return await response.json();
+    },
+
+    async transitionQpbCase(caseId, action, payload = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/qpb/cases/${encodeURIComponent(caseId)}/${encodeURIComponent(action)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+        });
+        return await response.json();
+    },
+
+    async getStandaloneIncidentReceipt({ sessionId = null, caseId = null } = {}) {
+        const params = new URLSearchParams();
+        if (sessionId) params.set('session_id', sessionId);
+        if (caseId) params.set('case_id', caseId);
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/incident-receipt${suffix}`);
+        return await response.json();
+    },
+
+    async createStandaloneIncidentReceipt(payload = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/incident-receipt`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {}),
+        });
+        return await response.json();
+    },
+
+    async transitionStandaloneIncidentReceipt(caseId, action, payload = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/incident-receipt/${encodeURIComponent(caseId)}/${encodeURIComponent(action)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {}),
+        });
+        return await response.json();
+    },
+
+    async getMediatorProposals(sessionId = null, proposalType = null, status = null) {
+        const params = new URLSearchParams();
+        if (sessionId) params.set('session_id', sessionId);
+        if (proposalType) params.set('proposal_type', proposalType);
+        if (status) params.set('status', status);
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/mediator/proposals${suffix}`);
+        return await response.json();
+    },
+
+    async createMediatorProposal(payload) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/mediator/proposals`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+        });
+        return await response.json();
+    },
+
+    async resolveMediatorProposal(proposalId, decision, payload = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/mediator/proposals/${encodeURIComponent(proposalId)}/${encodeURIComponent(decision)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+        });
+        return await response.json();
+    },
+
+    async undoMediatorProposal(proposalId, payload = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/mediator/proposals/${encodeURIComponent(proposalId)}/undo`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+        });
+        return await response.json();
+    },
+
+    async createAutoSortProposal(payload) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/auto-sort/proposal`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+        });
+        return await response.json();
+    },
+
+    async createCleanerProposal(payload) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/cleaner/proposal`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
         });
         return await response.json();
     }

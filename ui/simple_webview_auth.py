@@ -1145,19 +1145,8 @@ class SimpleWebViewAuth:
 
                     showLoading(true);
 
-                    // Simulate login (replace with actual authentication)
-                    setTimeout(() => {
-                        if (email === 'admin@cleanhouse.local' && password === 'admin123') {
-                            showSuccess('Login successful!');
-                            setTimeout(() => {
-                                // Close the WebView window
-                                window.close();
-                            }, 1000);
-                        } else {
-                            showError('Invalid email or password. Try admin@cleanhouse.local / admin123');
-                        }
-                        showLoading(false);
-                    }, 1000);
+                    showError('Authentication backend unavailable. Enable auth routes and retry.');
+                    showLoading(false);
                 });
 
                 // OAuth functions - use system browser with full OAuth flow
@@ -1938,14 +1927,9 @@ class SimpleWebViewAuth:
                                 <input type="password" id="confirmPassword" name="confirmPassword" required autocomplete="new-password" placeholder="Confirm your password">
                             </div>
 
-                            <div class="form-group">
-                                <label for="role">Role</label>
-                                <select id="role" name="role" required>
-                                    <option value="">Select your role</option>
-                                    <option value="user">User</option>
-                                    <option value="dev">Developer</option>
-                                </select>
-                            </div>
+                            <input type="hidden" id="turnstileToken" name="turnstileToken" value="">
+                            <div id="turnstile-widget" class="turnstile-widget" aria-label="Human verification"></div>
+                            <p class="turnstile-helper">Human verification is required for official signup.</p>
                         </form>
                     </div>
 
@@ -1956,11 +1940,11 @@ class SimpleWebViewAuth:
                             <input type="checkbox" id="terms" name="terms" required>
                             <label for="terms">
                                 By continuing, I confirm I understand and agree to the
-                                <a href="#" onclick="showTerms(event); return false;"> CleanHouse Terms of Service</a>
+                                <a href="/legal/terms" target="_blank" rel="noopener noreferrer"> CleanHouse Terms of Service</a>
                                 and the
-                                <a href="#" onclick="showPrivacy(event); return false;"> CleanHouse Privacy Notice</a>.
+                                <a href="/legal/privacy" target="_blank" rel="noopener noreferrer"> CleanHouse Privacy Notice</a>.
                                 If I am in the EEA or UK, I have read and agree to the
-                                <a href="#" onclick="showEECCD(event); return false;"> European Electronic Communications Code Disclosure</a>.
+                                <a href="/legal/eeccd" target="_blank" rel="noopener noreferrer"> European Electronic Communications Code Disclosure</a>.
                             </label>
                         </div>
 
@@ -2240,8 +2224,9 @@ class SimpleWebViewAuth:
                         email: formData.get('email'),
                         password: formData.get('password'),
                         confirmPassword: formData.get('confirmPassword'),
-                        role: formData.get('role'),
-                        terms: formData.get('terms')
+                        role: 'user',
+                        terms: formData.get('terms'),
+                        turnstileToken: formData.get('turnstileToken') || ''
                     };
 
                     if (hasAPI() && window.pywebview.api.log) {
@@ -2299,7 +2284,7 @@ class SimpleWebViewAuth:
                 // Form validation
                 function validateForm(data) {
                     // Check required fields
-                    if (!data.fullName || !data.email || !data.password || !data.confirmPassword || !data.role) {
+                    if (!data.fullName || !data.email || !data.password || !data.confirmPassword) {
                         showError('All fields are required.');
                         return false;
                     }
@@ -2341,20 +2326,15 @@ class SimpleWebViewAuth:
                                 data.fullName,
                                 data.email,
                                 data.password,
-                                data.role,
-                                ''  // Turnstile disabled for AI-friendly signup
+                                data.role || 'user',
+                                data.turnstileToken || ''
                             );
                             return result;
                         } catch (error) {
                             return { success: false, message: error.message || 'Account creation failed.' };
                         }
                     } else {
-                        // Fallback simulation
-                        return new Promise((resolve) => {
-                            setTimeout(() => {
-                                resolve({ success: true, message: 'Account created successfully!' });
-                            }, 2000);
-                        });
+                        return { success: false, message: 'Authentication backend unavailable. Enable auth routes and retry.' };
                     }
                 }
 
@@ -2783,15 +2763,18 @@ class SimpleWebViewAuth:
             full_name: User's full name
             email: User's email address
             password: Plain text password
-            role: User role (user or dev) - not used in unified registry
-            turnstile_token: Deprecated - kept for API compatibility but not used (AI-friendly signup)
+            role: User role (user) - not used in unified registry
+            turnstile_token: Cloudflare Turnstile token supplied by the official signup flow
 
         Returns:
             dict: Result with success status, message, and user data if successful
         """
         try:
-            # Note: Human verification (Turnstile) is intentionally disabled for CleanHouse
-            # to allow sovereign AI entities to sign up for services
+            if os.getenv('CLEANHOUSE_TURNSTILE_REQUIRED', '1').strip().lower() not in {'0', 'false', 'no', 'off'}:
+                return {
+                    'success': False,
+                    'message': 'Human verification is required. Open /signup in the browser to create an account.',
+                }
 
             # Create user in local database (sharded format)
             user = self.user_service.create_user(

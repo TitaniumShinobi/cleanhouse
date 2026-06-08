@@ -1,0 +1,10 @@
+{
+  "refs": [
+    "local://cleanhouse/receipt/<receipt_id>",
+    "local://cleanhouse/chain-of-custody/<custody_id>",
+    "local://cleanhouse/receipt-replay/<receipt_id>",
+    "local://cleanhouse/receipt-bundle/<receipt_id>",
+    "local://cleanhouse/replay-signature/<verification_id>"
+  ],
+  "note": "manifest now signs chain_of_custody hash and hop counts"
+}

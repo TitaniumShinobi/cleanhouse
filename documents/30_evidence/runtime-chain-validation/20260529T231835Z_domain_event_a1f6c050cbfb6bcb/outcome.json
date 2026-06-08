@@ -1,0 +1,12 @@
+{
+  "final_decision_state": {
+    "decision_current_status": "rejected",
+    "decision_next_action": "complete",
+    "incident_status": "resolved",
+    "outcome_action": "reject",
+    "outcome_actor": "operator",
+    "outcome_timestamp": "2026-05-29T19:18:32.820957",
+    "qpb_case_status": "rejected"
+  },
+  "outcome_hash": "40f647f33ee6fe3b23f1ba88ee16b7cb1d29338b1ae69098965dcf950eecbfba"
+}

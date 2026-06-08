@@ -1,0 +1,406 @@
+{
+  "card": {
+    "card_id": "incident_receipt:qpb_case:04fd5e32528cdcce",
+    "decision_path": {
+      "allowed_actions": [
+        "quarantine",
+        "purge",
+        "bless"
+      ],
+      "current_status": "purge_pending",
+      "next_action": "purge"
+    },
+    "evidence": {
+      "history": [
+        {
+          "action": "detected",
+          "actor": "operator",
+          "case_id": "qpb_case:04fd5e32528cdcce",
+          "evidence_refs": [
+            "local://cleanhouse/process/1246",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+            "local://cleanhouse/integrity/382e83c51a929454",
+            "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+            "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+          ],
+          "integrity": {
+            "root_hash": "3b849f39b4f64c0db14f04218dd4f4eaa2ecdddf6c52b9adfe09e9e6c1da4b99"
+          },
+          "metadata": {
+            "source": "incident_receipt"
+          },
+          "status": "detected",
+          "target_scope": {
+            "paths": [
+              "gone2.txt"
+            ],
+            "process_pids": [
+              1246
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:52.650099"
+        },
+        {
+          "action": "quarantine",
+          "actor": "operator",
+          "case_id": "qpb_case:04fd5e32528cdcce",
+          "evidence_refs": [
+            "local://cleanhouse/process/1246",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+            "local://cleanhouse/integrity/382e83c51a929454",
+            "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+            "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+          ],
+          "integrity": {
+            "root_hash": "00d1833b5c07650188a413aa46addcc68da9d9692850104bdcea396d0063d340"
+          },
+          "metadata": {},
+          "status": "quarantined",
+          "target_scope": {
+            "paths": [
+              "gone2.txt"
+            ],
+            "process_pids": [
+              1246
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:52.710367"
+        },
+        {
+          "action": "purge",
+          "actor": "operator",
+          "case_id": "qpb_case:04fd5e32528cdcce",
+          "evidence_refs": [
+            "local://cleanhouse/process/1246",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+            "local://cleanhouse/integrity/382e83c51a929454",
+            "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+            "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+          ],
+          "integrity": {
+            "root_hash": "b82e894be20d1b1302c6877c191af00392186ae5df4e17d8dc8b4e9dc4f00b9b"
+          },
+          "metadata": {
+            "confirmation_required": true
+          },
+          "status": "purge_pending",
+          "target_scope": {
+            "paths": [
+              "gone2.txt"
+            ],
+            "process_pids": [
+              1246
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:52.965835"
+        }
+      ],
+      "refs": [
+        "local://cleanhouse/process/1246",
+        "local://cleanhouse/pattern/platform/code",
+        "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+        "local://cleanhouse/integrity/382e83c51a929454",
+        "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+        "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+      ]
+    },
+    "incident": {
+      "acknowledged_at": "2026-05-29T19:19:52.908434",
+      "created_at": "2026-05-29T19:19:50.324973",
+      "evidence_refs": [
+        "local://cleanhouse/process/1246",
+        "local://cleanhouse/pattern/platform/code",
+        "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+        "local://cleanhouse/integrity/382e83c51a929454",
+        "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+        "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+      ],
+      "history": [
+        {
+          "action": "created",
+          "actor": "policy_engine",
+          "evidence_refs": [
+            "local://cleanhouse/process/1246",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+            "local://cleanhouse/integrity/382e83c51a929454",
+            "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+            "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+          ],
+          "incident_id": "incident:09021b0309213cf8",
+          "integrity": {
+            "root_hash": "fccac6a48f5f9b1f3710503fdae3196d36c031c02e6ebeb01bef16a937064414"
+          },
+          "note": "incident created from domain event",
+          "state": "open",
+          "timestamp": "2026-05-29T19:19:50.324986"
+        },
+        {
+          "action": "review",
+          "actor": "operator",
+          "evidence_refs": [
+            "local://cleanhouse/process/1246",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+            "local://cleanhouse/integrity/382e83c51a929454",
+            "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+            "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+          ],
+          "incident_id": "incident:09021b0309213cf8",
+          "integrity": {
+            "root_hash": "53627fce733dd67838b3b10d066a18acc0c62d85c4e986f7560ad62f1e55113f"
+          },
+          "note": "qpb quarantine -> quarantined",
+          "state": "in_review",
+          "timestamp": "2026-05-29T19:19:52.908445"
+        },
+        {
+          "action": "review",
+          "actor": "operator",
+          "evidence_refs": [
+            "local://cleanhouse/process/1246",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+            "local://cleanhouse/integrity/382e83c51a929454",
+            "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+            "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+          ],
+          "incident_id": "incident:09021b0309213cf8",
+          "integrity": {
+            "root_hash": "045d1a160d59c81c54a33c60af4b69d6a2f8da4513b446ff0e7143f752418165"
+          },
+          "note": "qpb purge -> purge_pending",
+          "state": "in_review",
+          "timestamp": "2026-05-29T19:19:53.152733"
+        }
+      ],
+      "id": "incident:09021b0309213cf8",
+      "metadata": {
+        "domain": "agent_firewall",
+        "policy_decision_id": "policy_decision:28aa2474154e70f2",
+        "surface": "process_integrity_collector"
+      },
+      "next_action": "inspect lineage",
+      "notification_type": "incident_action_required",
+      "objective_id": null,
+      "resolved_at": null,
+      "session_id": "runtime-global",
+      "severity": "warning",
+      "source_event_id": "domain_event:77f6db2f8902f91f",
+      "status": "in_review",
+      "summary": "agent_firewall/process_integrity_collector: process_file_integrity_suspicion",
+      "title": "process_file_integrity_suspicion",
+      "updated_at": "2026-05-29T19:19:53.152730"
+    },
+    "objective_id": "None",
+    "outcome": {
+      "action": "purge",
+      "actor": "operator",
+      "details": {
+        "confirmation_required": true
+      },
+      "integrity_root_hash": "b82e894be20d1b1302c6877c191af00392186ae5df4e17d8dc8b4e9dc4f00b9b",
+      "note": "",
+      "status": "purge_pending",
+      "timestamp": "2026-05-29T19:19:52.965835"
+    },
+    "proposal": {
+      "applied_at": "2026-05-29T19:19:52.594458",
+      "created_at": "2026-05-29T19:19:52.170941",
+      "evidence_refs": [
+        "local://cleanhouse/process/1246",
+        "local://cleanhouse/pattern/platform/code",
+        "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+        "local://cleanhouse/integrity/382e83c51a929454",
+        "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+        "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+      ],
+      "id": "proposal:b460d785cb93a263",
+      "metadata": {
+        "applied_ops": [
+          {
+            "op": "write_file",
+            "path": "gone2.txt"
+          }
+        ],
+        "incident_id": "incident:09021b0309213cf8",
+        "repo_path": "/private/tmp/cleanhouse-runtime-validation",
+        "synthetic": false,
+        "undo_records": [
+          {
+            "before_content_b64": null,
+            "before_exists": false,
+            "op": "write_file",
+            "path": "gone2.txt"
+          }
+        ],
+        "workflow": "standalone_incident_receipt"
+      },
+      "objective_id": null,
+      "operations": [
+        {
+          "content": "standalone_incident_receipt=true\nsession_id=runtime-global\nsignal_source=process_integrity_collector\nsignal_pid=1246\nsignal_process=/Applications/Codex.app/Contents/Frameworks/Codex Helper (Renderer).app/Contents/MacOS/Codex Helper (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --standard-schemes=app --secure-schemes=app,sentry-ipc --bypasscsp-schemes=sentry-ipc --cors-schemes=sentry-ipc --fetch-schemes=app,sentry-ipc --streaming-schemes=app --app-path=/Applications/Codex.app/Contents/Resources/app.asar --enable-sandbox --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=4 --time-ticks-at-unix-epoch=-1780094726253366 --launch-time-ticks=50355581 --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990060038890 --seatbelt-client=70\nsuspicion_reason=process 1246 (/Applications/Codex.app/Contents/Frameworks/Codex Helper (Renderer).app/Contents/MacOS/Codex Helper (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --standard-schemes=app --secure-schemes=app,sentry-ipc --bypasscsp-schemes=sentry-ipc --cors-schemes=sentry-ipc --fetch-schemes=app,sentry-ipc --streaming-schemes=app --app-path=/Applications/Codex.app/Contents/Resources/app.asar --enable-sandbox --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=4 --time-ticks-at-unix-epoch=-1780094726253366 --launch-time-ticks=50355581 --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990060038890 --seatbelt-client=70) correlated with integrity missing on gone2.txt\ncreated_at=2026-05-29T19:19:50.257769\n",
+          "op": "write_file",
+          "path": "gone2.txt"
+        }
+      ],
+      "proposal_type": "incident_receipt_stage",
+      "reason": "incident receipt file-integrity marker staged for mediation evidence",
+      "rollback_id": "op_rollback:e96e7715d14d1134",
+      "session_id": "runtime-global",
+      "status": "applied",
+      "target_scope": {
+        "paths": [
+          "gone2.txt"
+        ],
+        "process_pids": [
+          1246
+        ]
+      },
+      "undone_at": null,
+      "updated_at": "2026-05-29T19:19:52.594458"
+    },
+    "qpb_case": {
+      "created_at": "2026-05-29T19:19:52.650069",
+      "evidence_refs": [
+        "local://cleanhouse/process/1246",
+        "local://cleanhouse/pattern/platform/code",
+        "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+        "local://cleanhouse/integrity/382e83c51a929454",
+        "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+        "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+      ],
+      "history": [
+        {
+          "action": "detected",
+          "actor": "operator",
+          "case_id": "qpb_case:04fd5e32528cdcce",
+          "evidence_refs": [
+            "local://cleanhouse/process/1246",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+            "local://cleanhouse/integrity/382e83c51a929454",
+            "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+            "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+          ],
+          "integrity": {
+            "root_hash": "3b849f39b4f64c0db14f04218dd4f4eaa2ecdddf6c52b9adfe09e9e6c1da4b99"
+          },
+          "metadata": {
+            "source": "incident_receipt"
+          },
+          "status": "detected",
+          "target_scope": {
+            "paths": [
+              "gone2.txt"
+            ],
+            "process_pids": [
+              1246
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:52.650099"
+        },
+        {
+          "action": "quarantine",
+          "actor": "operator",
+          "case_id": "qpb_case:04fd5e32528cdcce",
+          "evidence_refs": [
+            "local://cleanhouse/process/1246",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+            "local://cleanhouse/integrity/382e83c51a929454",
+            "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+            "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+          ],
+          "integrity": {
+            "root_hash": "00d1833b5c07650188a413aa46addcc68da9d9692850104bdcea396d0063d340"
+          },
+          "metadata": {},
+          "status": "quarantined",
+          "target_scope": {
+            "paths": [
+              "gone2.txt"
+            ],
+            "process_pids": [
+              1246
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:52.710367"
+        },
+        {
+          "action": "purge",
+          "actor": "operator",
+          "case_id": "qpb_case:04fd5e32528cdcce",
+          "evidence_refs": [
+            "local://cleanhouse/process/1246",
+            "local://cleanhouse/pattern/platform/code",
+            "local://cleanhouse/evidence/processes:8561716cfeab22a7.json",
+            "local://cleanhouse/integrity/382e83c51a929454",
+            "local://cleanhouse/evidence/integrity:5f55414cdf928217.json",
+            "local://cleanhouse/correlation/process-integrity/04580402726bc01a"
+          ],
+          "integrity": {
+            "root_hash": "b82e894be20d1b1302c6877c191af00392186ae5df4e17d8dc8b4e9dc4f00b9b"
+          },
+          "metadata": {
+            "confirmation_required": true
+          },
+          "status": "purge_pending",
+          "target_scope": {
+            "paths": [
+              "gone2.txt"
+            ],
+            "process_pids": [
+              1246
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:52.965835"
+        }
+      ],
+      "id": "qpb_case:04fd5e32528cdcce",
+      "metadata": {
+        "incident_id": "incident:09021b0309213cf8",
+        "proposal_id": "proposal:b460d785cb93a263",
+        "repo_path": "/private/tmp/cleanhouse-runtime-validation",
+        "signal_pid": 1246,
+        "signal_process": "/Applications/Codex.app/Contents/Frameworks/Codex Helper (Renderer).app/Contents/MacOS/Codex Helper (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --standard-schemes=app --secure-schemes=app,sentry-ipc --bypasscsp-schemes=sentry-ipc --cors-schemes=sentry-ipc --fetch-schemes=app,sentry-ipc --streaming-schemes=app --app-path=/Applications/Codex.app/Contents/Resources/app.asar --enable-sandbox --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=4 --time-ticks-at-unix-epoch=-1780094726253366 --launch-time-ticks=50355581 --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990060038890 --seatbelt-client=70",
+        "signal_source": "process_integrity_collector",
+        "suspicion_reason": "process 1246 (/Applications/Codex.app/Contents/Frameworks/Codex Helper (Renderer).app/Contents/MacOS/Codex Helper (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --standard-schemes=app --secure-schemes=app,sentry-ipc --bypasscsp-schemes=sentry-ipc --cors-schemes=sentry-ipc --fetch-schemes=app,sentry-ipc --streaming-schemes=app --app-path=/Applications/Codex.app/Contents/Resources/app.asar --enable-sandbox --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=4 --time-ticks-at-unix-epoch=-1780094726253366 --launch-time-ticks=50355581 --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990060038890 --seatbelt-client=70) correlated with integrity missing on gone2.txt",
+        "synthetic": false,
+        "workflow": "standalone_incident_receipt"
+      },
+      "objective_id": "None",
+      "session_id": "runtime-global",
+      "status": "purge_pending",
+      "target_scope": {
+        "paths": [
+          "gone2.txt"
+        ],
+        "process_pids": [
+          1246
+        ]
+      },
+      "updated_at": "2026-05-29T19:19:52.965830"
+    },
+    "session_id": "runtime-global",
+    "suspicion": {
+      "process_pids": [
+        1246
+      ],
+      "reason": "process 1246 (/Applications/Codex.app/Contents/Frameworks/Codex Helper (Renderer).app/Contents/MacOS/Codex Helper (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --standard-schemes=app --secure-schemes=app,sentry-ipc --bypasscsp-schemes=sentry-ipc --cors-schemes=sentry-ipc --fetch-schemes=app,sentry-ipc --streaming-schemes=app --app-path=/Applications/Codex.app/Contents/Resources/app.asar --enable-sandbox --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=4 --time-ticks-at-unix-epoch=-1780094726253366 --launch-time-ticks=50355581 --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990060038890 --seatbelt-client=70) correlated with integrity missing on gone2.txt",
+      "signal_pid": 1246,
+      "signal_process": "/Applications/Codex.app/Contents/Frameworks/Codex Helper (Renderer).app/Contents/MacOS/Codex Helper (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/Codex --standard-schemes=app --secure-schemes=app,sentry-ipc --bypasscsp-schemes=sentry-ipc --cors-schemes=sentry-ipc --fetch-schemes=app,sentry-ipc --streaming-schemes=app --app-path=/Applications/Codex.app/Contents/Resources/app.asar --enable-sandbox --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=4 --time-ticks-at-unix-epoch=-1780094726253366 --launch-time-ticks=50355581 --shared-files --field-trial-handle=1718379636,r,9770669957786122117,4442172277087827862,262144 --enable-features=DocumentPolicyIncludeJSCallStacksInCrashReports,PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma --disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation --variations-seed-version --pseudonymization-salt-handle=1935764596,r,1607634866171125193,12100031984893484436,4 --trace-process-track-uuid=3190708990060038890 --seatbelt-client=70",
+      "signal_source": "process_integrity_collector",
+      "target_path": "gone2.txt",
+      "target_paths": [
+        "gone2.txt"
+      ],
+      "title": "Agent Firewall + File Integrity Suspicion"
+    },
+    "workflow": "standalone_incident_receipt"
+  },
+  "status": "ok"
+}

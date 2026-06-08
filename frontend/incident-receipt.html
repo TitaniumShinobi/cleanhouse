@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CleanHouse Incident Receipt</title>
+<link rel="stylesheet" href="/css/incident-receipt.css?v=1">
+</head>
+<body>
+<main class="receipt-shell">
+    <header class="receipt-header">
+        <h1>CleanHouse Incident Receipt</h1>
+        <p>One incident, one decision path: Quarantine / Purge / Bless.</p>
+    </header>
+
+    <section class="receipt-controls">
+        <label>
+            Session ID
+            <input id="session-id" type="text" autocomplete="off" spellcheck="false">
+        </label>
+        <label>
+            Repo Path
+            <input id="repo-path" type="text" autocomplete="off" spellcheck="false" value="/Users/devonwoodson/Documents/GitHub/cleanhouse">
+        </label>
+        <label>
+            Incident ID (Optional)
+            <input id="incident-id" type="text" autocomplete="off" spellcheck="false" placeholder="incident:...">
+        </label>
+        <div class="button-row">
+            <button id="load-btn" type="button" onclick="loadIncidentCard()">Load Card</button>
+            <button id="create-btn" type="button" onclick="createIncidentCard()">Bind Runtime Incident</button>
+        </div>
+    </section>
+
+    <section id="status" class="status clear">Ready.</section>
+
+    <section id="incident-card" class="incident-card">
+        <div class="empty">No incident card loaded.</div>
+    </section>
+</main>
+
+<script src="/js/api-client.js?v=1"></script>
+<script src="/js/incident-receipt.js?v=1"></script>
+</body>
+</html>

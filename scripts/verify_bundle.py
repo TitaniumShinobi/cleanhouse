@@ -23,6 +23,7 @@ from backend.api.cleanhouse_monitoring import (  # noqa: E402
     CleanHouseMonitoringAdapter,
     _canonical_json_bytes,
     _evidence_key_management_profile,
+    _stable_json_hash,
 )
 
 
@@ -178,6 +179,16 @@ def _deterministic_evidence_failures(
         replay.get("approval_history", []) if isinstance(replay.get("approval_history"), list) else approval_history
     )
     expected_signed_refs = adapter._receipt_bundle_evidence_refs(bundle)
+    custody = bundle.get("chain_of_custody", {}) if isinstance(bundle.get("chain_of_custody"), dict) else {}
+    custody_hops = custody.get("hops", []) if isinstance(custody.get("hops"), list) else []
+    custody_hash = _stable_json_hash(custody) if custody else ""
+    traceable_hops = 0
+    for hop in custody_hops:
+        if not isinstance(hop, dict):
+            continue
+        ref = str(hop.get("ref", "") or "")
+        if ref.startswith("local://cleanhouse/"):
+            traceable_hops += 1
 
     if "evidence_ref_count" in integrity and integrity.get("evidence_ref_count") != len(evidence_chain):
         failures.append("evidence ref count mismatch")
@@ -199,6 +210,18 @@ def _deterministic_evidence_failures(
             failures.append("manifest evidence ref count mismatch")
         if manifest.get("approval_history_count", 0) != len(replay_approval_history):
             failures.append("manifest approval history count mismatch")
+        if manifest.get("chain_of_custody_hash", "") != custody_hash:
+            failures.append("manifest chain of custody hash mismatch")
+        if manifest.get("chain_of_custody_hop_count", 0) != len(custody_hops):
+            failures.append("manifest chain of custody hop count mismatch")
+        if manifest.get("chain_of_custody_traceable_hop_count", 0) != traceable_hops:
+            failures.append("manifest chain of custody traceable hop count mismatch")
+        if verification.get("chain_of_custody_hash_match") is False:
+            failures.append("chain of custody hash mismatch")
+        if verification.get("chain_of_custody_hop_count_match") is False:
+            failures.append("chain of custody hop count mismatch")
+        if verification.get("chain_of_custody_traceable_hop_count_match") is False:
+            failures.append("chain of custody traceable hop count mismatch")
     return failures
 
 

@@ -69,6 +69,20 @@ header .logo-icon {
 
 .controls button:hover { background: #3a4a5e; }
 
+.controls .control-link {
+    background: #203847;
+    color: #d9f2f4;
+    border: 1px solid #3a6970;
+    border-radius: 6px;
+    padding: 8px 13px;
+    font-size: 13px;
+    text-decoration: none;
+}
+
+.controls .control-link:hover {
+    background: #2b4b58;
+}
+
 .controls label {
     font-size: 13px;
     color: #8899aa;
@@ -285,6 +299,11 @@ header .logo-icon {
     background: #3a4a5e;
 }
 
+.session-actions button.active {
+    border-color: #8bcf9f;
+    color: #d8ffe2;
+}
+
 .session-actions button:disabled,
 .notification-ack:disabled {
     cursor: not-allowed;
@@ -404,6 +423,10 @@ header .logo-icon {
 }
 
 .presence-panel {
+    grid-column: 1 / -1;
+}
+
+.active-context-panel {
     grid-column: 1 / -1;
 }
 

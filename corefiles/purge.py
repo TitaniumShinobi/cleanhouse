@@ -45,8 +45,8 @@ def restore_file(file_path: Path, dry_run: bool = False) -> bool:
             logging.info(f"Attempting to restore {file_path} from cloud storage")
             
             if dry_run:
-                logging.info(f"[DRY RUN] Would restore {file_path} from cloud storage")
-                return True
+                logging.info(f"[DRY RUN] Cloud restore unsupported for {file_path}; no restore performed")
+                return False
             
             # Try each cloud service in order
             restored = False
@@ -56,8 +56,7 @@ def restore_file(file_path: Path, dry_run: bool = False) -> bool:
                     cloud_path = config.CLOUD_PATHS[service] / file_path.name
                     temp_file = config.TEMP_DIR / f"{file_path.name}.{service}"
                     
-                    # Download logic would go here
-                    # For now, we'll just log the attempt
+                    # A restore is only valid if an actual staged file exists.
                     logging.info(f"Attempting to restore from {service}: {cloud_path}")
                     
                     if os.path.exists(temp_file):

@@ -127,7 +127,7 @@ class UIEvents:
         else:
             self.layout.monitoring = False
             self.layout.monitor_btn.config(text="Start Monitoring", bg="#388e3c")
-            self.hooks.update_status("Protected", "#4caf50")
+            self.hooks.update_status("No Changes Observed", "#4caf50")
     
     def init_baseline(self):
         """Initialize baseline for the selected directory."""
@@ -175,7 +175,10 @@ class UIEvents:
     
     def show_about(self):
         """Show about dialog."""
-        messagebox.showinfo("About CleanHouse", "CleanHouse\nVersion 1.0\nInspired by Malwarebytes\n\nProtecting your PC from unauthorized AI activity.")
+        messagebox.showinfo(
+            "About CleanHouse",
+            "CleanHouse\nVersion 1.0\n\nObserves local process, file integrity, and network signals.",
+        )
     
     def install_service(self):
         """Install CleanHouse as a system service."""
@@ -266,9 +269,7 @@ class UIEvents:
             if not self.layout.cloud_manager:
                 raise RuntimeError("Cloud manager not initialized")
             
-            # Implement Google Drive configuration
-            # This is a placeholder for actual implementation
-            messagebox.showinfo("Google Drive", "Google Drive configuration not implemented yet")
+            messagebox.showinfo("Google Drive", "Google Drive configuration is currently unsupported.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to configure Google Drive: {str(e)}")
     
@@ -278,9 +279,7 @@ class UIEvents:
             if not self.layout.cloud_manager:
                 raise RuntimeError("Cloud manager not initialized")
             
-            # Implement Dropbox configuration
-            # This is a placeholder for actual implementation
-            messagebox.showinfo("Dropbox", "Dropbox configuration not implemented yet")
+            messagebox.showinfo("Dropbox", "Dropbox configuration is currently unsupported.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to configure Dropbox: {str(e)}")
     
@@ -290,9 +289,7 @@ class UIEvents:
             if not self.layout.cloud_manager:
                 raise RuntimeError("Cloud manager not initialized")
             
-            # Implement OneDrive configuration
-            # This is a placeholder for actual implementation
-            messagebox.showinfo("OneDrive", "OneDrive configuration not implemented yet")
+            messagebox.showinfo("OneDrive", "OneDrive configuration is currently unsupported.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to configure OneDrive: {str(e)}")
     
@@ -302,9 +299,7 @@ class UIEvents:
             if not self.layout.cloud_manager:
                 raise RuntimeError("Cloud manager not initialized")
             
-            # Implement GitHub configuration
-            # This is a placeholder for actual implementation
-            messagebox.showinfo("GitHub", "GitHub configuration not implemented yet")
+            messagebox.showinfo("GitHub", "GitHub configuration is currently unsupported.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to configure GitHub: {str(e)}")
     

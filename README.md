@@ -15,8 +15,8 @@ A local-first observability and evidence platform built with **Python**, **pyweb
 ```bash
 git clone https://github.com/TitaniumShinobi/cleanhouse.git
 cd cleanhouse
-python3 -m venv cleanhouse_env
-source cleanhouse_env/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -31,21 +31,14 @@ CHATTY_API_URL=http://localhost:5000
 
 ### 3. Run the Application
 
-**Desktop App (Canonical path):**
+**Canonical operator runtime path:**
 ```bash
-source cleanhouse_env/bin/activate
-python3 desktop/wrapper.py
-```
-
-**Browser Testing (Development):**
-```bash
-source cleanhouse_env/bin/activate
-python3 backend/server.py
+/bin/bash scripts/cleanhouse-up.sh
 ```
 
 Then open your browser to: **http://localhost:3333/dashboard**
 
-### 3c. Operator Launcher and Raw Dev Paths (recommended)
+### 3c. Debug-only startup paths
 
 Use these shell functions (from any folder):
 
@@ -62,10 +55,15 @@ cleanhouse-raw() {
 `cleanhouse` is the operator-facing launcher:
 - starts/reuses the local app from `127.0.0.1:3333`
 - waits for readiness at `http://127.0.0.1:3333/cleanhouse/status`
+- resolves the runtime interpreter deterministically before supervisor start
 - opens `http://localhost:3333/dashboard`
 - prints `cleanhouse is running at http://localhost:3333/dashboard`
 
-`cleanhouse-raw` remains the direct terminal-first raw startup path (debugging path only), calling `cleanhouse-raw.sh` directly.
+Debug-only paths (non-canonical):
+
+- `cleanhouse-raw` calls `scripts/cleanhouse-raw.sh` directly for terminal-first troubleshooting.
+- `python3 desktop/wrapper.py` is attach/debug oriented.
+- `python3 -m backend.runtime_supervisor start` is backend-only troubleshooting.
 
 Canonical launcher command (from any folder):
 
@@ -122,6 +120,7 @@ CleanHouse features a unified authentication system that connects to Chatty's Mo
 - **OAuth Providers** — Google, Apple, Microsoft (opens in system browser)
 - **Unified Registry** — Shared user database with Chatty and VVAULT
 - **Local Fallback** — Automatic SQLite fallback if Chatty API unavailable
+- **Runtime toggle** — Auth routes are available only when `CLEANHOUSE_ENABLE_AUTH=1`
 
 **Features:**
 - Native password manager support (Keychain, 1Password, Bitwarden, etc.)
@@ -149,11 +148,12 @@ CleanHouse features a unified authentication system that connects to Chatty's Mo
 - **Signal Reporting** — Observed signals and aggregate summaries are surfaced in API outputs
 - **Logging Infrastructure** — Comprehensive logging and event auditing
 - **Notification System** — Alerts are reports, not enforcement actions
+- **Notification visibility rule** — Native delivery metadata is transport evidence; it does not guarantee operator-visible interruption without acknowledgement
 
 ### 🌐 WebView Interface
 - **Native OS Integration** — Uses pywebview for native desktop experience
 - **Responsive UI** — Modern, responsive web-based interface
-- **OAuth Browser Flow** — Secure OAuth authentication via system browser
+- **OAuth Browser Flow** — OAuth authentication via system browser when auth routes are enabled
 - **Form Validation** — Client-side and server-side validation
 
 ## 🧭 Endpoint Boundary (v1)
@@ -172,7 +172,7 @@ CleanHouse consists of multiple integrated components:
 ------------|-------------|----------------
 Desktop Launcher | `desktop/wrapper.py` | Primary executable entry path
 UI | `ui/` | WebView-based user interface
-Backend API | `backend/server.py` | Flask REST API server
+Backend API | `backend/server.py` | Flask REST API server used by the supervisor-managed runtime
 Models | `models/` | Database models and user registry
 Access Control | `access_control/` | Permission and session management
 Zaelith | `zaelith/` | Optional manual prompt-response review integration
@@ -243,7 +243,7 @@ DATABASE_URL=sqlite:///user_auth.db
 ### Run Tests
 
 ```bash
-source cleanhouse_env/bin/activate
+source .venv/bin/activate
 pytest tests/
 ```
 
@@ -269,16 +269,16 @@ pytest tests/
 
 ### Port Already in Use
 **Problem:** Port 3333 already in use
-**Solution:** Set `CLEANHOUSE_PORT` before starting the server:
+**Solution:** Set `CLEANHOUSE_PORT` before starting the supervisor:
 ```sh
-CLEANHOUSE_PORT=3334 python3 backend/server.py
+CLEANHOUSE_PORT=3334 python3 -m backend.runtime_supervisor start
 ```
 
 ### Module Not Found Errors
 **Problem:** `ModuleNotFoundError: No module named 'flask'`
 **Solution:**
 ```bash
-source cleanhouse_env/bin/activate
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
@@ -321,4 +321,4 @@ See `LICENSE` file for details.
 
 **Version:** 1.1.0
 **Last Updated:** 2025-11-16
-**Status:** ✅ Production Ready
+**Status:** Draft-to-Execution (rubric-scored; see `docs/canon/CLEANHOUSE_RUBRIC.md`)

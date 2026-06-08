@@ -1,0 +1,10 @@
+/login|200|    6370
+/signup|200|    8588
+/dashboard|200|   12246
+/incident-receipt|200|    1600
+/cleanhouse/status|000|    1600
+/cleanhouse/runtime|000|    1600
+/cleanhouse/workstation?session_id=product-reality-20260530|000|    1600
+/cleanhouse/timeline?session_id=product-reality-20260530|405|     153
+/cleanhouse/receipts?session_id=product-reality-20260530|000|     153
+/cleanhouse/incident-receipt|000|     153

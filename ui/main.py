@@ -353,7 +353,7 @@ class CleanHouseUI(tk.Tk):
         self.layout.create_tabs()
 
         # Initialize status
-        self.hooks.update_status("Protected", "#4caf50")
+        self.hooks.update_status("Not Scanned", "#4caf50")
 
         # Start directory statistics update
         self.hooks.update_directory_stats()

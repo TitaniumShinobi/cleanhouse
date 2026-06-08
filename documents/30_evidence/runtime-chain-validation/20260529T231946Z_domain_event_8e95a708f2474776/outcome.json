@@ -1,0 +1,12 @@
+{
+  "final_decision_state": {
+    "decision_current_status": "quarantined",
+    "decision_next_action": "purge",
+    "incident_status": "in_review",
+    "outcome_action": "quarantine",
+    "outcome_actor": "operator",
+    "outcome_timestamp": "2026-05-29T19:19:46.212155",
+    "qpb_case_status": "quarantined"
+  },
+  "outcome_hash": "47fd46abe7f225dc87b036e36096c70ada4745f3265819be35b9d0dbe0f94e37"
+}

@@ -1,6 +1,6 @@
 # CleanHouse Master Implementation Plan (Evidence-First, v1.0)
 
-Last updated: 2026-05-22
+Last updated: 2026-05-28
 Status: Draft-to-Execution
 
 ## Hard execution constraints
@@ -15,6 +15,8 @@ Status: Draft-to-Execution
 - Canonical doctrine documents:
   - `/Users/devonwoodson/Documents/GitHub/cleanhouse/docs/evidence/CLEANHOUSE_EVIDENCE_FIRST_THESIS.md`
   - `/Users/devonwoodson/Documents/GitHub/cleanhouse/docs/canon/CLEANHOUSE_RUBRIC.md`
+  - `/Users/devonwoodson/Documents/GitHub/cleanhouse/docs/canon/CLEANHOUSE_RTOS_FOUNDATION.md`
+  - `/Users/devonwoodson/Documents/GitHub/cleanhouse/docs/canon/CLEANHOUSE_CANONICAL_RUNTIME_SPINE.md`
 - Audit baseline input:
   - `/Users/devonwoodson/Documents/GitHub/cleanhouse/docs/canon/CLEANHOUSE_EVIDENCE_AUDIT.md`
 
@@ -699,6 +701,30 @@ Regression boundaries:
 - No endpoint docs removed.
 Completion criteria:
 - Congruent docs and release notes describing current implemented v1 behavior.
+
+### Prompt I5 — Native notification evidence and noise-control hardening
+Goal:
+- Keep native macOS notification fanout evidence-linked while reducing noise and preserving runtime truth boundaries.
+Required files:
+- `/Users/devonwoodson/Documents/GitHub/cleanhouse/backend/api/cleanhouse_monitoring.py`
+- `/Users/devonwoodson/Documents/GitHub/cleanhouse/corefiles/notifications.py`
+- `/Users/devonwoodson/Documents/GitHub/cleanhouse/scripts/native_notification_runtime_probe.py`
+Dependencies:
+- I2, I4
+Architectural constraints:
+- Delivery metadata remains transport evidence unless operator acknowledgement confirms visibility.
+- Notification dedupe must include incident-instance fingerprint, not only evidence refs.
+- Cooldown and burst policies must be deterministic and persisted.
+Acceptance tests:
+- Runtime probe reports evidence refs, deep-link click URL fields, and native delivery status.
+- Repeated identical incident transitions are deduped; new incident instances are not suppressed.
+- Cooldown and burst-cap controls skip excess sends with explicit reasons and next-allowed timestamps.
+Anti-overclaim checks:
+- No claims that `delivered` guarantees operator-visible interruption.
+Regression boundaries:
+- Existing runtime notification types and deep-link contract remain available.
+Completion criteria:
+- Native notification path is low-noise, evidence-linked, and truthfully labeled across runtime and workstation surfaces.
 
 ## Global acceptance criteria before planning/feature expansion
 - One executable path runs.

@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import os
 import logging
+import json
+import sqlite3
 import secrets
 import base64
 import hashlib
@@ -92,6 +94,95 @@ def _cleanhouse_public_origin() -> str:
     return os.getenv('CLEANHOUSE_PUBLIC_ORIGIN') or f"http://127.0.0.1:{os.getenv('CLEANHOUSE_PORT', '3333')}"
 
 
+def _env_flag(name: str, default: str = '1') -> bool:
+    return os.getenv(name, default).strip().lower() not in {'0', 'false', 'no', 'off'}
+
+
+def _turnstile_config() -> Dict[str, Any]:
+    site_key = os.getenv('TURNSTILE_SITE_KEY', '').strip()
+    secret_key = os.getenv('TURNSTILE_SECRET_KEY', '').strip()
+    required = _env_flag('CLEANHOUSE_TURNSTILE_REQUIRED', '1')
+    enabled = bool(site_key and secret_key)
+    return {
+        'required': required,
+        'enabled': enabled,
+        'siteKey': site_key if site_key else None,
+    }
+
+
+def _cleanhouse_auth_docs() -> list[Dict[str, Any]]:
+    origin = _cleanhouse_public_origin().rstrip('/')
+    return [
+        {
+            'product': 'cleanhouse',
+            'docType': 'terms',
+            'key': 'cleanhouse:terms',
+            'version': os.getenv('LEGAL_VERSION_CLEANHOUSE_TERMS', '2025-11-09'),
+            'label': 'CleanHouse Terms of Service',
+            'url': f'{origin}/legal/terms',
+            'required': True,
+        },
+        {
+            'product': 'cleanhouse',
+            'docType': 'privacy',
+            'key': 'cleanhouse:privacy',
+            'version': os.getenv('LEGAL_VERSION_CLEANHOUSE_PRIVACY', '2025-11-09'),
+            'label': 'CleanHouse Privacy Notice',
+            'url': f'{origin}/legal/privacy',
+            'required': True,
+        },
+        {
+            'product': 'cleanhouse',
+            'docType': 'eeccd',
+            'key': 'cleanhouse:eeccd',
+            'version': os.getenv('LEGAL_VERSION_CLEANHOUSE_EECCD', '2025-11-09'),
+            'label': 'European Electronic Communications Code Disclosure',
+            'url': f'{origin}/legal/eeccd',
+            'required': True,
+        },
+    ]
+
+
+def _missing_required_consent(consent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for doc in _cleanhouse_auth_docs():
+        if consent.get(doc['key']) is not True:
+            return doc
+    return None
+
+
+def _verify_turnstile_token(token: str, remote_ip: str = '') -> bool:
+    secret_key = os.getenv('TURNSTILE_SECRET_KEY', '').strip()
+    if not secret_key or not token:
+        return False
+
+    try:
+        body = {
+            'secret': secret_key,
+            'response': token,
+        }
+        if remote_ip:
+            body['remoteip'] = remote_ip
+        response = requests.post(
+            'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+            data=body,
+            timeout=5,
+        )
+        if not getattr(response, 'ok', False):
+            return False
+        payload = response.json()
+        return payload.get('success') is True
+    except Exception as exc:
+        logging.warning("Turnstile verification failed: %s", exc)
+        return False
+
+
+def _client_ip() -> str:
+    forwarded = getattr(request, 'headers', {}).get('X-Forwarded-For', '')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return getattr(request, 'remote_addr', '') or ''
+
+
 def _model_user_id(user: Any) -> Any:
     return getattr(user, 'user_id', None) or getattr(user, 'id', None)
 
@@ -115,12 +206,13 @@ def _build_login_report_payload(
     try:
         from backend.api.cleanhouse import get_cleanhouse_monitoring_adapter
 
-        return get_cleanhouse_monitoring_adapter().build_login_report(
+        return get_cleanhouse_monitoring_adapter().submit_login_report(
             user_id=str(user_data.get('user_id') or user_data.get('id') or ''),
             email=str(user_data.get('email') or ''),
             previous_login_at=previous_login_at,
             current_login_at=current_login_at or datetime.now().isoformat(),
             trigger=trigger,
+            wait_timeout_seconds=2.0,
         )
     except Exception as exc:
         logging.warning("Login report generation failed: %s", exc, exc_info=True)
@@ -128,6 +220,121 @@ def _build_login_report_payload(
             'status': 'unavailable',
             'message': str(exc) or exc.__class__.__name__,
         }
+
+
+def _vvault_root() -> Path:
+    configured = os.getenv('CLEANHOUSE_VVAULT_ROOT') or os.getenv('VVAULT_ROOT')
+    if configured:
+        return Path(configured).expanduser()
+    return Path(__file__).parent.parent.parent.parent / "vvault"
+
+
+def _clear_vvault_user_records(user_id: str, email: str) -> Dict[str, Any]:
+    """Remove local VVAULT user rows for an account deletion request."""
+    root = _vvault_root()
+    cleanup = {
+        'root': str(root),
+        'available': root.exists(),
+        'users_json_removed': 0,
+        'sqlite_rows_removed': 0,
+        'sqlite_tables': [],
+        'status': 'not_configured' if not root.exists() else 'ok',
+    }
+    if not root.exists():
+        return cleanup
+
+    target_ids = {str(user_id or '').strip()}
+    target_ids.discard('')
+    target_email = str(email or '').strip().lower()
+
+    users_path = root / "users.json"
+    if users_path.exists():
+        try:
+            data = json.loads(users_path.read_text(encoding='utf-8'))
+            users = data.get('users') if isinstance(data, dict) else None
+            if isinstance(users, dict):
+                removed = []
+                for key, value in list(users.items()):
+                    record = value if isinstance(value, dict) else {}
+                    record_id = str(record.get('id') or key or '').strip()
+                    record_email = str(record.get('email') or '').strip().lower()
+                    if record_id == user_id or record_email == target_email or key == user_id:
+                        if record_id:
+                            target_ids.add(record_id)
+                        removed.append(key)
+                for key in removed:
+                    users.pop(key, None)
+                if removed:
+                    temp_path = users_path.with_suffix('.json.tmp')
+                    temp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+                    temp_path.replace(users_path)
+                    cleanup['users_json_removed'] = len(removed)
+        except Exception as exc:
+            cleanup['status'] = 'partial'
+            cleanup['users_json_error'] = str(exc)
+
+    for db_path in (root / "security.db", root / "vvault" / "data" / "audit.db"):
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(db_path)
+            try:
+                tables = [
+                    row[0]
+                    for row in conn.execute("select name from sqlite_master where type='table' order by name")
+                ]
+                for table in tables:
+                    quoted_table = '"' + table.replace('"', '""') + '"'
+                    columns = [row[1] for row in conn.execute(f"pragma table_info({quoted_table})")]
+                    if 'user_id' not in columns:
+                        continue
+                    before = conn.total_changes
+                    conn.executemany(
+                        f"delete from {quoted_table} where user_id = ?",
+                        [(target_id,) for target_id in sorted(target_ids)],
+                    )
+                    removed = conn.total_changes - before
+                    if removed:
+                        cleanup['sqlite_rows_removed'] += removed
+                        cleanup['sqlite_tables'].append({
+                            'database': str(db_path),
+                            'table': table,
+                            'rows_removed': removed,
+                        })
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            cleanup['status'] = 'partial'
+            cleanup.setdefault('sqlite_errors', []).append({
+                'database': str(db_path),
+                'error': str(exc),
+            })
+
+    if cleanup['status'] == 'ok' and not cleanup['users_json_removed'] and not cleanup['sqlite_rows_removed']:
+        cleanup['status'] = 'no_local_vvault_records'
+    return cleanup
+
+
+def _write_account_deletion_marker(user_data: Dict[str, Any], vvault_cleanup: Dict[str, Any]) -> Optional[str]:
+    try:
+        root = Path.home() / ".cleanhouse" / "account_deletions"
+        root.mkdir(parents=True, exist_ok=True)
+        user_id = str(user_data.get('user_id') or user_data.get('id') or 'unknown')
+        marker_id = hashlib.sha256(f"{user_id}:{datetime.now().isoformat()}".encode('utf-8')).hexdigest()[:16]
+        path = root / f"{marker_id}.json"
+        path.write_text(json.dumps({
+            'id': marker_id,
+            'deleted_at': datetime.now().isoformat(),
+            'user_id': user_id,
+            'email': user_data.get('email'),
+            'company_archive_retention_years': 7,
+            'local_vvault_cleanup': vvault_cleanup,
+        }, indent=2), encoding='utf-8')
+        return str(path)
+    except Exception as exc:
+        logging.warning("Failed to write account deletion marker: %s", exc)
+        return None
 
 
 def get_user_service():
@@ -149,7 +356,27 @@ def generate_pkce():
     ).decode('utf-8').rstrip('=')
     return code_verifier, code_challenge
 
+@bp.route('/auth/config', methods=['GET'])
+def auth_config():
+    return jsonify({
+        'success': True,
+        'ok': True,
+        'data': {
+            'credentials': {'enabled': True},
+            'docs': _cleanhouse_auth_docs(),
+            'turnstile': _turnstile_config(),
+            'providers': [
+                {'provider': 'google', 'label': 'Continue with Google', 'enabled': True, 'available': True},
+                {'provider': 'microsoft', 'label': 'Continue with Microsoft', 'enabled': True, 'available': True},
+                {'provider': 'apple', 'label': 'Continue with Apple', 'enabled': True, 'available': True},
+                {'provider': 'github', 'label': 'Continue with GitHub', 'enabled': True, 'available': True},
+            ],
+        },
+    })
+
+
 @bp.route('/auth/createAccount', methods=['POST'])
+@bp.route('/auth/register', methods=['POST'])
 def create_account():
     """Create a new user account"""
     try:
@@ -157,7 +384,7 @@ def create_account():
         if error:
             return error
 
-        full_name, error = _require_string(data.get('fullName'), 'fullName', required=False)
+        full_name, error = _require_string(data.get('fullName') or data.get('name'), 'fullName', required=False)
         if error:
             return error
         email, error = _require_string(data.get('email'), 'email')
@@ -173,6 +400,34 @@ def create_account():
         if turnstile_error:
             return turnstile_error
         turnstile_token = turnstile_token or ''
+        confirm_password, error = _require_string(data.get('confirmPassword'), 'confirmPassword', required=False)
+        if error:
+            return error
+        if confirm_password and confirm_password != password:
+            return _bad_request('Passwords do not match')
+
+        consent, error = _require_dict(data.get('consent'), 'consent', required=False)
+        if error:
+            return error
+        if consent is None and data.get('terms') is True:
+            consent = {doc['key']: True for doc in _cleanhouse_auth_docs()}
+        consent = consent or {}
+        missing_consent = _missing_required_consent(consent)
+        if missing_consent:
+            return _bad_request(f"Please confirm you agree to {missing_consent['label']}")
+
+        turnstile = _turnstile_config()
+        if turnstile['required']:
+            if not turnstile['enabled']:
+                return jsonify({
+                    'success': False,
+                    'message': 'Turnstile is required but not configured',
+                }), 503
+            if not turnstile_token:
+                return _bad_request('Turnstile verification is required')
+            if not _verify_turnstile_token(turnstile_token, _client_ip()):
+                return _bad_request('Turnstile verification failed')
+
         role = role or 'user'
         full_name = full_name or ''
 
@@ -688,6 +943,78 @@ def get_current_user():
             'success': False,
             'message': f'Error getting user: {str(e)}'
         }), 500
+
+
+@bp.route('/auth/account', methods=['DELETE'])
+@bp.route('/auth/deleteAccount', methods=['POST'])
+def delete_account():
+    """Delete the authenticated CleanHouse account and clear local VVAULT user rows."""
+    try:
+        auth_header = request.headers.get('Authorization', '')
+        token, error = _extract_bearer_token(auth_header)
+        if error:
+            return jsonify({
+                'success': False,
+                'message': error[0]['message'] if isinstance(error[0], dict) else 'Authorization header missing or invalid',
+            }), 401
+
+        user_data = get_user_from_token(token)
+        if not user_data:
+            return jsonify({
+                'success': False,
+                'message': 'Invalid or expired token',
+            }), 401
+
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return _bad_request("Request body must be a JSON object")
+
+        email = str(user_data.get('email') or '').strip()
+        user_id = str(user_data.get('user_id') or user_data.get('id') or '').strip()
+        confirmation = str(payload.get('confirmation') or payload.get('email') or '').strip()
+        if not email or not user_id:
+            return jsonify({
+                'success': False,
+                'message': 'Authenticated user identity is incomplete',
+            }), 400
+        if confirmation.lower() != email.lower():
+            return _bad_request('Confirm the account email before deletion')
+
+        user_service = get_user_service()
+        deleted = user_service.delete_user(user_id=user_id)
+        vvault_cleanup = _clear_vvault_user_records(user_id, email)
+        marker_path = _write_account_deletion_marker(user_data, vvault_cleanup)
+        session.clear()
+
+        if not deleted:
+            return jsonify({
+                'success': False,
+                'message': 'CleanHouse account was not found locally',
+                'vvault_cleanup': vvault_cleanup,
+                'archive_policy': {
+                    'company_side_retention_years': 7,
+                    'marker_path': marker_path,
+                },
+            }), 404
+
+        return jsonify({
+            'success': True,
+            'message': 'Account deleted locally. Company-side archive retention remains 7 years.',
+            'deleted_user_id': user_id,
+            'email': email,
+            'vvault_cleanup': vvault_cleanup,
+            'archive_policy': {
+                'company_side_retention_years': 7,
+                'marker_path': marker_path,
+            },
+        })
+    except Exception as e:
+        logging.error(f"Account deletion error: {e}", exc_info=True)
+        return jsonify({
+            'success': False,
+            'message': f'Account deletion failed: {str(e)}',
+        }), 500
+
 
 @bp.route('/auth/test-oauth', methods=['GET'])
 def test_oauth():

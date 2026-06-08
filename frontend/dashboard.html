@@ -19,6 +19,8 @@
             <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
             Auto-refresh
         </label>
+        <a class="control-link" href="/investigations" title="Open investigation-first operator surface">Investigations</a>
+        <a class="control-link" href="/account/delete" title="Manage local account deletion">Account</a>
         <button id="report-btn" onclick="openReportPanel()" title="Generate report for current session">⚑ Report</button>
         <button onclick="openSettingsPanel()" title="Configure runtime settings">⚙ Settings</button>
     </div>
@@ -46,7 +48,8 @@
             <button id="session-start-btn" onclick="startSelectedSession()">Start</button>
             <button id="session-stop-btn" onclick="stopSelectedSession(false)">Stop</button>
             <button id="session-finalize-btn" onclick="stopSelectedSession(true)">Finalize</button>
-            <button id="notification-enable-btn" onclick="requestDashboardNotificationPermission()">Enable Browser Notifications (Dashboard)</button>
+            <button id="active-context-follow-btn" onclick="toggleActiveContextFollow()">Follow Active Work</button>
+            <button id="notification-enable-btn" onclick="requestDashboardNotificationPermission()">Enable Browser Notifications (Dashboard Notifications)</button>
         </div>
     </div>
 
@@ -85,9 +88,17 @@
             <h2>Operational Presence <span class="count" id="operational-presence-state">unknown</span></h2>
             <div class="workstation-body" id="operational-presence-body"></div>
         </section>
+        <section class="workstation-panel active-context-panel" id="active-context-panel">
+            <h2>Active Work Context <span class="count" id="active-context-state">missing</span></h2>
+            <div class="workstation-body" id="active-context-body"></div>
+        </section>
         <section class="workstation-panel native-report-panel" id="native-report-panel">
             <h2>Native Reports / Since Last Login <span class="count" id="native-report-count">0</span></h2>
             <div class="workstation-body" id="native-report-body"></div>
+        </section>
+        <section class="workstation-panel" id="runtime-presence-panel">
+            <h2>Runtime Spine / Native Presence <span class="count" id="runtime-presence-count">0</span></h2>
+            <div class="workstation-body" id="runtime-presence-body"></div>
         </section>
         <section class="workstation-panel continuity-panel" id="continuity-provenance-panel">
             <h2>Continuity Provenance <span class="count" id="continuity-provenance-state">unknown</span></h2>
@@ -100,6 +111,30 @@
         <section class="workstation-panel" id="mutation-stream-panel">
             <h2>Mutation Stream / Latest Local <span class="count" id="mutation-stream-count">0</span></h2>
             <div class="workstation-body" id="mutation-stream-body"></div>
+        </section>
+        <section class="workstation-panel" id="task-manager-panel">
+            <h2>Universal Task Manager <span class="count" id="task-manager-count">0</span></h2>
+            <div class="workstation-body" id="task-manager-body"></div>
+        </section>
+        <section class="workstation-panel" id="port-monitor-panel">
+            <h2>Port Monitor <span class="count" id="port-monitor-count">0</span></h2>
+            <div class="workstation-body" id="port-monitor-body"></div>
+        </section>
+        <section class="workstation-panel" id="file-lineage-panel">
+            <h2>File Lineage (Who/What/Where/When) <span class="count" id="file-lineage-count">0</span></h2>
+            <div class="workstation-body" id="file-lineage-body"></div>
+        </section>
+        <section class="workstation-panel" id="minimal-workflow-panel">
+            <h2>Minimal Control Workflow <span class="count" id="minimal-workflow-state">idle</span></h2>
+            <div class="workstation-body" id="minimal-workflow-body"></div>
+        </section>
+        <section class="workstation-panel" id="qpb-queue-panel">
+            <h2>QPB Action Queue <span class="count" id="qpb-queue-count">0</span></h2>
+            <div class="workstation-body" id="qpb-queue-body"></div>
+        </section>
+        <section class="workstation-panel" id="mediator-queue-panel">
+            <h2>Mediator Queue (Keep Changes + Undo) <span class="count" id="mediator-queue-count">0</span></h2>
+            <div class="workstation-body" id="mediator-queue-body"></div>
         </section>
         <section class="workstation-panel" id="deviation-alert-panel">
             <h2>Deviation Alerts <span class="count" id="deviation-alert-count">0</span></h2>
@@ -114,7 +149,7 @@
             <div class="workstation-body" id="receipt-replay-body"></div>
         </section>
         <section class="workstation-panel" id="notification-tray-panel">
-            <h2>Dashboard Notifications / Browser Optional <span class="count" id="notification-tray-count">0</span></h2>
+            <h2>Notification Center (Live Alerts) <span class="count" id="notification-tray-count">0</span></h2>
             <div class="workstation-body" id="notification-tray"></div>
         </section>
         <section class="workstation-panel tier1-panel" id="collector-manifest-panel">

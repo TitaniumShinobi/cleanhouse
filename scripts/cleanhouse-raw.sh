@@ -5,17 +5,38 @@ set -euo pipefail
 SCRIPT_REF="${BASH_SOURCE[0]-$0}"
 SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_REF}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-VENV_PYTHON="${REPO_ROOT}/cleanhouse_env/bin/python3"
-WRAPPER_SCRIPT="${REPO_ROOT}/desktop/wrapper.py"
+HOST="${CLEANHOUSE_HOST:-127.0.0.1}"
+PORT="${CLEANHOUSE_PORT:-3333}"
 
-if [ ! -x "${VENV_PYTHON}" ]; then
-  echo "cleanhouse-raw: virtualenv python3 executable not found: ${VENV_PYTHON}" >&2
+resolve_bootstrap_python() {
+  if [ -n "${CLEANHOUSE_PYTHON:-}" ] && [ -x "${CLEANHOUSE_PYTHON}" ]; then
+    printf '%s\n' "${CLEANHOUSE_PYTHON}"
+    return 0
+  fi
+  if [ -x "${REPO_ROOT}/cleanhouse_env/bin/python3" ]; then
+    printf '%s\n' "${REPO_ROOT}/cleanhouse_env/bin/python3"
+    return 0
+  fi
+  if [ -x "${REPO_ROOT}/.venv/bin/python3" ]; then
+    printf '%s\n' "${REPO_ROOT}/.venv/bin/python3"
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+    return 0
+  fi
+  return 1
+}
+
+BOOTSTRAP_PYTHON="$(resolve_bootstrap_python || true)"
+if [ -z "${BOOTSTRAP_PYTHON}" ] || [ ! -x "${BOOTSTRAP_PYTHON}" ]; then
+  echo "cleanhouse-raw: bootstrap python3 executable not found." >&2
   exit 1
 fi
 
-if [ ! -r "${WRAPPER_SCRIPT}" ]; then
-  echo "cleanhouse-raw: desktop wrapper not found: ${WRAPPER_SCRIPT}" >&2
-  exit 1
+CLEANHOUSE_PYTHON="$(cd "${REPO_ROOT}" && "${BOOTSTRAP_PYTHON}" -m backend.runtime_env print-path 2>/dev/null || true)"
+if [ -z "${CLEANHOUSE_PYTHON}" ] || [ ! -x "${CLEANHOUSE_PYTHON}" ]; then
+  CLEANHOUSE_PYTHON="${BOOTSTRAP_PYTHON}"
 fi
 
 if [ -n "${CLEANHOUSE_PORT+x}" ]; then
@@ -33,4 +54,4 @@ if [ -n "${CLEANHOUSE_PORT+x}" ]; then
 fi
 
 cd "${REPO_ROOT}"
-exec "${VENV_PYTHON}" "${WRAPPER_SCRIPT}" "$@"
+exec "${CLEANHOUSE_PYTHON}" -m backend.runtime_supervisor supervise --host "${HOST}" --port "${PORT}" "$@"
