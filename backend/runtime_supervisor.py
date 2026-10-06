@@ -45,6 +45,7 @@ VALID_RUNTIME_STATES = frozenset({
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 3333
+LAUNCH_AGENT_LABEL = "org.cleanhouse.runtime"
 HEARTBEAT_INTERVAL_SECONDS = 5.0
 HEARTBEAT_STALE_SECONDS = 20.0
 SUPERVISOR_POLL_SECONDS = 1.0
@@ -1553,11 +1554,42 @@ def stop_runtime(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> dict[str
     return write_state(final, rdir)
 
 
+def _launch_agent_observation() -> dict[str, Any]:
+    """Report launchd state without treating a plist as a liveness signal."""
+    if sys.platform != "darwin":
+        return {"required": False, "installed": False, "loaded": False, "state": "not_applicable"}
+    path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
+    try:
+        result = subprocess.run(
+            ["/bin/launchctl", "print", f"gui/{os.getuid()}/{LAUNCH_AGENT_LABEL}"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        loaded = result.returncode == 0
+        error = "" if loaded else (result.stderr or result.stdout).strip()[:512]
+    except (OSError, subprocess.SubprocessError) as exc:
+        loaded = False
+        error = str(exc)[:512]
+    installed = path.is_file()
+    return {
+        "required": True,
+        "label": LAUNCH_AGENT_LABEL,
+        "plist_path": str(path),
+        "installed": installed,
+        "loaded": loaded,
+        "state": "loaded" if loaded else ("installed" if installed else "unavailable"),
+        "error": error,
+    }
+
+
 def current_runtime_payload(host: str | None = None, port: int | None = None, *, probe: bool = True) -> dict[str, Any]:
     stored = read_state()
     resolved_host = host or str(stored.get("host") or os.getenv("CLEANHOUSE_HOST", DEFAULT_HOST) or DEFAULT_HOST)
     resolved_port = int(port or stored.get("port") or os.getenv("CLEANHOUSE_PORT", DEFAULT_PORT) or DEFAULT_PORT)
     state = classify_state(stored, host=resolved_host, port=resolved_port, probe=probe)
+    state["launch_agent"] = _launch_agent_observation()
     state["interpreter"] = _interpreter_summary(runtime_env.resolve_interpreter(REPO_ROOT))
     if state["runtime_state"] in {"healthy", "recovering"}:
         state["blocked_recovery"] = {}
@@ -1598,6 +1630,7 @@ def current_runtime_payload(host: str | None = None, port: int | None = None, *,
         "last_probe": state.get("last_probe", {}),
         "resource_guard": state.get("resource_guard", {}),
         "self_deviation": state.get("self_deviation", {}),
+        "launch_agent": state.get("launch_agent", {}),
         "interpreter": state.get("interpreter", {}),
         "last_start_attempt": state.get("last_start_attempt", {}),
         "blocked_recovery": state.get("blocked_recovery", {}),
