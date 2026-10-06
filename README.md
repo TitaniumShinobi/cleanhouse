@@ -294,6 +294,18 @@ python3 scripts/separate_css_js.py
 
 ## 📚 Documentation
 
+### Wazuh agent packaging
+
+The Wazuh `4.14.7` Apple-silicon bundle is vendored locally with its agent
+package, corresponding source archive, manifest, upstream license, notices,
+and source-compliance record. Vendoring fails closed unless the fixed package
+and source SHA-512 pins, exact Wazuh signer and fingerprint, trusted Apple
+notarization, and source-archive readability all verify. The separately
+reviewed LaunchAgent prerequisite stages the complete shipping closure into its
+isolated runtime. Manager deployment, administrator-authorized installation or
+enrollment, hosted smoke testing, and VVAULT work remain operator-gated. See
+`documents/20_validation/wazuh-agent-packaging.md`.
+
 - **Quick Start:** `QUICK_START.md`
 - **Documentation Index:** `docs/README.md`
 - **Installation Guide:** `docs/operations/INSTALLATION_GUIDE.md`
