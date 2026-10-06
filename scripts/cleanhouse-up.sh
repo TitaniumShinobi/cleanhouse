@@ -19,6 +19,10 @@ resolve_bootstrap_python() {
     printf '%s\n' "${CLEANHOUSE_PYTHON}"
     return 0
   fi
+  if [ -x "${RUNTIME_DIR}/python/bin/python3" ]; then
+    printf '%s\n' "${RUNTIME_DIR}/python/bin/python3"
+    return 0
+  fi
   if [ -x "${REPO_ROOT}/cleanhouse_env/bin/python3" ]; then
     printf '%s\n' "${REPO_ROOT}/cleanhouse_env/bin/python3"
     return 0
@@ -86,10 +90,19 @@ open_local() {
 }
 
 echo "$(date -u +%FT%T%z) cleanhouse-up: ensuring supervised runtime on ${HOST}:${PORT}" >>"${LAUNCH_LOG}"
-if ! "${CLEANHOUSE_PYTHON}" -m backend.runtime_supervisor start \
-  --host "${HOST}" \
-  --port "${PORT}" \
-  --timeout "${STARTUP_TIMEOUT_SECONDS}" >>"${LAUNCH_LOG}" 2>&1; then
+START_STATUS=0
+if [ "$(uname -s)" = "Darwin" ] && [ -x /bin/launchctl ]; then
+  "${CLEANHOUSE_PYTHON}" -m backend.launch_agent install \
+    --interpreter "${CLEANHOUSE_PYTHON}" \
+    --host "${HOST}" \
+    --port "${PORT}" >>"${LAUNCH_LOG}" 2>&1 || START_STATUS=$?
+else
+  "${CLEANHOUSE_PYTHON}" -m backend.runtime_supervisor start \
+    --host "${HOST}" \
+    --port "${PORT}" \
+    --timeout "${STARTUP_TIMEOUT_SECONDS}" >>"${LAUNCH_LOG}" 2>&1 || START_STATUS=$?
+fi
+if [ "${START_STATUS}" -ne 0 ]; then
   echo "cleanhouse-up: supervised runtime did not become authoritative." >&2
   echo "Runtime endpoint: ${RUNTIME_ENDPOINT}" >&2
   echo "Last 60 lines of ${LAUNCH_LOG}:" >&2
@@ -97,6 +110,13 @@ if ! "${CLEANHOUSE_PYTHON}" -m backend.runtime_supervisor start \
   exit 1
 fi
 
+READY_DEADLINE=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
+while ! probe_json "${READY_ENDPOINT}" 2; do
+  if [ "${SECONDS}" -ge "${READY_DEADLINE}" ]; then
+    break
+  fi
+  sleep 0.2
+done
 if ! probe_json "${READY_ENDPOINT}" 2; then
   echo "cleanhouse-up: readiness endpoint unavailable after supervisor start: ${READY_ENDPOINT}" >&2
   tail -n 60 "${LAUNCH_LOG}" >&2 || true

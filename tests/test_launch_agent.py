@@ -18,16 +18,20 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertIn(runtime_candidate, launcher)
         self.assertLess(launcher.index(runtime_candidate), launcher.index(source_candidate))
 
-    def test_blocked_preflight_does_not_stop_an_existing_runtime(self):
+    def test_launcher_dispatches_to_launchagent_on_macos_and_supervisor_elsewhere(self):
         launcher = (launch_agent.REPO_ROOT / "scripts" / "cleanhouse-up.sh").read_text(encoding="utf-8")
-        blocked_branch = launcher.split('if [ "${PREFLIGHT_STATUS}" -ne 0 ]; then', 1)[1].split(
-            "render_startup_warning",
+        macos_branch = launcher.split('if [ "$(uname -s)" = "Darwin" ] && [ -x /bin/launchctl ]; then', 1)[1].split(
+            "else",
             1,
         )[0]
 
-        self.assertIn("render_blocked_preflight", blocked_branch)
-        self.assertNotIn("backend.launch_agent stop", blocked_branch)
-        self.assertNotIn("backend.runtime_supervisor stop", blocked_branch)
+        self.assertIn("backend.launch_agent install", macos_branch)
+        self.assertIn('--interpreter "${CLEANHOUSE_PYTHON}"', macos_branch)
+        self.assertIn('--host "${HOST}"', macos_branch)
+        self.assertIn('--port "${PORT}"', macos_branch)
+        self.assertIn("backend.runtime_supervisor start", launcher)
+        self.assertIn("READY_DEADLINE=$((SECONDS + STARTUP_TIMEOUT_SECONDS))", launcher)
+        self.assertIn('while ! probe_json "${READY_ENDPOINT}" 2; do', launcher)
 
     def test_rendered_plist_is_user_owned_keepalive_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
