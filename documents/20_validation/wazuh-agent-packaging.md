@@ -35,16 +35,24 @@ The bundle is Wazuh Agent `4.14.7` for `darwin-arm64`. Vendoring accepts only:
 - a readable source archive (`tar -tzf`).
 
 `scripts/vendor-wazuh-agent.sh` validates all of those conditions in temporary
-storage. It publishes the package, source, license, and manifest only after
-every gate succeeds; its exit trap removes staged/partial artifacts on every
+storage. The checksum published by Wazuh, the downloaded package, and the
+downloaded source archive must independently match CleanHouse's established
+pins. The first Developer ID Installer identity must be the exact pinned Wazuh
+signer, and the pinned fingerprint must occur in that signer's certificate
+block. The script publishes the package, source, license, and manifest only
+after every gate succeeds; its exit trap removes staged artifacts on every
 failure path.
 
 ## Runtime and staged-runtime contract
 
 `backend.wazuh_runtime.verify_bundle()` requires the fixed package and source
 hashes plus a live `pkgutil` signature verification before reporting the agent
-bundle as packaged. A historical manifest receipt is audit metadata and never
-overrides a failed live signature check.
+bundle as packaged. When iCloud provenance metadata causes the checked-in path
+to fail that live check, runtime verification creates a temporary byte-identical
+copy only after the package hash matches the pin, removes provenance from that
+copy, rechecks its hash, signer, fingerprint, and notarization, and always
+deletes it. The checked-in package is never mutated. A historical manifest
+receipt is audit metadata and never overrides the live signature gate.
 
 The CleanHouse LaunchAgent stages the complete six-artifact closure
 byte-for-byte into its isolated runtime when the local bundle is present. The
@@ -55,14 +63,15 @@ Apple-notarization trusted.
 ## Focused verification
 
 ```bash
-python3 -m unittest \
-  tests/test_wazuh_packaging.py \
-  tests/test_wazuh_runtime.py
 bash -n scripts/vendor-wazuh-agent.sh
+PYTHONDONTWRITEBYTECODE=1 cleanhouse_env/bin/python3 -m unittest -v \
+  tests.test_wazuh_packaging \
+  tests.test_wazuh_runtime \
+  tests.test_launch_agent
 ```
 
-`tests/test_launch_agent.py` is the separately reviewed LaunchAgent
-prerequisite contract that verifies byte-for-byte staging of this closure.
+The focused LaunchAgent contract verifies byte-for-byte staging of all six
+shipping artifacts while excluding `.env` from the staged runtime.
 
 ## Deferred operator gates
 

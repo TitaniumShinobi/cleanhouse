@@ -18,6 +18,41 @@ class WazuhPackagingTests(unittest.TestCase):
     def setUp(self):
         wazuh_runtime._VERIFY_CACHE = None
 
+    @staticmethod
+    def _valid_vendor_signature() -> str:
+        fingerprint = " ".join(
+            wazuh_runtime.OFFICIAL_SIGNER_FINGERPRINT[index:index + 2]
+            for index in range(0, len(wazuh_runtime.OFFICIAL_SIGNER_FINGERPRINT), 2)
+        )
+        return "\n".join(
+            [
+                'Package "wazuh-agent-4.14.7-1.arm64.pkg":',
+                "   Status: signed by a developer certificate issued by Apple for distribution",
+                "   Notarization: trusted by the Apple notary service",
+                f"    1. Developer ID Installer: {wazuh_runtime.OFFICIAL_SIGNER}",
+                "       SHA256 Fingerprint:",
+                f"           {fingerprint}",
+                "       ------------------------------------------------------------------------",
+            ]
+        )
+
+    @staticmethod
+    def _run_vendor_function(function: str, *arguments: object) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [
+                "/bin/bash",
+                "-c",
+                'source "$1"; function_name="$2"; shift 2; "${function_name}" "$@"',
+                "vendor-test",
+                str(VENDOR_SCRIPT),
+                function,
+                *(str(argument) for argument in arguments),
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     def test_vendor_script_uses_canonical_pins_and_staged_publication(self):
         source = VENDOR_SCRIPT.read_text(encoding="utf-8")
 
@@ -29,14 +64,133 @@ class WazuhPackagingTests(unittest.TestCase):
         ):
             self.assertIn(value, source)
 
-        self.assertIn('tar -tzf "${SOURCE_STAGE}"', source)
-        self.assertIn('notarization: trusted by the apple notary service', source)
-        self.assertNotIn("CHECKSUM_URL=", source)
+        self.assertIn('tar -tzf "${source_path}"', source)
+        self.assertIn('OFFICIAL_NOTARIZATION="trusted by the Apple notary service"', source)
+        self.assertIn("CHECKSUM_URL=", source)
         self.assertIn('STAGE_DIR="$(mktemp -d)"', source)
         self.assertIn("trap cleanup EXIT", source)
         self.assertLess(
             source.index('mv "${PACKAGE_STAGE}"'),
-            source.index('mv "${MANIFEST_STAGE}"'),
+            source.index('mv "${manifest_stage}"'),
+        )
+
+    def test_vendor_verifier_accepts_only_established_hashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checksum = root / "package.sha512"
+            signature = root / "signature.txt"
+            bad_package = root / "bad.pkg"
+            bad_source = root / "bad-source.tar.gz"
+            checksum.write_text(
+                f"{wazuh_runtime.OFFICIAL_PACKAGE_SHA512}  {wazuh_runtime.PACKAGE_NAME}\n",
+                encoding="utf-8",
+            )
+            signature.write_text(self._valid_vendor_signature(), encoding="utf-8")
+            bad_package.write_bytes(b"not-the-pinned-package")
+            bad_source.write_bytes(b"not-the-pinned-source")
+
+            accepted = self._run_vendor_function(
+                "verify_staged_artifacts",
+                wazuh_runtime.PACKAGE_PATH,
+                checksum,
+                wazuh_runtime.SOURCE_ARCHIVE_PATH,
+                signature,
+                0,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+            cases = {
+                "published checksum": (
+                    wazuh_runtime.PACKAGE_PATH,
+                    root / "wrong.sha512",
+                    wazuh_runtime.SOURCE_ARCHIVE_PATH,
+                    "Published Wazuh package SHA-512",
+                ),
+                "malformed published checksum": (
+                    wazuh_runtime.PACKAGE_PATH,
+                    root / "malformed.sha512",
+                    wazuh_runtime.SOURCE_ARCHIVE_PATH,
+                    "Published Wazuh package SHA-512",
+                ),
+                "package bytes": (
+                    bad_package,
+                    checksum,
+                    wazuh_runtime.SOURCE_ARCHIVE_PATH,
+                    "Pinned Wazuh package SHA-512",
+                ),
+                "source bytes": (
+                    wazuh_runtime.PACKAGE_PATH,
+                    checksum,
+                    bad_source,
+                    "Pinned Wazuh source SHA-512",
+                ),
+            }
+            (root / "wrong.sha512").write_text(f"{'0' * 128}  package.pkg\n", encoding="utf-8")
+            (root / "malformed.sha512").write_text("not a checksum\n", encoding="utf-8")
+            for label, (package, checksum_path, source, message) in cases.items():
+                with self.subTest(label=label):
+                    rejected = self._run_vendor_function(
+                        "verify_staged_artifacts",
+                        package,
+                        checksum_path,
+                        source,
+                        signature,
+                        0,
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn(message, rejected.stderr)
+
+    def test_vendor_verifier_requires_exact_signer_fingerprint_and_notarization(self):
+        valid = self._valid_vendor_signature()
+        wrong_signer = valid.replace(
+            f"1. Developer ID Installer: {wazuh_runtime.OFFICIAL_SIGNER}",
+            "1. Developer ID Installer: Another Vendor (ABCDE12345)",
+        ) + f"\n    2. Developer ID Installer: {wazuh_runtime.OFFICIAL_SIGNER}\n"
+        wrong_fingerprint = valid.replace(
+            wazuh_runtime.OFFICIAL_SIGNER_FINGERPRINT[-2:],
+            "00",
+        )
+        untrusted = valid.replace(
+            "trusted by the Apple notary service",
+            "not trusted",
+        )
+        cases = {
+            "wrong first signer": (wrong_signer, 0, "signer verification failed"),
+            "wrong fingerprint": (wrong_fingerprint, 0, "fingerprint verification failed"),
+            "untrusted notarization": (untrusted, 0, "notarization verification failed"),
+            "pkgutil failure": (valid, 1, "signature verification failed"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            signature = Path(tmp) / "signature.txt"
+            for label, (output, status, message) in cases.items():
+                with self.subTest(label=label):
+                    signature.write_text(output, encoding="utf-8")
+                    rejected = self._run_vendor_function(
+                        "verify_signature_file", signature, status
+                    )
+                    self.assertNotEqual(rejected.returncode, 0)
+                    self.assertIn(message, rejected.stderr)
+
+    def test_vendor_manifest_is_derived_only_from_pins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = Path(tmp) / "manifest.json"
+            result = self._run_vendor_function("write_manifest", manifest)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["sha512"], wazuh_runtime.OFFICIAL_PACKAGE_SHA512)
+        self.assertEqual(payload["source_sha512"], wazuh_runtime.OFFICIAL_SOURCE_SHA512)
+        self.assertEqual(payload["signature"]["developer_id_installer"], wazuh_runtime.OFFICIAL_SIGNER)
+        self.assertEqual(
+            payload["signature"]["sha256_fingerprint"],
+            wazuh_runtime.OFFICIAL_SIGNER_FINGERPRINT,
+        )
+        self.assertEqual(payload["signature"]["notarization"], "trusted")
+        self.assertTrue(payload["signature"]["verified_at_vendoring"])
+        self.assertEqual(
+            payload["checksum_source"],
+            "https://packages.wazuh.com/4.x/checksums/wazuh/4.14.7/"
+            "wazuh-agent-4.14.7-1.arm64.pkg.sha512",
         )
 
     def test_vendor_script_bad_source_leaves_no_destination_artifacts(self):
@@ -55,6 +209,7 @@ class WazuhPackagingTests(unittest.TestCase):
                 "  fi\n"
                 "done\n"
                 "case \"$*\" in\n"
+                f"  *wazuh-agent-4.14.7-1.arm64.pkg.sha512*) printf '{wazuh_runtime.OFFICIAL_PACKAGE_SHA512}  package.pkg\\n' > \"${{destination}}\" ;;\n"
                 "  *wazuh-agent-4.14.7-1.arm64.pkg*) cp \"${TEST_PACKAGE}\" \"${destination}\" ;;\n"
                 "  *LICENSE*) printf 'license' > \"${destination}\" ;;\n"
                 "  *v4.14.7.tar.gz*) printf 'tampered source' > \"${destination}\" ;;\n"
