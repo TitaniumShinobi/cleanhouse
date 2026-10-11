@@ -144,6 +144,26 @@ def _latest_generation(conn: sqlite3.Connection) -> dict[str, Any]:
     return dict(row) if row is not None else {}
 
 
+def _latest_authoritative_generation(conn: sqlite3.Connection) -> dict[str, Any]:
+    """Return the newest complete authenticated Wazuh inventory checkpoint.
+
+    Automatic observations can contain valid evidence, but they are deltas and
+    may include the watchdog fallback.  They must not replace the last complete
+    Wazuh inventory as the authority presented by the Files product.
+    """
+    row = conn.execute(
+        """
+        SELECT * FROM baseline_generations
+        WHERE provider = 'wazuh'
+          AND checkpoint_json IS NOT NULL
+          AND reason != 'automatic_observation'
+        ORDER BY generation DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return dict(row) if row is not None else {}
+
+
 def _state_root(entries: dict[str, dict[str, Any]]) -> str:
     # A state root commits to file state, not collection time or transport
     # provenance. Those fields remain preserved in the immutable generation.
@@ -494,6 +514,8 @@ def snapshot() -> dict[str, Any]:
     init_db()
     with _LOCK, _managed_connection() as conn:
         latest = _latest_generation(conn)
+        authoritative = _latest_authoritative_generation(conn)
+        baseline = authoritative or latest
         receipt = conn.execute(
             "SELECT receipt_id, created_at, provider, state, chain_hash, payload_json "
             "FROM reconciliation_receipts ORDER BY rowid DESC LIMIT 1"
@@ -506,12 +528,36 @@ def snapshot() -> dict[str, Any]:
             "schema": SCHEMA,
             "state": "observed" if latest else "no_data",
             "authorization_state": "not_evaluated_until_zaelith",
-            "generation": int(latest.get("generation") or 0),
-            "root_hash": str(latest.get("state_root_hash") or ""),
-            "chain_hash": str(latest.get("chain_hash") or ""),
-            "checkpoint_at": str(latest.get("created_at") or ""),
-            "entry_count": int(latest.get("entry_count") or 0),
-            "provider": str(latest.get("provider") or ""),
+            # Existing baseline fields describe the strongest complete
+            # checkpoint.  This keeps fallback deltas from silently replacing
+            # an authenticated Wazuh inventory in the public projection.
+            "generation": int(baseline.get("generation") or 0),
+            "root_hash": str(baseline.get("state_root_hash") or ""),
+            "chain_hash": str(baseline.get("chain_hash") or ""),
+            "checkpoint_at": str(baseline.get("created_at") or ""),
+            "entry_count": int(baseline.get("entry_count") or 0),
+            "provider": str(baseline.get("provider") or ""),
+            "baseline_authority": "authenticated_wazuh" if authoritative else "observed_fallback",
+            "authoritative_generation": int(authoritative.get("generation") or 0),
+            "authoritative_root_hash": str(authoritative.get("state_root_hash") or ""),
+            "authoritative_checkpoint_at": str(authoritative.get("created_at") or ""),
+            "authoritative_entry_count": int(authoritative.get("entry_count") or 0),
+            # Preserve visibility into later observations without promoting
+            # them to authority.  Reconciliation can then explicitly advance
+            # the Wazuh checkpoint.
+            "observed_generation": int(latest.get("generation") or 0),
+            "observed_root_hash": str(latest.get("state_root_hash") or ""),
+            "observed_chain_hash": str(latest.get("chain_hash") or ""),
+            "observed_entry_count": int(latest.get("entry_count") or 0),
+            "latest_observation_provider": str(latest.get("provider") or ""),
+            "pending_authenticated_reconciliation": bool(
+                authoritative
+                and int(latest.get("generation") or 0) > int(authoritative.get("generation") or 0)
+            ),
+            "pending_observation_generations": max(
+                0,
+                int(latest.get("generation") or 0) - int(authoritative.get("generation") or 0),
+            ) if authoritative else 0,
             "last_reconciliation": latest_receipt,
         }
     result["chain_verification"] = verify_chain()

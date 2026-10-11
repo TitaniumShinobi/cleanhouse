@@ -68,6 +68,35 @@ class FileIntegrityTests(unittest.TestCase):
         self.assertFalse(result["valid"])
         self.assertIn("chain hash mismatch", result["first_error"])
 
+    def test_watchdog_delta_does_not_replace_authenticated_wazuh_authority(self):
+        baseline = file_integrity.rebuild(
+            [entry("/scope/a", "a" * 64)],
+            provider="wazuh",
+            reason="handler_requested_full_rebuild",
+        )
+        observed = file_integrity.observe(
+            {
+                **entry("/scope/b", "b" * 64),
+                "provider": "watchdog",
+                "operation": "created",
+                "source_event_key": "watchdog:test-authority-separation",
+            }
+        )
+
+        snapshot = file_integrity.snapshot()
+
+        self.assertGreater(observed["generation"], baseline["generation"])
+        self.assertEqual(snapshot["baseline_authority"], "authenticated_wazuh")
+        self.assertEqual(snapshot["provider"], "wazuh")
+        self.assertEqual(snapshot["generation"], baseline["generation"])
+        self.assertEqual(snapshot["root_hash"], baseline["root_hash"])
+        self.assertEqual(snapshot["entry_count"], baseline["entry_count"])
+        self.assertEqual(snapshot["latest_observation_provider"], "watchdog")
+        self.assertEqual(snapshot["observed_generation"], observed["generation"])
+        self.assertEqual(snapshot["pending_observation_generations"], 1)
+        self.assertTrue(snapshot["pending_authenticated_reconciliation"])
+        self.assertTrue(snapshot["chain_verification"]["valid"])
+
 
 if __name__ == "__main__":
     unittest.main()
