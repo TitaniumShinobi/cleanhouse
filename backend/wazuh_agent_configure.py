@@ -14,6 +14,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -36,6 +37,12 @@ IGNORED_SCOPE_NAMES = (
     "generated_evidence",
     "bundled",
 )
+NESTED_IGNORE_SREGEX = (
+    "/(__pycache__|node_modules|cleanhouse_env|venv|runtime|generated_evidence|bundled)/"
+    "|/\\.(git|venv|pytest_cache|mypy_cache|ruff_cache)/"
+    "|\\.(pyc|pyo|swp|db-wal|db-shm|db-journal)$"
+)
+BARE_AMPERSAND_TOKEN = "__CLEANHOUSE_WAZUH_BARE_AMPERSAND__"
 
 
 def _load_config(path: Path) -> dict[str, str]:
@@ -82,9 +89,31 @@ def _ensure_text(parent: ET.Element, tag: str, value: str) -> ET.Element:
     return node
 
 
+def _parse_wazuh_configuration(source: str) -> ET.Element:
+    if BARE_AMPERSAND_TOKEN in source:
+        raise RuntimeError("Wazuh configuration contains the reserved ampersand token")
+    protected = re.sub(
+        r"&(?!#\d+;|#x[0-9A-Fa-f]+;|[A-Za-z][A-Za-z0-9]+;)",
+        BARE_AMPERSAND_TOKEN,
+        source,
+    )
+    parser = ET.XMLParser(target=ET.TreeBuilder(insert_comments=True, insert_pis=True))
+    return ET.fromstring(protected, parser=parser)
+
+
+def _serialize_wazuh_configuration(root: ET.Element) -> str:
+    serialized = ET.tostring(root, encoding="unicode", short_empty_elements=False)
+    return serialized.replace(BARE_AMPERSAND_TOKEN, "&")
+
+
 def _configure_xml(config: dict[str, str]) -> None:
     path = INSTALL_ROOT / "etc" / "ossec.conf"
-    root = ET.parse(path).getroot()
+    source = path.read_text(encoding="utf-8")
+    # Wazuh's packaged macOS configuration contains shell commands with bare
+    # `&&`.  Wazuh accepts that form, but strict XML parsers correctly reject
+    # the unescaped ampersands.  Protect only bare ampersands while parsing,
+    # then restore Wazuh's accepted dialect when serializing.
+    root = _parse_wazuh_configuration(source)
     client = root.find("client")
     if client is None:
         client = ET.SubElement(root, "client")
@@ -119,9 +148,20 @@ def _configure_xml(config: dict[str, str]) -> None:
             node = ET.SubElement(syscheck, "ignore")
             node.text = ignored
             existing_ignores.add(ignored)
+    regex_ignores = {
+        (node.text or "").strip()
+        for node in syscheck.findall("ignore")
+        if node.get("type") == "sregex"
+    }
+    if NESTED_IGNORE_SREGEX not in regex_ignores:
+        node = ET.SubElement(syscheck, "ignore", {"type": "sregex"})
+        node.text = NESTED_IGNORE_SREGEX
     ET.indent(root, space="  ")
     temporary = path.with_suffix(".conf.cleanhouse-new")
-    ET.ElementTree(root).write(temporary, encoding="utf-8", xml_declaration=True)
+    temporary.write_text(
+        _serialize_wazuh_configuration(root) + "\n",
+        encoding="utf-8",
+    )
     os.chmod(temporary, 0o640)
     try:
         group_id = grp.getgrnam("wazuh").gr_gid
@@ -144,6 +184,10 @@ def _install_client_key(config: dict[str, str]) -> None:
         ))
     finally:
         os.close(fd)
+    # Root authorization helpers commonly inherit a restrictive 077 umask.
+    # The agent daemon runs as the Wazuh service account, so the group-read
+    # bit must be applied explicitly rather than relying on os.open's mode.
+    os.chmod(temporary, 0o640)
     try:
         group_id = grp.getgrnam("wazuh").gr_gid
     except KeyError:
@@ -161,10 +205,30 @@ def main(argv: list[str]) -> int:
     _install_client_key(config)
     _configure_xml(config)
     control = INSTALL_ROOT / "bin" / "wazuh-control"
-    result = subprocess.run([str(control), "restart"], check=False, capture_output=True, text=True, timeout=60)
-    if result.returncode != 0:
-        raise RuntimeError("Wazuh agent did not start after configuration")
-    return 0
+    failures: list[str] = []
+    for action in ("restart", "start"):
+        result = subprocess.run(
+            [str(control), action],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        if result.returncode == 0:
+            return 0
+        output = " ".join((result.stdout + " " + result.stderr).split())
+        failures.append(f"{action}: {output[-768:] or 'no control output'}")
+        time.sleep(2)
+    log_path = INSTALL_ROOT / "logs" / "ossec.log"
+    try:
+        log_tail = " ".join(log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-20:])
+    except OSError:
+        log_tail = "unavailable"
+    raise RuntimeError(
+        "Wazuh agent did not start after configuration; "
+        + "; ".join(failures)
+        + f"; ossec.log: {log_tail[-1536:]}"
+    )
 
 
 if __name__ == "__main__":

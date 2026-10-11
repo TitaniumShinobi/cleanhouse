@@ -6,36 +6,37 @@ import sqlite3
 from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
-import sys
-import types
-
-if "flask" not in sys.modules:
-    flask_stub = types.ModuleType("flask")
-
-    class _Blueprint:
-        def __init__(self, name, import_name):
-            self.name = name
-            self.import_name = import_name
-
-        def route(self, *args, **kwargs):
-            def decorator(func):
-                return func
-
-            return decorator
-
-        def after_request(self, func):
-            return func
-
-    flask_stub.Blueprint = _Blueprint
-    flask_stub.jsonify = lambda obj=None, **kwargs: obj if obj is not None else kwargs
-    flask_stub.request = SimpleNamespace(args={}, headers={})
-    sys.modules["flask"] = flask_stub
 
 from backend import events
 from backend.api import cleanhouse as cleanhouse_module
 
 class CleanHouseEventStorageTests(unittest.TestCase):
     def setUp(self):
+        self._api_patches = [
+            patch.object(
+                cleanhouse_module,
+                "jsonify",
+                side_effect=lambda obj=None, **kwargs: obj if obj is not None else kwargs,
+            ),
+            patch.object(
+                cleanhouse_module,
+                "Response",
+                side_effect=lambda *args, **kwargs: SimpleNamespace(
+                    args=args,
+                    kwargs=kwargs,
+                    headers={},
+                ),
+            ),
+            patch.object(cleanhouse_module, "stream_with_context", side_effect=lambda func: func),
+            patch.object(
+                cleanhouse_module,
+                "send_file",
+                side_effect=lambda *args, **kwargs: {"send_file": args, "kwargs": kwargs},
+            ),
+        ]
+        for api_patch in self._api_patches:
+            api_patch.start()
+        self._old_request = cleanhouse_module.request
         self._tmp = tempfile.TemporaryDirectory()
         self._db_path = Path(self._tmp.name) / "events.db"
         self._old_db_env = os.environ.get("CLEANHOUSE_EVENTS_DB")
@@ -48,6 +49,10 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        events._stop_db_writer()
+        cleanhouse_module.request = self._old_request
+        for api_patch in reversed(self._api_patches):
+            api_patch.stop()
         self._tmp.cleanup()
         if self._old_db_env is None:
             os.environ.pop("CLEANHOUSE_EVENTS_DB", None)
@@ -74,6 +79,18 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         self.assertIn("collector_status", row)
         self.assertEqual(row["evidence_refs"], [])
         self.assertEqual(row["data"], {})
+
+    def test_invalid_configured_events_db_falls_back_to_default_path(self):
+        blocked_parent = Path(self._tmp.name) / "not-a-directory"
+        blocked_parent.write_text("file blocks directory creation", encoding="utf-8")
+        fallback_path = Path(self._tmp.name) / "fallback" / "events.db"
+        os.environ["CLEANHOUSE_EVENTS_DB"] = str(blocked_parent / "events.db")
+        events._DB_INIT_STATE.clear()
+
+        with patch.object(events, "DEFAULT_DB_PATH", fallback_path):
+            events.init_db()
+
+        self.assertTrue(fallback_path.is_file())
 
     def test_insert_event_persists_optional_metadata_fields(self):
         events.insert_event(
@@ -105,6 +122,35 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         self.assertEqual(row["raw_evidence_ref"], "raw://event/1")
         self.assertEqual(row["data"]["exit_code"], 0)
 
+    def test_provider_event_and_cursor_commit_atomically_and_deduplicate(self):
+        first = events.insert_event_with_cursor(
+            collector="wazuh-test",
+            cursor='["2026-08-22T00:00:00Z","alert-1"]',
+            source_event_key="wazuh:index:alert-1",
+            event_type="modified",
+            path="/tmp/wazuh.txt",
+            summary="Wazuh observed modified",
+            source_surface="wazuh_fim",
+            provider="wazuh",
+            evidence_level="authenticated",
+        )
+        duplicate = events.insert_event_with_cursor(
+            collector="wazuh-test",
+            cursor='["2026-08-22T00:00:00Z","alert-1"]',
+            source_event_key="wazuh:index:alert-1",
+            event_type="modified",
+            path="/tmp/wazuh.txt",
+            summary="duplicate",
+            source_surface="wazuh_fim",
+            provider="wazuh",
+            evidence_level="authenticated",
+        )
+
+        self.assertTrue(first["inserted"])
+        self.assertFalse(duplicate["inserted"])
+        self.assertEqual(len(events.list_events(limit=10, source_surface="wazuh_fim")), 1)
+        self.assertEqual(events.get_collector_cursor("wazuh-test")["cursor"], first["cursor"])
+
     def test_async_insert_event_persists_metadata_fields(self):
         events.insert_event_async(
             event_type="process_event",
@@ -127,6 +173,23 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         self.assertEqual(row["collector_status"], "ok")
         self.assertEqual(row["evidence_refs"], ["/bin/test"])
         self.assertEqual(row["data"]["pid"], 123)
+
+    def test_watchdog_handler_emits_stable_source_key_without_crashing(self):
+        if events.FileSystemEventHandler is None:
+            self.skipTest("watchdog is unavailable")
+        observed_path = Path(self._tmp.name) / "observed.txt"
+        observed_path.write_text("evidence", encoding="utf-8")
+        handler = events._CleanHouseFileHandler(self._db_path, Path(self._tmp.name))
+        event = SimpleNamespace(is_directory=False, src_path=str(observed_path))
+
+        with patch.object(events, "insert_event_async") as insert_async:
+            handler.on_modified(event)
+
+        source_event_key = insert_async.call_args.kwargs["source_event_key"]
+        self.assertTrue(source_event_key.startswith("watchdog:"))
+        self.assertEqual(len(source_event_key), len("watchdog:") + 64)
+        self.assertEqual(insert_async.call_args.kwargs["provider"], "watchdog")
+        self.assertTrue(insert_async.call_args.kwargs["data"]["fallback"])
 
     def test_list_events_migrates_old_rows_with_defaults(self):
         self._db_path.unlink(missing_ok=True)
@@ -592,6 +655,32 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         self.assertIn("degradation", status["writer"])
         self.assertIn("last_event_at", status)
         self.assertIn("last_event_type", status)
+
+    def test_dead_watcher_observer_is_reported_as_an_error(self):
+        class DeadObserver:
+            @staticmethod
+            def is_alive():
+                return False
+
+        original_state = dict(events._WATCHER_STATE)
+        try:
+            events._WATCHER_STATE.update({
+                "observer": DeadObserver(),
+                "watch_dir": Path(self._tmp.name),
+                "last_error": None,
+                "started_at": "2026-08-22T00:00:00+00:00",
+                "stop_requested": False,
+            })
+
+            with patch.object(events, "FileSystemEventHandler", object()), patch.object(events, "Observer", object()):
+                status = events.get_watcher_status()
+
+            self.assertEqual(status["collector_status"], "error")
+            self.assertEqual(status["last_error"]["source"], "watcher_observer_exit")
+            self.assertEqual(status["started_at"], "2026-08-22T00:00:00+00:00")
+        finally:
+            events._WATCHER_STATE.clear()
+            events._WATCHER_STATE.update(original_state)
 
     def test_filesystem_watcher_filters_event_db_sidecars_without_drops(self):
         original_metrics = events.get_writer_metrics()

@@ -311,6 +311,28 @@ def _materialize_verified_package() -> Path:
         raise
 
 
+def _materialize_configure_helper() -> Path:
+    """Copy the root helper outside privacy-protected source directories."""
+    fd, raw_path = tempfile.mkstemp(
+        prefix="cleanhouse-wazuh-configure-", suffix=".py", dir="/private/tmp"
+    )
+    os.close(fd)
+    path = Path(raw_path)
+    try:
+        shutil.copyfile(CONFIGURE_HELPER, path)
+        os.chmod(path, 0o600)
+        source_digest = hashlib.sha256(CONFIGURE_HELPER.read_bytes()).digest()
+        if hashlib.sha256(path.read_bytes()).digest() != source_digest:
+            raise RuntimeError("materialized Wazuh configuration helper verification failed")
+        return path
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def _installed_version() -> str:
     version_file = INSTALL_ROOT / "etc" / "VERSION"
     try:
@@ -319,17 +341,27 @@ def _installed_version() -> str:
         return ""
 
 
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _agent_status() -> dict[str, Any]:
     control = INSTALL_ROOT / "bin" / "wazuh-control"
-    if not control.is_file():
+    if not _safe_is_file(control):
         return {"running": False, "summary": ""}
-    result = subprocess.run(
-        [str(control), "status"],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            [str(control), "status"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"running": False, "summary": type(exc).__name__, "returncode": None}
     summary = (result.stdout + "\n" + result.stderr).strip()
     running = result.returncode == 0 and "not running" not in summary.lower()
     return {"running": running, "summary": summary[:2048], "returncode": result.returncode}
@@ -338,7 +370,7 @@ def _agent_status() -> dict[str, Any]:
 def lifecycle_status(*, ingestion: dict[str, Any] | None = None) -> dict[str, Any]:
     bundle = verify_bundle()
     installed = INSTALL_ROOT.is_dir()
-    enrolled = bool((INSTALL_ROOT / "etc" / "client.keys").is_file())
+    enrolled = _safe_is_file(INSTALL_ROOT / "etc" / "client.keys")
     agent = _agent_status() if installed else {"running": False, "summary": ""}
     ingestion = ingestion if isinstance(ingestion, dict) else {}
     connected = bool(ingestion.get("authenticated"))
@@ -542,9 +574,17 @@ def install_with_authorization(
     secret = _load_enrollment_key(keychain_account)
     if not secret:
         return {"status": "error", "message": "Wazuh enrollment client key is not stored in Keychain"}
+    materialized_package: Path | None = None
+    materialized_helper: Path | None = None
     try:
         materialized_package = _materialize_verified_package()
+        materialized_helper = _materialize_configure_helper()
     except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        if materialized_package is not None:
+            try:
+                materialized_package.unlink()
+            except OSError:
+                pass
         return {"status": "error", "message": str(exc)[:1024], "bundle": bundle}
 
     temp_path: Path | None = None
@@ -567,7 +607,7 @@ def install_with_authorization(
         os.chmod(temp_path, 0o600)
         expected_sha512 = shlex.quote(OFFICIAL_PACKAGE_SHA512)
         package_path = shlex.quote(str(materialized_package))
-        helper_path = shlex.quote(str(CONFIGURE_HELPER))
+        helper_path = shlex.quote(str(materialized_helper))
         interpreter = shlex.quote(sys.executable)
         setup_path = shlex.quote(str(temp_path))
         command = (
@@ -592,10 +632,12 @@ def install_with_authorization(
                 temp_path.unlink()
             except OSError:
                 pass
-        try:
-            materialized_package.unlink()
-        except OSError:
-            pass
+        for materialized_path in (materialized_helper, materialized_package):
+            if materialized_path is not None:
+                try:
+                    materialized_path.unlink()
+                except OSError:
+                    pass
     installed = result.returncode == 0
     keychain_cleanup = delete_enrollment_key(account=keychain_account) if installed else {
         "status": "retained",

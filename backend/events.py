@@ -4,6 +4,7 @@ Filesystem event persistence and optional watcher runtime for CleanHouse.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -25,7 +26,8 @@ except Exception:
 DEFAULT_SESSION_ID = "default-session"
 DEFAULT_DB_NAME = "events.db"
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_DB_PATH = REPO_ROOT / "data" / DEFAULT_DB_NAME
+DEFAULT_DATA_ROOT = Path.home() / ".cleanhouse"
+DEFAULT_DB_PATH = DEFAULT_DATA_ROOT / "events" / DEFAULT_DB_NAME
 DEFAULT_WATCH_DIR = REPO_ROOT
 DEFAULT_RECEIPT_WINDOW_SECONDS = 120
 DEFAULT_OBJECTIVE_PATH_PREFIX = "/objectives/"
@@ -38,6 +40,8 @@ _WATCHER_STATE: dict[str, Any] = {
     "observer": None,
     "watch_dir": None,
     "last_error": None,
+    "started_at": None,
+    "stop_requested": False,
 }
 _EVENT_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=2000)
 _WRITER_STATE: dict[str, Any] = {"thread": None, "queue": _EVENT_QUEUE, "last_error": None}
@@ -57,7 +61,7 @@ _WRITER_TIMESTAMPS: dict[str, str | None] = {
     "last_written_at": None,
     "last_filtered_at": None,
 }
-_DB_INIT_STATE: dict[str, bool] = {}
+_DB_INIT_STATE: dict[str, tuple[int, int]] = {}
 
 _DB_CONNECT_TIMEOUT_SECONDS = 5.0
 _DB_BUSY_TIMEOUT_MS = 2000
@@ -72,6 +76,7 @@ _RECEIPT_EVENT_TYPES = {
     "created",
     "modified",
     "deleted",
+    "moved",
     "objective_start",
     "objective_end",
     "approval_requested",
@@ -104,6 +109,8 @@ _EVENT_METADATA_COLUMNS: dict[str, str] = {
     "scope_relation": "TEXT",
     "evidence_refs": "TEXT NOT NULL DEFAULT '[]'",
     "raw_evidence_ref": "TEXT",
+    "source_event_key": "TEXT",
+    "provider": "TEXT",
     "data": "TEXT NOT NULL DEFAULT '{}'",
 }
 _EVENT_DEFAULTS: dict[str, Any] = {
@@ -116,6 +123,8 @@ _EVENT_DEFAULTS: dict[str, Any] = {
     "scope_relation": None,
     "evidence_refs": [],
     "raw_evidence_ref": None,
+    "source_event_key": None,
+    "provider": None,
     "data": {},
 }
 
@@ -148,6 +157,24 @@ def _resolve_db_path() -> Path:
 
 def _ensure_db_directory(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _resolve_usable_db_path() -> Path:
+    db_path = _resolve_db_path()
+    try:
+        _ensure_db_directory(db_path)
+    except OSError as exc:
+        if not os.getenv("CLEANHOUSE_EVENTS_DB"):
+            raise
+        logging.warning(
+            "CLEANHOUSE_EVENTS_DB is not writable; falling back to default events DB %s: %s",
+            DEFAULT_DB_PATH,
+            exc,
+        )
+        db_path = DEFAULT_DB_PATH
+        _ensure_db_directory(db_path)
+        os.environ["CLEANHOUSE_EVENTS_DB"] = str(db_path)
+    return db_path
 
 
 def _connect(db_path: Path) -> sqlite3.Connection:
@@ -267,11 +294,14 @@ def _ensure_event_columns(conn: sqlite3.Connection) -> None:
 
 
 def init_db() -> None:
-    db_path = _resolve_db_path()
-    _ensure_db_directory(db_path)
+    db_path = _resolve_usable_db_path()
     db_key = str(db_path)
+    try:
+        current_identity = (int(db_path.stat().st_dev), int(db_path.stat().st_ino))
+    except OSError:
+        current_identity = None
     with _DB_INIT_LOCK:
-        if _DB_INIT_STATE.get(db_key):
+        if current_identity is not None and _DB_INIT_STATE.get(db_key) == current_identity:
             return
 
     def _create_schema(conn: sqlite3.Connection) -> None:
@@ -293,6 +323,8 @@ def init_db() -> None:
                 scope_relation TEXT,
                 evidence_refs TEXT NOT NULL DEFAULT '[]',
                 raw_evidence_ref TEXT,
+                source_event_key TEXT,
+                provider TEXT,
                 data TEXT NOT NULL DEFAULT '{}'
             )
             """
@@ -326,11 +358,32 @@ def init_db() -> None:
     def _migrate(conn: sqlite3.Connection) -> None:
         _ensure_event_columns(conn)
         _ensure_receipt_columns(conn)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_type_surface_id ON events (event_type, source_surface, id DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_surface_id ON events (source_surface, id DESC)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_source_event_key "
+            "ON events (source_event_key) WHERE source_event_key IS NOT NULL"
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS collector_cursors (
+                collector TEXT PRIMARY KEY,
+                cursor TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
 
     _run_with_retries(_migrate, db_path)
     _configure_db(db_path)
+    final_stat = db_path.stat()
     with _DB_INIT_LOCK:
-        _DB_INIT_STATE[db_key] = True
+        _DB_INIT_STATE[db_key] = (int(final_stat.st_dev), int(final_stat.st_ino))
 
 
 def _json_dumps(value: Any, default: Any) -> str:
@@ -387,7 +440,7 @@ def _insert_event_record(
     timestamp: str,
     **metadata: Any,
 ) -> None:
-    db_path = _resolve_db_path()
+    db_path = _resolve_usable_db_path()
     event_metadata = _normalize_event_metadata(metadata)
 
     def _insert(conn: sqlite3.Connection) -> None:
@@ -408,9 +461,11 @@ def _insert_event_record(
                 scope_relation,
                 evidence_refs,
                 raw_evidence_ref,
+                source_event_key,
+                provider,
                 data
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 timestamp,
@@ -427,6 +482,8 @@ def _insert_event_record(
                 event_metadata["scope_relation"],
                 event_metadata["evidence_refs"],
                 event_metadata["raw_evidence_ref"],
+                event_metadata["source_event_key"],
+                event_metadata["provider"],
                 event_metadata["data"],
             ),
         )
@@ -446,7 +503,7 @@ def _insert_receipt_record(
     objective_count: int = 0,
     session_count: int = 0,
 ) -> int:
-    db_path = _resolve_db_path()
+    db_path = _resolve_usable_db_path()
     timestamp = _now_iso_timestamp()
     payload = json.dumps(sorted(set(affected_paths or [])))
 
@@ -518,8 +575,33 @@ def _db_writer_loop(event_queue: "queue.Queue[dict[str, Any]]") -> None:
                     scope_relation=payload.get("scope_relation"),
                     evidence_refs=payload.get("evidence_refs"),
                     raw_evidence_ref=payload.get("raw_evidence_ref"),
+                    source_event_key=payload.get("source_event_key"),
+                    provider=payload.get("provider"),
                     data=payload.get("data"),
                 )
+                if (
+                    payload.get("provider") == "watchdog"
+                    and payload.get("event_type") in {"created", "modified", "deleted", "moved"}
+                ):
+                    try:
+                        from backend import file_integrity
+
+                        event_data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+                        file_integrity.observe(
+                            {
+                                "source_event_key": payload.get("source_event_key"),
+                                "operation": payload.get("event_type"),
+                                "path": payload.get("path"),
+                                "old_path": event_data.get("previous_path"),
+                                "provider": "watchdog",
+                                "metadata": event_data.get("metadata") or {},
+                                "hashes": {},
+                                "evidence_refs": payload.get("evidence_refs") or [],
+                                "observed_at": payload.get("timestamp"),
+                            }
+                        )
+                    except Exception as exc:
+                        logging.warning("Could not advance fallback integrity generation: %s", exc)
             elif record_type == "receipt":
                 _insert_receipt_record(
                     session_id=payload["session_id"],
@@ -607,7 +689,7 @@ def get_writer_metrics() -> dict[str, int]:
 
 
 def _latest_event_timestamps() -> dict[str, Any]:
-    db_path = _resolve_db_path()
+    db_path = _resolve_usable_db_path()
     if not db_path.exists():
         return {
             "last_event_at": None,
@@ -754,12 +836,14 @@ def insert_event(
     scope_relation: str | None = None,
     evidence_refs: list[Any] | None = None,
     raw_evidence_ref: str | None = None,
+    source_event_key: str | None = None,
+    provider: str | None = None,
     data: dict[str, Any] | None = None,
 ) -> None:
     init_db()
     if (
         source_surface == "filesystem_watcher"
-        and event_type in {"created", "modified", "deleted"}
+        and event_type in {"created", "modified", "deleted", "moved"}
         and should_ignore_filesystem_event_path(path)
     ):
         _record_writer_metric("filtered")
@@ -783,8 +867,164 @@ def insert_event(
         scope_relation=scope_relation,
         evidence_refs=evidence_refs,
         raw_evidence_ref=raw_evidence_ref,
+        source_event_key=source_event_key,
+        provider=provider,
         data=data,
     )
+
+
+def insert_event_with_cursor(
+    *,
+    collector: str,
+    cursor: str,
+    source_event_key: str,
+    event_type: str,
+    path: str,
+    summary: str,
+    session_id: str = DEFAULT_SESSION_ID,
+    timestamp: str | None = None,
+    cursor_metadata: dict[str, Any] | None = None,
+    **metadata: Any,
+) -> dict[str, Any]:
+    """Atomically append one provider event and advance its durable cursor.
+
+    The unique source key makes replay safe.  A duplicate still advances the
+    collector cursor in the same transaction, which lets a restarted poller
+    recover without emitting a second event.
+    """
+    if not collector.strip() or not source_event_key.strip():
+        raise ValueError("collector and source_event_key are required")
+    init_db()
+    db_path = _resolve_usable_db_path()
+    event_metadata = _normalize_event_metadata({**metadata, "source_event_key": source_event_key})
+    event_timestamp = timestamp or _now_iso_timestamp()
+
+    def _insert(conn: sqlite3.Connection) -> dict[str, Any]:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            result = conn.execute(
+                """
+                INSERT OR IGNORE INTO events (
+                    timestamp, session_id, event_type, path, summary,
+                    objective_id, source_surface, actor_type, evidence_level,
+                    observed_vs_expected, collector_status, scope_relation,
+                    evidence_refs, raw_evidence_ref, source_event_key, provider, data
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_timestamp,
+                    session_id or DEFAULT_SESSION_ID,
+                    event_type,
+                    path,
+                    summary,
+                    event_metadata["objective_id"],
+                    event_metadata["source_surface"],
+                    event_metadata["actor_type"],
+                    event_metadata["evidence_level"],
+                    event_metadata["observed_vs_expected"],
+                    event_metadata["collector_status"],
+                    event_metadata["scope_relation"],
+                    event_metadata["evidence_refs"],
+                    event_metadata["raw_evidence_ref"],
+                    event_metadata["source_event_key"],
+                    event_metadata["provider"],
+                    event_metadata["data"],
+                ),
+            )
+            inserted = result.rowcount == 1
+            event_id = int(result.lastrowid) if inserted else int(
+                conn.execute(
+                    "SELECT id FROM events WHERE source_event_key = ?",
+                    (source_event_key,),
+                ).fetchone()[0]
+            )
+            conn.execute(
+                """
+                INSERT INTO collector_cursors (collector, cursor, updated_at, metadata)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(collector) DO UPDATE SET
+                    cursor = excluded.cursor,
+                    updated_at = excluded.updated_at,
+                    metadata = excluded.metadata
+                """,
+                (
+                    collector,
+                    str(cursor),
+                    _now_iso_timestamp(),
+                    _json_dumps(cursor_metadata, {}),
+                ),
+            )
+            conn.commit()
+            return {"inserted": inserted, "event_id": event_id, "cursor": str(cursor)}
+        except Exception:
+            conn.rollback()
+            raise
+
+    return dict(_run_with_retries(_insert, db_path))
+
+
+def get_collector_cursor(collector: str) -> dict[str, Any]:
+    init_db()
+    db_path = _resolve_usable_db_path()
+
+    def _select(conn: sqlite3.Connection) -> dict[str, Any]:
+        row = conn.execute(
+            "SELECT collector, cursor, updated_at, metadata FROM collector_cursors WHERE collector = ?",
+            (collector,),
+        ).fetchone()
+        if row is None:
+            return {"collector": collector, "cursor": "", "updated_at": "", "metadata": {}}
+        item = dict(row)
+        item["metadata"] = _json_loads(item.get("metadata"), {})
+        return item
+
+    return dict(_run_with_retries(_select, db_path))
+
+
+def advance_collector_cursor(
+    *,
+    collector: str,
+    cursor: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist a successfully consumed provider cursor without inventing an event.
+
+    Some provider pages contain no in-scope evidence.  Recording the page cursor
+    is still required so the next poll can reach later evidence instead of
+    rereading the same bounded window forever.  Callers must only use this after
+    the provider page has been authenticated and every returned event has been
+    committed successfully.
+    """
+    init_db()
+    db_path = _resolve_usable_db_path()
+    updated_at = _now_iso_timestamp()
+
+    def _advance(conn: sqlite3.Connection) -> dict[str, Any]:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(
+                """
+                INSERT INTO collector_cursors (collector, cursor, updated_at, metadata)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(collector) DO UPDATE SET
+                    cursor = excluded.cursor,
+                    updated_at = excluded.updated_at,
+                    metadata = excluded.metadata
+                """,
+                (collector, str(cursor), updated_at, _json_dumps(metadata, {})),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return {
+            "collector": collector,
+            "cursor": str(cursor),
+            "updated_at": updated_at,
+            "metadata": dict(metadata or {}),
+        }
+
+    return dict(_run_with_retries(_advance, db_path))
 
 
 def insert_event_async(
@@ -802,12 +1042,14 @@ def insert_event_async(
     scope_relation: str | None = None,
     evidence_refs: list[Any] | None = None,
     raw_evidence_ref: str | None = None,
+    source_event_key: str | None = None,
+    provider: str | None = None,
     data: dict[str, Any] | None = None,
 ) -> None:
     init_db()
     if (
         source_surface == "filesystem_watcher"
-        and event_type in {"created", "modified", "deleted"}
+        and event_type in {"created", "modified", "deleted", "moved"}
         and should_ignore_filesystem_event_path(path)
     ):
         _record_writer_metric("filtered")
@@ -830,13 +1072,20 @@ def insert_event_async(
             "scope_relation": scope_relation,
             "evidence_refs": evidence_refs,
             "raw_evidence_ref": raw_evidence_ref,
+            "source_event_key": source_event_key,
+            "provider": provider,
             "data": data,
         }
     )
 
 
-def list_events(limit: int = 100, session_id: str | None = None) -> list[dict[str, Any]]:
-    db_path = _resolve_db_path()
+def list_events(
+    limit: int = 100,
+    session_id: str | None = None,
+    event_type: str | None = None,
+    source_surface: str | None = None,
+) -> list[dict[str, Any]]:
+    db_path = _resolve_usable_db_path()
     init_db()
     limit = max(1, int(limit))
 
@@ -858,16 +1107,33 @@ def list_events(limit: int = 100, session_id: str | None = None) -> list[dict[st
             scope_relation,
             evidence_refs,
             raw_evidence_ref,
+            source_event_key,
+            provider,
             data
         FROM events
     """
+    where_clauses = []
     if session_id:
-        query += " WHERE session_id = ?"
+        where_clauses.append("session_id = ?")
         params.append(session_id)
-    query += """
-        ORDER BY datetime(timestamp) DESC, id DESC
-        LIMIT ?
-    """
+    if event_type:
+        where_clauses.append("event_type = ?")
+        params.append(event_type)
+    if source_surface:
+        where_clauses.append("source_surface = ?")
+        params.append(source_surface)
+    if where_clauses:
+        query += " WHERE " + " AND ".join(where_clauses)
+    if session_id:
+        query += """
+            ORDER BY datetime(timestamp) DESC, id DESC
+            LIMIT ?
+        """
+    else:
+        query += """
+            ORDER BY id DESC
+            LIMIT ?
+        """
     params.append(limit)
 
     def _select(conn: sqlite3.Connection):
@@ -877,8 +1143,54 @@ def list_events(limit: int = 100, session_id: str | None = None) -> list[dict[st
     return [_hydrate_event_row(row) for row in rows]
 
 
+def list_events_by_sources(source_limits: dict[str, int]) -> dict[str, list[dict[str, Any]]]:
+    """Read several source timelines without waiting behind the write queue lock."""
+    db_path = _resolve_usable_db_path()
+    init_db()
+    requested = {
+        str(source): max(1, min(int(limit), 1000))
+        for source, limit in source_limits.items()
+        if str(source).strip()
+    }
+    if not requested:
+        return {}
+
+    last_exc: Exception | None = None
+    for attempt in range(1, _DB_RETRY_LIMIT + 1):
+        conn = None
+        try:
+            conn = _connect(db_path)
+            result: dict[str, list[dict[str, Any]]] = {}
+            for source, limit in requested.items():
+                rows = conn.execute(
+                    """
+                    SELECT
+                        id, timestamp, session_id, event_type, path, summary,
+                        objective_id, source_surface, actor_type, evidence_level,
+                        observed_vs_expected, collector_status, scope_relation,
+                        evidence_refs, raw_evidence_ref, source_event_key, provider, data
+                    FROM events
+                    WHERE source_surface = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (source, limit),
+                ).fetchall()
+                result[source] = [_hydrate_event_row(dict(row)) for row in rows]
+            return result
+        except sqlite3.OperationalError as exc:
+            last_exc = exc
+            if "locked" not in str(exc).lower() or attempt >= _DB_RETRY_LIMIT:
+                break
+            time.sleep(_DB_RETRY_DELAY_SECONDS * attempt)
+        finally:
+            if conn is not None:
+                conn.close()
+    raise RuntimeError(f"sqlite read failed: {last_exc}") from last_exc
+
+
 def list_receipts(limit: int = 100, session_id: str | None = None) -> list[dict[str, Any]]:
-    db_path = _resolve_db_path()
+    db_path = _resolve_usable_db_path()
     init_db()
     limit = max(1, int(limit))
     columns = {"id", "timestamp", "session_id", "summary", "event_ids"}
@@ -1192,29 +1504,58 @@ if FileSystemEventHandler is not None and Observer is not None:
         def on_deleted(self, event) -> None:  # noqa: N802
             self._handle(event, "deleted")
 
-        def _handle(self, event, event_type: str) -> None:
+        def on_moved(self, event) -> None:  # noqa: N802
+            self._handle(event, "moved", destination=getattr(event, "dest_path", ""))
+
+        def _handle(self, event, event_type: str, *, destination: str = "") -> None:
             if not self._is_file_event(event):
                 return
-            event_path = Path(event.src_path).resolve()
+            source_path = Path(event.src_path).resolve()
+            event_path = Path(destination).resolve() if destination else source_path
             if should_ignore_filesystem_event_path(event_path, db_path=self._db_path):
                 _record_writer_metric("filtered")
                 _record_writer_timestamp("last_filtered_at")
                 return
             if ".git" in event_path.parts:
                 return
+            metadata: dict[str, Any] = {}
+            try:
+                stat = event_path.stat()
+                metadata = {
+                    "size": stat.st_size,
+                    "mode": oct(stat.st_mode & 0o7777),
+                    "uid": stat.st_uid,
+                    "gid": stat.st_gid,
+                    "mtime": stat.st_mtime_ns,
+                    "inode": stat.st_ino,
+                    "file_type": "file",
+                }
+            except OSError:
+                pass
+            source_event_key = "watchdog:" + hashlib.sha256(
+                f"{time.time_ns()}:{event_type}:{source_path}:{event_path}".encode("utf-8")
+            ).hexdigest()
             insert_event_async(
                 event_type=event_type,
                 path=str(event_path),
                 summary=f"{event_type}: {event_path}",
                 session_id=os.getenv("CLEANHOUSE_SESSION_ID", DEFAULT_SESSION_ID),
                 source_surface="filesystem_watcher",
+                provider="watchdog",
                 actor_type="collector",
                 evidence_level="observed",
                 collector_status="ok",
                 scope_relation="unknown",
                 evidence_refs=[str(event_path)],
                 raw_evidence_ref=str(event_path),
-                data={"watch_dir": str(self._watch_dir)},
+                source_event_key=source_event_key,
+                data={
+                    "watch_dir": str(self._watch_dir),
+                    "provider": "watchdog",
+                    "fallback": True,
+                    "metadata": metadata,
+                    **({"previous_path": str(source_path)} if destination else {}),
+                },
             )
 else:
     class _CleanHouseFileHandler:
@@ -1223,11 +1564,11 @@ else:
             self._watch_dir = watch_dir
 
 
-def start_watcher() -> None:
+def start_watcher() -> dict[str, Any]:
     if FileSystemEventHandler is None or Observer is None:
         _record_watcher_error("watchdog_dependency", "watchdog dependency missing")
         logging.warning("watchdog is unavailable; filesystem events will not be collected")
-        return
+        return get_watcher_status()
 
     watch_dir = Path(os.getenv("CLEANHOUSE_WATCH_DIR", str(DEFAULT_WATCH_DIR))).expanduser()
     try:
@@ -1235,41 +1576,52 @@ def start_watcher() -> None:
     except (FileNotFoundError, OSError, RuntimeError) as exc:
         _record_watcher_error("watch_dir", exc, watch_dir=str(watch_dir))
         logging.warning("Could not start filesystem watcher for %s: %s", watch_dir, exc)
-        return
+        return get_watcher_status()
 
     if not watch_dir.is_dir():
         _record_watcher_error("watch_dir", "watch path is not a directory", watch_dir=str(watch_dir))
         logging.warning("Could not start filesystem watcher; not a directory: %s", watch_dir)
-        return
+        return get_watcher_status()
 
+    already_running = False
     with _WATCHER_LOCK:
         if _WATCHER_STATE["observer"] is not None:
             if _WATCHER_STATE["observer"].is_alive():
-                return
-            _WATCHER_STATE["observer"] = None
-            _WATCHER_STATE["watch_dir"] = None
+                already_running = True
+            else:
+                if not _WATCHER_STATE.get("stop_requested") and _WATCHER_STATE.get("last_error") is None:
+                    _WATCHER_STATE["last_error"] = _runtime_error_payload(
+                        "watcher_observer_exit",
+                        "watchdog observer terminated unexpectedly",
+                        watch_dir=str(_WATCHER_STATE.get("watch_dir") or watch_dir),
+                        started_at=_WATCHER_STATE.get("started_at"),
+                    )
+                _WATCHER_STATE["observer"] = None
 
-        if _WATCHER_STATE["watch_dir"] == watch_dir:
-            return
+        if not already_running:
+            try:
+                init_db()
+                db_path = _resolve_usable_db_path()
+                _ensure_db_directory(db_path)
+                handler = _CleanHouseFileHandler(db_path=db_path, watch_dir=watch_dir)
+                observer = Observer()
+                observer.schedule(handler, str(watch_dir), recursive=True)
+                _WATCHER_STATE["stop_requested"] = False
+                observer.start()
+            except Exception as exc:
+                _WATCHER_STATE["observer"] = None
+                _WATCHER_STATE["watch_dir"] = watch_dir
+                _WATCHER_STATE["started_at"] = None
+                _WATCHER_STATE["last_error"] = _runtime_error_payload("watcher_start", exc, watch_dir=str(watch_dir))
+                logging.warning("Could not start filesystem watcher for %s: %s", watch_dir, exc)
+            else:
+                _WATCHER_STATE["observer"] = observer
+                _WATCHER_STATE["watch_dir"] = watch_dir
+                _WATCHER_STATE["started_at"] = _now_iso_timestamp()
+                _WATCHER_STATE["last_error"] = None
+                logging.info("Started filesystem watcher for %s", watch_dir)
 
-        try:
-            init_db()
-            db_path = _resolve_db_path()
-            _ensure_db_directory(db_path)
-            handler = _CleanHouseFileHandler(db_path=db_path, watch_dir=watch_dir)
-            observer = Observer()
-            observer.schedule(handler, str(watch_dir), recursive=True)
-            observer.start()
-        except Exception as exc:
-            _WATCHER_STATE["observer"] = None
-            _WATCHER_STATE["watch_dir"] = None
-            _WATCHER_STATE["last_error"] = _runtime_error_payload("watcher_start", exc, watch_dir=str(watch_dir))
-            logging.warning("Could not start filesystem watcher for %s: %s", watch_dir, exc)
-            return
-        _WATCHER_STATE["observer"] = observer
-        _WATCHER_STATE["watch_dir"] = watch_dir
-        _WATCHER_STATE["last_error"] = None
-        logging.info("Started filesystem watcher for %s", watch_dir)
+    return get_watcher_status()
 
 
 def get_watcher_status() -> dict[str, Any]:
@@ -1277,6 +1629,20 @@ def get_watcher_status() -> dict[str, Any]:
     with _WATCHER_LOCK:
         observer = _WATCHER_STATE["observer"]
         watch_dir = _WATCHER_STATE["watch_dir"]
+        started_at = _WATCHER_STATE.get("started_at")
+        stop_requested = bool(_WATCHER_STATE.get("stop_requested"))
+        if (
+            observer is not None
+            and not observer.is_alive()
+            and not stop_requested
+            and _WATCHER_STATE.get("last_error") is None
+        ):
+            _WATCHER_STATE["last_error"] = _runtime_error_payload(
+                "watcher_observer_exit",
+                "watchdog observer terminated unexpectedly",
+                watch_dir=str(watch_dir) if watch_dir is not None else None,
+                started_at=started_at,
+            )
         last_error = dict(_WATCHER_STATE["last_error"]) if isinstance(_WATCHER_STATE.get("last_error"), dict) else None
         running = observer is not None and observer.is_alive()
     if not dependency_available:
@@ -1310,6 +1676,8 @@ def get_watcher_status() -> dict[str, Any]:
         "support_status": support_status,
         "unsupported_reason": unsupported_reason,
         "watch_dir": str(watch_dir) if watch_dir is not None else None,
+        "started_at": started_at,
+        "stop_requested": stop_requested,
         "last_error": last_error,
         "degradation": {
             "degraded": bool(degradation_reasons),
@@ -1352,11 +1720,13 @@ def stop_watcher() -> None:
         observer = _WATCHER_STATE["observer"]
         if observer is None:
             return
+        _WATCHER_STATE["stop_requested"] = True
         if observer.is_alive():
             observer.stop()
             observer.join(timeout=2.0)
         _WATCHER_STATE["observer"] = None
         _WATCHER_STATE["watch_dir"] = None
+        _WATCHER_STATE["started_at"] = None
         logging.info("Stopped filesystem watcher")
 
 

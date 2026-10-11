@@ -40,6 +40,68 @@ class WazuhRuntimeTests(unittest.TestCase):
                 encoded, agent_id="002", agent_name="zen-001"
             )
 
+    def test_client_key_is_group_readable_under_restrictive_root_umask(self):
+        line = b"001 zen-001 any deadbeef\n"
+        config = {
+            "agent_id": "001",
+            "agent_name": "zen-001",
+            "client_key": base64.b64encode(line).decode("ascii"),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Ossec"
+            (root / "etc").mkdir(parents=True)
+            original_umask = os.umask(0o077)
+            try:
+                with patch.object(wazuh_agent_configure, "INSTALL_ROOT", root), patch.object(
+                    wazuh_agent_configure.os, "chown"
+                ):
+                    wazuh_agent_configure._install_client_key(config)
+            finally:
+                os.umask(original_umask)
+
+            key_path = root / "etc" / "client.keys"
+            self.assertEqual(key_path.read_bytes(), line)
+            self.assertEqual(key_path.stat().st_mode & 0o777, 0o640)
+
+    def test_configure_xml_recovers_packaged_bare_shell_ampersands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Ossec"
+            (root / "etc").mkdir(parents=True)
+            config_path = root / "etc" / "ossec.conf"
+            config_path.write_text(
+                """<ossec_config>
+  <localfile><command>first && second</command></localfile>
+</ossec_config>
+""",
+                encoding="utf-8",
+            )
+            config = {
+                "manager": "vvault.thewreck.org",
+                "monitored_scope": tmp,
+            }
+            with patch.object(wazuh_agent_configure, "INSTALL_ROOT", root), patch.object(
+                wazuh_agent_configure.os, "chown"
+            ):
+                wazuh_agent_configure._configure_xml(config)
+
+            serialized = config_path.read_text(encoding="utf-8")
+            parsed = wazuh_agent_configure._parse_wazuh_configuration(serialized)
+
+        self.assertIn("first && second", serialized)
+        self.assertFalse(serialized.startswith("<?xml"))
+        self.assertIn(
+            "first && second",
+            wazuh_agent_configure._serialize_wazuh_configuration(parsed),
+        )
+        syscheck = parsed.find("syscheck")
+        self.assertIsNotNone(syscheck)
+        regex_ignores = [
+            node.text
+            for node in syscheck.findall("ignore")
+            if node.attrib.get("type") == "sregex"
+        ]
+        self.assertIn(wazuh_agent_configure.NESTED_IGNORE_SREGEX, regex_ignores)
+
     def test_lifecycle_does_not_claim_scanning_without_committed_event(self):
         with patch.object(
             wazuh_runtime,
@@ -53,6 +115,26 @@ class WazuhRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result["scanning"])
         self.assertEqual(result["lifecycle"], "connected")
+
+    def test_protected_installed_paths_do_not_break_lifecycle_reporting(self):
+        protected = Mock()
+        protected.is_file.side_effect = PermissionError("protected")
+        self.assertFalse(wazuh_runtime._safe_is_file(protected))
+
+        with patch.object(
+            wazuh_runtime,
+            "verify_bundle",
+            return_value={"package_present": True, "packaged": True, "version": "4.14.7"},
+        ), patch.object(wazuh_runtime, "INSTALL_ROOT") as install_root, patch.object(
+            wazuh_runtime, "_safe_is_file", return_value=False
+        ), patch.object(wazuh_runtime, "_installed_version", return_value=""), patch.object(
+            wazuh_runtime, "_agent_status", return_value={"running": False, "summary": "PermissionError"}
+        ):
+            install_root.is_dir.return_value = True
+            result = wazuh_runtime.lifecycle_status()
+
+        self.assertEqual(result["lifecycle"], "installed")
+        self.assertFalse(result["enrolled"])
 
     def test_lifecycle_progresses_installed_enrolled_connected_scanning(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,6 +218,8 @@ class WazuhRuntimeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             package = Path(tmp) / "verified.pkg"
             package.write_bytes(b"verified")
+            helper = Path(tmp) / "configure.py"
+            helper.write_text("pass\n", encoding="utf-8")
             completed = Mock(returncode=0, stdout="", stderr="")
             with patch.object(wazuh_runtime.platform, "system", return_value="Darwin"), patch.object(
                 wazuh_runtime, "verify_bundle", return_value={"packaged": True}
@@ -143,6 +227,8 @@ class WazuhRuntimeTests(unittest.TestCase):
                 wazuh_runtime, "_load_enrollment_key", return_value="enrollment-client-key"
             ), patch.object(
                 wazuh_runtime, "_materialize_verified_package", return_value=package
+            ), patch.object(
+                wazuh_runtime, "_materialize_configure_helper", return_value=helper
             ), patch.object(
                 wazuh_runtime, "lifecycle_status", return_value={"lifecycle": "installed"}
             ), patch.object(
@@ -161,10 +247,13 @@ class WazuhRuntimeTests(unittest.TestCase):
             command = run.call_args.args[0]
             self.assertEqual(command[:2], ["/usr/bin/osascript", "-e"])
             self.assertIn(str(package), command[2])
+            self.assertIn(str(helper), command[2])
             self.assertNotIn(str(wazuh_runtime.PACKAGE_PATH), command[2])
+            self.assertNotIn(str(wazuh_runtime.CONFIGURE_HELPER), command[2])
             self.assertNotIn("enrollment-client-key", command[2])
             self.assertNotIn("WAZUH_REGISTRATION_PASSWORD", command[2])
             self.assertFalse(package.exists())
+            self.assertFalse(helper.exists())
 
 
 if __name__ == "__main__":
