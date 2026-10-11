@@ -4,7 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from backend import launch_agent, runtime_supervisor
 
@@ -32,6 +32,7 @@ class LaunchAgentTests(unittest.TestCase):
         self.assertIn("backend.runtime_supervisor start", launcher)
         self.assertIn("READY_DEADLINE=$((SECONDS + STARTUP_TIMEOUT_SECONDS))", launcher)
         self.assertIn('while ! probe_json "${READY_ENDPOINT}" 2; do', launcher)
+        self.assertIn("except (OSError, URLError, json.JSONDecodeError):", launcher)
 
     def test_rendered_plist_is_user_owned_keepalive_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,6 +132,48 @@ class LaunchAgentTests(unittest.TestCase):
 
         self.assertFalse(status["loaded"])
         self.assertEqual(status["state"], "unavailable")
+
+    def test_reinstall_loaded_unchanged_agent_kickstarts_without_bootout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "org.cleanhouse.runtime.plist"
+            payload = b"stable launch agent definition"
+            path.write_bytes(payload)
+            staged = {
+                "root": str(root / "runtime" / "current"),
+                "repo_root": str(root / "runtime" / "current" / "app"),
+                "interpreter": str(root / "runtime" / "current" / "python" / "bin" / "python3"),
+                "source_repo_root": str(root / "source"),
+                "previous": str(root / "runtime" / "previous"),
+            }
+            completed = Mock(returncode=0, stdout="", stderr="")
+            calls = []
+
+            def run_launchctl(args):
+                calls.append(args)
+                return completed
+
+            with patch.object(launch_agent, "plist_path", return_value=path), patch.object(
+                launch_agent, "_runtime_dir", return_value=root / "runtime"
+            ), patch.object(
+                launch_agent, "status", return_value={"loaded": True, "installed": True, "state": "loaded"}
+            ), patch.object(
+                launch_agent, "stage_runtime", return_value=staged
+            ), patch.object(
+                launch_agent, "render_plist", return_value=payload
+            ), patch.object(
+                launch_agent, "_run_launchctl", side_effect=run_launchctl
+            ), patch.object(
+                launch_agent, "_finalize_staged_runtime"
+            ) as finalize, patch.object(
+                launch_agent, "_rollback_staged_runtime"
+            ) as rollback:
+                result = launch_agent.install("/runtime/python3")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(calls, [["kickstart", "-k", f"{launch_agent.gui_domain()}/{launch_agent.LABEL}"]])
+        finalize.assert_called_once_with(staged)
+        rollback.assert_not_called()
 
     def test_runtime_observes_launchctl_instead_of_trusting_plist(self):
         result = type("Result", (), {"returncode": 113, "stdout": "", "stderr": "not loaded"})()

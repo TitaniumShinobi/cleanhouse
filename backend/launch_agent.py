@@ -15,6 +15,7 @@ import plistlib
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -260,7 +261,10 @@ def install(
     path.parent.mkdir(parents=True, exist_ok=True)
     _runtime_dir().mkdir(parents=True, exist_ok=True)
     domain = gui_domain()
-    _run_launchctl(["bootout", domain, str(path)])
+    prior_status = status()
+    prior_payload = path.read_bytes() if path.is_file() else None
+    # Stage the replacement before touching the live service. A copy failure
+    # must never take an otherwise healthy LaunchAgent offline.
     staged = stage_runtime(interpreter)
     payload = render_plist(
         str(staged["interpreter"]),
@@ -269,6 +273,30 @@ def install(
         repo_root=Path(str(staged["repo_root"])),
         source_repo_root=Path(str(staged["source_repo_root"])),
     )
+
+    # The managed runtime and interpreter paths are stable across releases.
+    # When the loaded definition is unchanged, launchd does not need a
+    # bootout/bootstrap cycle: atomically staged files plus kickstart provide
+    # a bounded restart without the registration race seen during repeated
+    # launcher invocations.
+    if prior_status.get("loaded") and prior_payload == payload:
+        kickstart = _run_launchctl(["kickstart", "-k", f"{domain}/{LABEL}"])
+        if kickstart.returncode != 0:
+            _rollback_staged_runtime(staged)
+            return {
+                **status(),
+                "status": "error",
+                "message": (kickstart.stderr or kickstart.stdout).strip()[:1024],
+            }
+        _finalize_staged_runtime(staged)
+        return {**status(), "status": "ok", "runtime_root": staged["root"]}
+
+    if prior_status.get("loaded"):
+        _run_launchctl(["bootout", domain, str(path)])
+        for _ in range(20):
+            if not status().get("loaded"):
+                break
+            time.sleep(0.1)
     with tempfile.NamedTemporaryFile(
         mode="wb",
         prefix=f".{path.name}.",
@@ -284,6 +312,14 @@ def install(
     bootstrap = _run_launchctl(["bootstrap", domain, str(path)])
     if bootstrap.returncode != 0:
         _rollback_staged_runtime(staged)
+        if prior_payload is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_bytes(prior_payload)
+            os.chmod(path, 0o600)
+            if prior_status.get("loaded"):
+                _run_launchctl(["bootstrap", domain, str(path)])
+                _run_launchctl(["kickstart", "-k", f"{domain}/{LABEL}"])
         return {
             **status(),
             "status": "error",
