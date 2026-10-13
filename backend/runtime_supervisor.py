@@ -60,6 +60,7 @@ DEFAULT_BACKEND_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_BACKEND_LOG_BACKUPS = 3
 OPERATOR_READY_RUNTIME_STATE = "healthy"
 OPERATOR_READY_STARTUP_PHASES = frozenset({"warm"})
+BACKEND_LIVENESS_SCHEMA = "cleanhouse.backend_liveness.v1"
 SELF_DEVIATION_BLOCK_TYPES = frozenset({
     "runtime_memory_ceiling_exceeded",
     "runtime_cpu_sustained_exceeded",
@@ -685,13 +686,18 @@ def _probe_port(host: str, port: int, timeout: float = 0.25) -> bool:
 
 
 def _probe_ready(host: str, port: int, timeout: float = 1.0) -> dict[str, Any]:
-    url = f"http://{host}:{port}/cleanhouse/status?ready=1"
+    url = f"http://{host}:{port}/health"
     started = time.monotonic()
     try:
         with urlopen(Request(url, headers={"User-Agent": "CleanHouse Runtime Supervisor"}), timeout=timeout) as response:
             body = response.read()
             payload = json.loads(body.decode("utf-8") or "{}")
-            ok = response.getcode() == 200 and payload.get("ready") is True
+            ok = (
+                response.getcode() == 200
+                and payload.get("schema") == BACKEND_LIVENESS_SCHEMA
+                and payload.get("status") == "ok"
+                and payload.get("alive") is True
+            )
             return {
                 "status": "ok" if ok else "failed",
                 "http_status": response.getcode(),

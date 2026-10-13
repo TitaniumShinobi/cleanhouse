@@ -1526,6 +1526,48 @@ def _login_report_http_status(payload: dict[str, Any]) -> int:
     return 200
 
 
+def _runtime_readiness_payload() -> dict[str, Any]:
+    try:
+        from backend import runtime_supervisor
+
+        payload = runtime_supervisor.readiness_payload()
+        if not isinstance(payload, dict):
+            raise ValueError("runtime readiness payload is not an object")
+        contract = payload.get("readiness_contract")
+        if not isinstance(contract, dict):
+            raise ValueError("runtime readiness contract is missing")
+        if contract.get("schema") != "cleanhouse.runtime_operator_readiness.v1":
+            raise ValueError("runtime readiness contract schema is invalid")
+        if not isinstance(contract.get("satisfied"), bool):
+            raise ValueError("runtime readiness contract result is invalid")
+        if not isinstance(payload.get("ready"), bool):
+            raise ValueError("runtime readiness result is invalid")
+        if payload["ready"] is not contract["satisfied"]:
+            raise ValueError("runtime readiness result disagrees with its contract")
+        return dict(payload)
+    except Exception as exc:
+        return {
+            "status": "degraded",
+            "ready": False,
+            "bootstrap_ready": False,
+            "runtime_state": "unavailable",
+            "reason_codes": ["runtime_supervisor_unavailable"],
+            "readiness_contract": {
+                "schema": "cleanhouse.runtime_operator_readiness.v1",
+                "satisfied": False,
+                "checks": {"evaluation_available": False},
+                "failed_checks": ["evaluation_available"],
+            },
+            "runtime": {
+                "status": "unavailable",
+                "runtime_state": "unavailable",
+                "operator_ready": False,
+                "reason_codes": ["runtime_supervisor_unavailable"],
+            },
+            "error": exc.__class__.__name__,
+        }
+
+
 @bp.after_request
 def _add_local_cors_headers(response):
     origin = request.headers.get("Origin")
@@ -1538,50 +1580,44 @@ def _add_local_cors_headers(response):
     return response
 
 
+@bp.route("/health", methods=["GET"])
+def health():
+    from backend import runtime_supervisor
+
+    return jsonify({
+        "schema": runtime_supervisor.BACKEND_LIVENESS_SCHEMA,
+        "status": "ok",
+        "alive": True,
+        "pid": os.getpid(),
+        "boot_id": os.getenv("CLEANHOUSE_BACKEND_BOOT_ID") or None,
+    })
+
+
 @bp.route("/cleanhouse/status", methods=["GET"])
 def status():
     if request.args.get("ready", "").lower() in {"1", "true", "yes", "on"}:
-        try:
-            from backend import runtime_supervisor
-
-            runtime_payload = runtime_supervisor.current_runtime_payload(probe=False)
-        except Exception:
-            runtime_payload = _fast_runtime_payload()
-        runtime_state = str(runtime_payload.get("runtime_state", "unknown") or "unknown")
-        backend_payload = runtime_payload.get("backend") if isinstance(runtime_payload.get("backend"), dict) else {}
-        blocked_payload = runtime_payload.get("blocked_recovery") if isinstance(runtime_payload.get("blocked_recovery"), dict) else {}
-        self_deviation_blocked = str(blocked_payload.get("type") or "") in {
-            "runtime_memory_ceiling_exceeded",
-            "runtime_cpu_sustained_exceeded",
-            "runtime_stuck_watchdog",
-            "investigation_timeout",
-        }
-        runtime_ready = bool(backend_payload.get("alive")) and not self_deviation_blocked
+        payload = _runtime_readiness_payload()
+        runtime_payload = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
         event_spine = _event_spine_payload()
         event_surfaces = _event_spine_surfaces(event_spine)
         collector_health = _event_spine_collector_health(event_surfaces)
-        return jsonify({
-            "status": "ok" if runtime_ready else "degraded",
-            "ready": runtime_ready,
-            "runtime": runtime_payload,
-            "reason_codes": [str(code) for code in runtime_payload.get("reason_codes", []) if str(code)],
-            "operator_warning": (
-                "CleanHouse is unhealthy: runtime memory ceiling exceeded. Backend stopped. Evidence and receipt available."
-                if "runtime_memory_ceiling_exceeded" in set(runtime_payload.get("reason_codes", []))
-                else ""
-            ),
-            "event_spine": {
-                "status": event_spine.get("status", "unknown"),
-                "queue": event_spine.get("queue", {}),
-                "last_event_at": event_spine.get("last_event_at"),
-                "last_event_id": event_spine.get("last_event_id"),
-                "last_event_type": event_spine.get("last_event_type"),
-                "surfaces": event_surfaces,
-                "collector_health": collector_health,
-                "degradation": event_spine.get("degradation", {"degraded": False, "reasons": []}),
-            },
-            "notification_policy_contract": _notification_policy_contract(),
-        })
+        payload["operator_warning"] = (
+            "CleanHouse is unhealthy: runtime memory ceiling exceeded. Backend stopped. Evidence and receipt available."
+            if "runtime_memory_ceiling_exceeded" in set(runtime_payload.get("reason_codes", []))
+            else ""
+        )
+        payload["event_spine"] = {
+            "status": event_spine.get("status", "unknown"),
+            "queue": event_spine.get("queue", {}),
+            "last_event_at": event_spine.get("last_event_at"),
+            "last_event_id": event_spine.get("last_event_id"),
+            "last_event_type": event_spine.get("last_event_type"),
+            "surfaces": event_surfaces,
+            "collector_health": collector_health,
+            "degradation": event_spine.get("degradation", {"degraded": False, "reasons": []}),
+        }
+        payload["notification_policy_contract"] = _notification_policy_contract()
+        return jsonify(payload)
     if _fast_operator_api_enabled() and not _truthy_arg("full"):
         return jsonify(_fast_status_payload())
 
