@@ -1,11 +1,38 @@
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from backend import runtime_env
 
 
 class RuntimeEnvTests(unittest.TestCase):
+    def test_candidates_prefer_managed_runtime_before_active_and_repo_environments(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_PYTHON": "",
+                "CLEANHOUSE_RUNTIME_DIR": "/managed/runtime",
+            },
+            clear=False,
+        ), patch.object(runtime_env.sys, "executable", "/active/python3"), patch.object(
+            runtime_env.shutil, "which", return_value="/system/python3"
+        ):
+            candidates = runtime_env._candidate_entries(Path("/repo"))
+
+        self.assertEqual(
+            [candidate["source"] for candidate in candidates],
+            [
+                "managed_runtime",
+                "active_sys_executable",
+                "repo_cleanhouse_env",
+                "repo_dot_venv",
+                "system_python3",
+            ],
+        )
+        self.assertEqual(candidates[0]["path"], "/managed/runtime/python/bin/python3")
+
     def test_resolve_prefers_env_override_when_valid(self):
         candidates = [
             {"source": "env_override", "path": "/override/python3"},
@@ -95,10 +122,42 @@ class RuntimeEnvTests(unittest.TestCase):
             runtime_env, "probe_interpreter", return_value=result
         ):
             resolved = runtime_env.resolve_interpreter(Path("/repo"))
-        self.assertEqual(resolved["status"], "supervisor_only")
-        self.assertTrue(resolved["supervisor_compatible"])
+        self.assertEqual(resolved["status"], "unavailable")
+        self.assertIsNone(resolved["selected_path"])
+        self.assertFalse(resolved["supervisor_compatible"])
         self.assertFalse(resolved["backend_compatible"])
+        self.assertEqual(resolved["failures"][0]["reason"], "backend_dependencies_unavailable")
         self.assertEqual(resolved["attempts"][0]["failure_reason"], "backend_dependencies_unavailable")
+
+    def test_probe_interpreter_uses_long_default_timeout(self):
+        result = SimpleNamespace(
+            returncode=0,
+            stdout='{"errors": [], "runtime_supervisor_importable": true, "flask_importable": true, "backend_server_importable": true}',
+            stderr="",
+        )
+        with patch.dict(os.environ, {"CLEANHOUSE_INTERPRETER_PROBE_TIMEOUT_SECONDS": ""}, clear=False), patch.object(
+            runtime_env.Path, "exists", return_value=True
+        ), patch.object(runtime_env.os, "access", return_value=True), patch.object(
+            runtime_env.subprocess, "run", return_value=result
+        ) as run_mock:
+            runtime_env.probe_interpreter("/repo/.venv/bin/python3", Path("/repo"))
+
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], runtime_env.DEFAULT_INTERPRETER_PROBE_TIMEOUT_SECONDS)
+
+    def test_probe_interpreter_honors_timeout_override(self):
+        result = SimpleNamespace(
+            returncode=0,
+            stdout='{"errors": [], "runtime_supervisor_importable": true, "flask_importable": true, "backend_server_importable": true}',
+            stderr="",
+        )
+        with patch.dict(os.environ, {"CLEANHOUSE_INTERPRETER_PROBE_TIMEOUT_SECONDS": "7"}, clear=False), patch.object(
+            runtime_env.Path, "exists", return_value=True
+        ), patch.object(runtime_env.os, "access", return_value=True), patch.object(
+            runtime_env.subprocess, "run", return_value=result
+        ) as run_mock:
+            runtime_env.probe_interpreter("/repo/.venv/bin/python3", Path("/repo"))
+
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 7.0)
 
 
 if __name__ == "__main__":

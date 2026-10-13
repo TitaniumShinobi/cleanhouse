@@ -13,12 +13,17 @@ from typing import Any
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_INTERPRETER_PROBE_TIMEOUT_SECONDS = 30.0
 
 
 def _candidate_entries(repo_root: Path | None = None) -> list[dict[str, str]]:
     root = repo_root or REPO_ROOT
+    runtime_root = Path(
+        os.getenv("CLEANHOUSE_RUNTIME_DIR", str(Path.home() / ".cleanhouse" / "runtime"))
+    ).expanduser()
     candidates = [
         {"source": "env_override", "path": os.getenv("CLEANHOUSE_PYTHON", "").strip()},
+        {"source": "managed_runtime", "path": str(runtime_root / "python" / "bin" / "python3")},
         {"source": "active_sys_executable", "path": (sys.executable or "").strip()},
         {"source": "repo_cleanhouse_env", "path": str(root / "cleanhouse_env" / "bin" / "python3")},
         {"source": "repo_dot_venv", "path": str(root / ".venv" / "bin" / "python3")},
@@ -40,28 +45,29 @@ def _candidate_entries(repo_root: Path | None = None) -> list[dict[str, str]]:
 
 def _probe_code(repo_root: Path) -> str:
     return (
-        "import importlib, json, sys\n"
+        "import importlib, importlib.util, json, os, sys\n"
         f"sys.path.insert(0, {str(repo_root)!r})\n"
         "result = {'runtime_supervisor_importable': False, 'flask_importable': False, 'backend_server_importable': False, 'errors': []}\n"
         "try:\n"
-        "    importlib.import_module('backend.runtime_supervisor')\n"
-        "    result['runtime_supervisor_importable'] = True\n"
+            "    importlib.import_module('backend.runtime_supervisor')\n"
+            "    result['runtime_supervisor_importable'] = True\n"
         "except Exception as exc:\n"
-        "    result['errors'].append({'component': 'backend.runtime_supervisor', 'error': f'{exc.__class__.__name__}: {exc}'})\n"
+            "    result['errors'].append({'component': 'backend.runtime_supervisor', 'error': f'{exc.__class__.__name__}: {exc}'})\n"
         "try:\n"
-        "    importlib.import_module('flask')\n"
-        "    result['flask_importable'] = True\n"
+        "    result['flask_importable'] = importlib.util.find_spec('flask') is not None\n"
+        "    if not result['flask_importable']:\n"
+        "        result['errors'].append({'component': 'flask', 'error': 'ModuleNotFoundError: No module named \\'flask\\''})\n"
         "except Exception as exc:\n"
-        "    result['errors'].append({'component': 'flask', 'error': f'{exc.__class__.__name__}: {exc}'})\n"
+            "    result['errors'].append({'component': 'flask', 'error': f'{exc.__class__.__name__}: {exc}'})\n"
         "try:\n"
-        "    importlib.import_module('backend.server')\n"
-        "    result['backend_server_importable'] = True\n"
+        "    result['backend_server_importable'] = importlib.util.find_spec('backend.server') is not None\n"
+        "    if not result['backend_server_importable']:\n"
+        "        result['errors'].append({'component': 'backend.server', 'error': 'ModuleNotFoundError: No module named \\'backend.server\\''})\n"
         "except Exception as exc:\n"
-        "    result['errors'].append({'component': 'backend.server', 'error': f'{exc.__class__.__name__}: {exc}'})\n"
+            "    result['errors'].append({'component': 'backend.server', 'error': f'{exc.__class__.__name__}: {exc}'})\n"
         "print(json.dumps(result, sort_keys=True))\n"
         "sys.stdout.flush()\n"
         "sys.stderr.flush()\n"
-        "import os\n"
         "os._exit(0)\n"
     )
 
@@ -88,11 +94,14 @@ def probe_interpreter(path: str, repo_root: Path | None = None) -> dict[str, Any
         entry["failure_reason"] = "not_executable"
         return entry
     entry["executable"] = True
-    timeout_seconds_raw = os.getenv("CLEANHOUSE_INTERPRETER_PROBE_TIMEOUT_SECONDS", "60").strip()
+    timeout_seconds_raw = os.getenv(
+        "CLEANHOUSE_INTERPRETER_PROBE_TIMEOUT_SECONDS",
+        str(DEFAULT_INTERPRETER_PROBE_TIMEOUT_SECONDS),
+    ).strip()
     try:
-        timeout_seconds = max(5.0, min(120.0, float(timeout_seconds_raw or "60")))
+        timeout_seconds = max(2.0, min(30.0, float(timeout_seconds_raw or DEFAULT_INTERPRETER_PROBE_TIMEOUT_SECONDS)))
     except ValueError:
-        timeout_seconds = 60.0
+        timeout_seconds = DEFAULT_INTERPRETER_PROBE_TIMEOUT_SECONDS
     try:
         completed = subprocess.run(
             [entry["path"], "-c", _probe_code(root)],
@@ -148,9 +157,7 @@ def resolve_interpreter(repo_root: Path | None = None) -> dict[str, Any]:
     for candidate in _candidate_entries(root):
         attempt = {"source": candidate["source"], **probe_interpreter(candidate["path"], root)}
         attempts.append(attempt)
-        if selected is None and attempt["status"] in {"runnable", "supervisor_only"}:
-            selected = attempt
-        if attempt["status"] == "runnable":
+        if attempt.get("runnable") is True:
             selected = attempt
             break
     failures = [
@@ -161,7 +168,7 @@ def resolve_interpreter(repo_root: Path | None = None) -> dict[str, Any]:
             "errors": item.get("errors", []),
         }
         for item in attempts
-        if item["status"] == "unusable"
+        if not item.get("runnable")
     ]
     status = "unavailable"
     if selected is not None:
@@ -191,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
     payload = resolve_interpreter()
     if args.command == "resolve":
         _print_payload(payload)
-        return 0 if payload.get("supervisor_compatible") else 1
+        return 0 if payload.get("runnable") else 1
     if args.command == "print-path":
         selected = str(payload.get("selected_path") or "").strip()
         if not selected:

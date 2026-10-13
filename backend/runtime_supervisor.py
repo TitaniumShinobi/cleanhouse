@@ -43,7 +43,7 @@ VALID_RUNTIME_STATES = frozenset({
     "stale_pid",
 })
 
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 3333
 LAUNCH_AGENT_LABEL = "org.cleanhouse.runtime"
 HEARTBEAT_INTERVAL_SECONDS = 5.0
@@ -56,6 +56,8 @@ DEFAULT_RUNTIME_DEGRADED_RSS_MB = 1536.0
 DEFAULT_RUNTIME_MAX_RSS_MB = 3072.0
 DEFAULT_RUNTIME_CPU_DEGRADED_PERCENT = 250.0
 CPU_DEGRADED_SAMPLE_LIMIT = 3
+DEFAULT_BACKEND_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_BACKEND_LOG_BACKUPS = 3
 SELF_DEVIATION_BLOCK_TYPES = frozenset({
     "runtime_memory_ceiling_exceeded",
     "runtime_cpu_sustained_exceeded",
@@ -65,6 +67,19 @@ SELF_DEVIATION_BLOCK_TYPES = frozenset({
     "readiness_recovery_exhausted",
     "ensure_timeout",
     "runtime_unresponsive",
+})
+STARTUP_HARD_SELF_DEVIATION_TYPES = frozenset({
+    "runtime_memory_ceiling_exceeded",
+    "runtime_cpu_sustained_exceeded",
+    "restart_budget_exhausted",
+    "readiness_recovery_exhausted",
+    "manual_approval_required",
+})
+STARTUP_RECOVERABLE_SELF_DEVIATION_TYPES = frozenset({
+    "runtime_unresponsive",
+    "runtime_memory_degraded_threshold_exceeded",
+    "readiness_probe_failed",
+    "degraded_state",
 })
 SELF_DEVIATION_ACTIONS = {
     "runtime_memory_ceiling_exceeded": {
@@ -262,6 +277,19 @@ def _pid_info(pid: int) -> dict[str, Any]:
     }
 
 
+def _pid_owned_by_cleanhouse(pid: Any, *, expected_supervisor: bool = False) -> bool:
+    try:
+        value = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if value <= 0 or not _pid_alive(value):
+        return False
+    info = _pid_info(value)
+    if expected_supervisor:
+        return "backend.runtime_supervisor" in str(info.get("command") or "")
+    return _is_cleanhouse_owned_process(info)
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name, "").strip()
     if not raw:
@@ -271,6 +299,17 @@ def _env_float(name: str, default: float) -> float:
     except ValueError:
         return default
     return value if value > 0 else default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
 
 
 def runtime_guard_config() -> dict[str, Any]:
@@ -326,15 +365,209 @@ def _pid_resource_usage(pid: Any) -> dict[str, Any]:
     }
 
 
+def _active_self_deviation_block_reasons(state: dict[str, Any] | None) -> set[str]:
+    state = state or {}
+    blocked = state.get("blocked_recovery")
+    blocked_type = str(blocked.get("type") or "") if isinstance(blocked, dict) else ""
+    resource_guard = state.get("resource_guard") if isinstance(state.get("resource_guard"), dict) else {}
+    reason_codes = {
+        str(reason)
+        for reason in [
+            *(state.get("reason_codes") or []),
+            *(resource_guard.get("reason_codes") or []),
+            blocked_type,
+        ]
+        if str(reason)
+    }
+    active = set(reason_codes.intersection(SELF_DEVIATION_BLOCK_TYPES))
+    if blocked_type in SELF_DEVIATION_BLOCK_TYPES:
+        active.add(blocked_type)
+    if resource_guard.get("action") in {"hard_stop", "block_restart"}:
+        active.update(str(reason) for reason in resource_guard.get("reason_codes", []) if str(reason))
+        if not active:
+            active.add("runtime_resource_guard_block")
+    return active
+
+
 def _self_deviation_block_active(state: dict[str, Any] | None) -> bool:
-    blocked = (state or {}).get("blocked_recovery")
-    if isinstance(blocked, dict) and str(blocked.get("type") or "") in SELF_DEVIATION_BLOCK_TYPES:
-        return True
+    return bool(_active_self_deviation_block_reasons(state))
+
+
+def _clear_stale_self_deviation_restart_block(state: dict[str, Any]) -> dict[str, Any]:
+    if _self_deviation_block_active(state):
+        return state
+    reason_codes = [
+        str(reason)
+        for reason in state.get("reason_codes", [])
+        if str(reason) and str(reason) != "runtime_self_deviation_restart_blocked"
+    ]
+    state["reason_codes"] = sorted(set(reason_codes))
+    blocked = state.get("blocked_recovery")
+    if isinstance(blocked, dict) and str(blocked.get("type") or "") == "runtime_self_deviation_restart_blocked":
+        state["blocked_recovery"] = {}
+    last_start = state.get("last_start_attempt")
+    if isinstance(last_start, dict) and str(last_start.get("failure_reason") or "") == "runtime_self_deviation_restart_blocked":
+        state["last_start_attempt"] = {
+            "status": "cleared",
+            "attempted_at": _now_iso(),
+            "failure_reason": None,
+        }
+    return state
+
+
+def _self_deviation_review_status(self_deviation: dict[str, Any]) -> str | None:
+    if not self_deviation.get("id"):
+        return None
+    explicit = str(self_deviation.get("review_status") or "").strip()
+    if explicit:
+        return explicit
+    status = str(self_deviation.get("status") or "open")
+    if status in {"acknowledged", "acknowledged_for_restart"}:
+        return "acknowledged"
+    if status in {"resolved", "closed"}:
+        return "resolved"
+    return "needs_review"
+
+
+def _self_deviation_runtime_impact(state: dict[str, Any] | None) -> str:
+    state = state or {}
+    self_deviation = state.get("self_deviation")
+    if not isinstance(self_deviation, dict) or not self_deviation.get("id"):
+        return "none"
+    blocked = state.get("blocked_recovery")
+    blocked_type = str(blocked.get("type") or "") if isinstance(blocked, dict) else ""
+    resource_guard = state.get("resource_guard") if isinstance(state.get("resource_guard"), dict) else {}
+    reason_codes = {
+        str(reason)
+        for reason in [
+            *(state.get("reason_codes") or []),
+            *(resource_guard.get("reason_codes") or []),
+            blocked_type,
+        ]
+        if str(reason)
+    }
+    if state.get("foreign_listener_pids"):
+        return "port_blocked"
+    listener_pids = list(state.get("listener_pids") or [])
+    runtime_active = bool(state.get("backend_alive")) or bool(state.get("supervisor_alive"))
+    current_blocking = (
+        blocked_type in SELF_DEVIATION_BLOCK_TYPES
+        or reason_codes.intersection(SELF_DEVIATION_BLOCK_TYPES)
+        or resource_guard.get("action") in {"hard_stop", "block_restart"}
+    )
+    runtime_state = str(state.get("runtime_state") or "")
+    if runtime_active and current_blocking and (listener_pids or runtime_state in {"degraded", "unhealthy"}):
+        return "active_blocking"
+    if runtime_active:
+        return "monitoring"
+    return "historical_record"
+
+
+def _self_deviation_message(review_status: str | None, runtime_impact: str) -> str:
+    if runtime_impact == "active_blocking":
+        return "Current CleanHouse runtime state is unsafe; pause new investigations until the live process state is clean."
+    if runtime_impact == "port_blocked":
+        return "CleanHouse startup is blocked by the current port/process state, not by historical self-deviation evidence."
+    if review_status == "acknowledged":
+        return "CleanHouse self-deviation evidence has been acknowledged and remains available for history."
+    if runtime_impact in {"historical_record", "monitoring"}:
+        return "Previous CleanHouse self-deviation evidence remains available for review; it does not block clean startup while the port/process state is safe."
+    return ""
+
+
+def _self_deviation_summary(state: dict[str, Any] | None) -> dict[str, Any]:
     self_deviation = (state or {}).get("self_deviation")
-    if isinstance(self_deviation, dict) and self_deviation.get("id") and str(self_deviation.get("status") or "open") == "open":
-        return True
-    reasons = {str(reason) for reason in (state or {}).get("reason_codes", []) if str(reason)}
-    return bool(reasons.intersection(SELF_DEVIATION_BLOCK_TYPES))
+    if not isinstance(self_deviation, dict):
+        self_deviation = {}
+    finding = self_deviation.get("finding")
+    if not isinstance(finding, dict):
+        finding = {}
+    raw_status = self_deviation.get("status") or ("open" if self_deviation.get("id") else None)
+    review_status = _self_deviation_review_status(self_deviation)
+    runtime_impact = _self_deviation_runtime_impact(state)
+    blocks_startup = runtime_impact in {"active_blocking", "port_blocked"}
+    blocks_investigations = runtime_impact == "active_blocking"
+    return {
+        "id": self_deviation.get("id"),
+        "status": raw_status,
+        "raw_status": raw_status,
+        "review_status": review_status,
+        "runtime_impact": runtime_impact,
+        "restart_policy": "ports_and_processes",
+        "blocks_startup": blocks_startup,
+        "blocks_investigations": blocks_investigations,
+        "message": _self_deviation_message(review_status, runtime_impact),
+        "finding": finding,
+        "title": finding.get("title") or self_deviation.get("title"),
+        "next_action": self_deviation.get("next_action") or finding.get("next_action"),
+        "evidence_artifact_path": self_deviation.get("evidence_artifact_path"),
+        "receipt_artifact_path": self_deviation.get("receipt_artifact_path"),
+        "evidence_ref": self_deviation.get("evidence_ref"),
+        "receipt_ref": self_deviation.get("receipt_ref"),
+        "reason_codes": list(self_deviation.get("reason_codes") or (state or {}).get("reason_codes") or []),
+        "acknowledged_at": self_deviation.get("acknowledged_at"),
+    }
+
+
+def _startup_self_deviation_classification(state: dict[str, Any]) -> dict[str, Any]:
+    self_deviation = state.get("self_deviation")
+    blocked_recovery = state.get("blocked_recovery")
+    if not isinstance(self_deviation, dict) or not self_deviation.get("id"):
+        return {"status": "none", "reason_codes": []}
+    if str(self_deviation.get("status") or "open") != "open":
+        return {"status": "none", "reason_codes": []}
+    if not _self_deviation_block_active(state):
+        return {"status": "none", "reason_codes": []}
+
+    finding = self_deviation.get("finding") if isinstance(self_deviation.get("finding"), dict) else {}
+    reason_codes = {
+        str(reason)
+        for reason in [
+            *(state.get("reason_codes") or []),
+            *(self_deviation.get("reason_codes") or []),
+            *(finding.get("reason_codes") or []),
+            str(self_deviation.get("mitigation_action") or ""),
+            str(finding.get("mitigation_action") or ""),
+        ]
+        if str(reason)
+    }
+    if isinstance(blocked_recovery, dict):
+        reason_codes.add(str(blocked_recovery.get("type") or ""))
+    reason_codes.update(_active_self_deviation_block_reasons(state))
+
+    startup_hard_types = {
+        "manual_approval_required",
+        "restart_budget_exhausted",
+        "readiness_recovery_exhausted",
+    }
+    if reason_codes.intersection(startup_hard_types):
+        return {"status": "hard_blocking", "reason_codes": sorted(reason_codes)}
+    restart_cleanly_allowed = not bool(state.get("listener_pids")) and not bool(state.get("foreign_listener_pids"))
+    if restart_cleanly_allowed:
+        return {"status": "recoverable", "reason_codes": sorted(reason_codes)}
+    return {"status": "hard_blocking", "reason_codes": sorted(reason_codes)}
+
+
+def _startup_self_deviation_recovery_allowed(state: dict[str, Any]) -> bool:
+    allowed = state.get("startup_recovery_allowed")
+    self_deviation = state.get("self_deviation")
+    if not isinstance(allowed, dict) or not isinstance(self_deviation, dict):
+        return False
+    if not allowed.get("self_deviation_id") or str(allowed.get("self_deviation_id")) != str(self_deviation.get("id") or ""):
+        return False
+    finding = self_deviation.get("finding") if isinstance(self_deviation.get("finding"), dict) else {}
+    reason_codes = {
+        str(reason)
+        for reason in [
+            *(allowed.get("reason_codes") or []),
+            *(self_deviation.get("reason_codes") or []),
+            *(finding.get("reason_codes") or []),
+            str(self_deviation.get("mitigation_action") or ""),
+            str(finding.get("mitigation_action") or ""),
+        ]
+        if str(reason)
+    }
+    return bool(reason_codes)
 
 
 def _allow_self_deviation_restart() -> bool:
@@ -346,8 +579,14 @@ def _acknowledge_self_deviation_for_restart(state: dict[str, Any]) -> dict[str, 
     if isinstance(self_deviation, dict) and self_deviation.get("id"):
         updated = dict(self_deviation)
         updated["status"] = "acknowledged_for_restart"
+        updated["review_status"] = "acknowledged"
         updated["acknowledged_at"] = _now_iso()
         updated["next_action"] = "Restart confirmed by operator; continue monitoring for a new runtime self-deviation."
+        finding = updated.get("finding")
+        if isinstance(finding, dict):
+            finding = dict(finding)
+            finding["review_status"] = "acknowledged"
+            updated["finding"] = finding
         state["self_deviation"] = updated
     if isinstance(state.get("blocked_recovery"), dict) and str(state["blocked_recovery"].get("type") or "") in SELF_DEVIATION_BLOCK_TYPES:
         state["blocked_recovery"] = {}
@@ -450,7 +689,7 @@ def _probe_ready(host: str, port: int, timeout: float = 1.0) -> dict[str, Any]:
         with urlopen(Request(url, headers={"User-Agent": "CleanHouse Runtime Supervisor"}), timeout=timeout) as response:
             body = response.read()
             payload = json.loads(body.decode("utf-8") or "{}")
-            ok = response.getcode() == 200 and payload.get("status") == "ok" and payload.get("ready") is True
+            ok = response.getcode() == 200 and payload.get("ready") is True
             return {
                 "status": "ok" if ok else "failed",
                 "http_status": response.getcode(),
@@ -490,6 +729,12 @@ def _base_state(host: str, port: int, previous: dict[str, Any] | None = None) ->
         "backend_pid": previous.get("backend_pid"),
         "boot_id": previous.get("boot_id"),
         "start_time": previous.get("start_time"),
+        "startup_phase": previous.get("startup_phase"),
+        "startup_started_at": previous.get("startup_started_at"),
+        "bootstrap_started_at": previous.get("bootstrap_started_at"),
+        "bootstrap_ready_at": previous.get("bootstrap_ready_at"),
+        "warmup_started_at": previous.get("warmup_started_at"),
+        "warmup_ready_at": previous.get("warmup_ready_at"),
         "restart_count": int(previous.get("restart_count", 0) or 0),
         "heartbeat_at": previous.get("heartbeat_at"),
         "heartbeat_sequence": int(previous.get("heartbeat_sequence", 0) or 0),
@@ -497,6 +742,7 @@ def _base_state(host: str, port: int, previous: dict[str, Any] | None = None) ->
         "interpreter": dict(previous.get("interpreter") or {}),
         "last_start_attempt": dict(previous.get("last_start_attempt") or {}),
         "blocked_recovery": dict(previous.get("blocked_recovery") or {}),
+        "startup_recovery_allowed": dict(previous.get("startup_recovery_allowed") or {}),
         "listener_pids": list(previous.get("listener_pids") or []),
         "listeners": list(previous.get("listeners") or []),
         "recent_recovery_receipts": list(previous.get("recent_recovery_receipts") or []),
@@ -526,6 +772,11 @@ def _interpreter_summary(resolved: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _cached_interpreter_summary(state: dict[str, Any] | None) -> dict[str, Any]:
+    interpreter = (state or {}).get("interpreter")
+    return dict(interpreter) if isinstance(interpreter, dict) else {}
+
+
 def _blocked_recovery_payload(kind: str, reason: str, *, details: dict[str, Any] | None = None, receipt_id: str | None = None) -> dict[str, Any]:
     payload = {
         "status": "blocked",
@@ -537,6 +788,30 @@ def _blocked_recovery_payload(kind: str, reason: str, *, details: dict[str, Any]
     if receipt_id:
         payload["receipt_id"] = receipt_id
     return payload
+
+
+def _launch_ready(state: dict[str, Any] | None) -> bool:
+    state = state or {}
+    runtime_state = str(state.get("runtime_state") or "unknown")
+    backend_alive = bool(state.get("backend_alive"))
+    active_block = _self_deviation_block_active(state)
+    hard_resource_block = _runtime_guard_hard_stop_active(state)
+    foreign_listener = bool(state.get("foreign_listener_pids")) and not bool(state.get("owned_listener_pids"))
+    probe_status = str((state.get("last_probe") or {}).get("status") or "")
+    bootstrap_ready = (
+        bool(state.get("bootstrap_ready_at"))
+        or bool(state.get("warmup_started_at"))
+        or bool(state.get("warmup_ready_at"))
+        or (runtime_state == "healthy" and probe_status == "ok")
+    )
+    return bool(
+        backend_alive
+        and bootstrap_ready
+        and not active_block
+        and not hard_resource_block
+        and not foreign_listener
+        and runtime_state not in {"unhealthy", "stale_pid", "orphaned_listener"}
+    )
 
 
 def _same_blocked_recovery(previous_state: dict[str, Any] | None, action: str) -> bool:
@@ -595,6 +870,7 @@ def persist_runtime_self_deviation(
         "id": "",
         "title": "CleanHouse became the suspicious process",
         "status": "open",
+        "review_status": "needs_review",
         "severity": "High",
         "confidence": 95,
         "evidence_strength": "Strong",
@@ -621,6 +897,9 @@ def persist_runtime_self_deviation(
         "observed_behavior": observed_behavior,
         "comparison_result": comparison_result,
         "result": finding["result"],
+        "review_status": "needs_review",
+        "runtime_impact": "active_blocking",
+        "restart_policy": "ports_and_processes",
         "next_action": next_action,
         "mitigation_action": mitigation_action,
         "evidence": evidence_payload,
@@ -658,6 +937,9 @@ def persist_runtime_self_deviation(
         "observed_behavior": core["observed_behavior"],
         "comparison_result": core["comparison_result"],
         "result": core["result"],
+        "review_status": core["review_status"],
+        "runtime_impact": core["runtime_impact"],
+        "restart_policy": core["restart_policy"],
         "next_action": core["next_action"],
         "mitigation_action": core["mitigation_action"],
         "raw_evidence": evidence_payload,
@@ -671,6 +953,9 @@ def persist_runtime_self_deviation(
         "observed_behavior": core["observed_behavior"],
         "comparison_result": core["comparison_result"],
         "result": core["result"],
+        "review_status": core["review_status"],
+        "runtime_impact": core["runtime_impact"],
+        "restart_policy": core["restart_policy"],
         "next_action": core["next_action"],
         "mitigation_action": core["mitigation_action"],
         "evidence_artifact_path": str(evidence_path),
@@ -684,6 +969,9 @@ def persist_runtime_self_deviation(
     return {
         "id": artifact_id,
         "status": "open",
+        "review_status": "needs_review",
+        "runtime_impact": "active_blocking",
+        "restart_policy": "ports_and_processes",
         "finding": finding,
         "evidence_ref": evidence_ref,
         "receipt_ref": receipt_ref,
@@ -792,48 +1080,72 @@ def classify_state(
     backend_pid = state.get("backend_pid")
     supervisor_pid = state.get("supervisor_pid")
     backend_alive = _pid_alive(backend_pid)
+    backend_owned = backend_alive and _pid_owned_by_cleanhouse(backend_pid)
     supervisor_alive = _pid_alive(supervisor_pid)
+    supervisor_owned = supervisor_alive and _pid_owned_by_cleanhouse(supervisor_pid, expected_supervisor=True)
+    runtime_state = "unhealthy"
 
     pids = listener_pids(port, host)
     listeners = [_pid_info(pid) for pid in pids]
     owned_listener_pids = [item["pid"] for item in listeners if _is_cleanhouse_owned_process(item)]
     foreign_listener_pids = [item["pid"] for item in listeners if not _is_cleanhouse_owned_process(item)]
+
+    if (
+        owned_listener_pids
+        and not foreign_listener_pids
+        and len(owned_listener_pids) == 1
+        and (not backend_pid or not _pid_alive(backend_pid) or int(backend_pid) not in pids)
+    ):
+        backend_pid = owned_listener_pids[0]
+        state["backend_pid"] = backend_pid
+        backend_alive = _pid_alive(backend_pid)
+        backend_owned = backend_alive and _pid_owned_by_cleanhouse(backend_pid)
     ready_probe = _probe_ready(host, port) if probe and pids else {"status": "skipped"}
     heartbeat_fresh = _heartbeat_fresh(state)
 
-    if backend_pid and not backend_alive:
-        runtime_state = "stale_pid"
-        reasons.add("backend_pid_not_alive")
-    elif supervisor_pid and not supervisor_alive and backend_alive:
-        runtime_state = "stale_pid"
-        reasons.add("supervisor_pid_not_alive")
-    elif pids and (not backend_pid or int(backend_pid) not in pids):
-        runtime_state = "orphaned_listener"
-        reasons.add("listener_pid_mismatch")
-        if owned_listener_pids:
-            reasons.add("cleanhouse_owned_orphan_listener")
-        if foreign_listener_pids:
-            reasons.add("foreign_listener_present")
-    elif backend_alive and pids and ready_probe.get("status") == "ok":
-        if heartbeat_fresh or not state.get("heartbeat_at"):
-            runtime_state = "healthy"
+    if runtime_state != "stale_pid":
+        if pids and (not backend_pid or int(backend_pid) not in pids):
+            runtime_state = "orphaned_listener"
+            reasons.add("listener_pid_mismatch")
+            if owned_listener_pids:
+                reasons.add("cleanhouse_owned_orphan_listener")
+            if foreign_listener_pids:
+                reasons.add("foreign_listener_present")
+        elif backend_pid and not backend_alive:
+            runtime_state = "stale_pid"
+            reasons.add("backend_pid_not_alive")
+        elif backend_pid and not backend_owned:
+            runtime_state = "stale_pid"
+            reasons.add("backend_pid_not_owned")
+        elif supervisor_pid and not supervisor_alive:
+            runtime_state = "stale_pid"
+            reasons.add("supervisor_pid_not_alive")
+        elif supervisor_pid and not supervisor_owned and backend_alive:
+            runtime_state = "stale_pid"
+            reasons.add("supervisor_pid_not_owned")
+        elif backend_alive and backend_owned and pids and (
+            ready_probe.get("status") == "ok"
+            or (not probe and (heartbeat_fresh or not state.get("heartbeat_at")))
+        ):
+            if heartbeat_fresh or not state.get("heartbeat_at"):
+                runtime_state = "healthy"
+            else:
+                runtime_state = "degraded"
+                reasons.add("heartbeat_stale")
+        elif backend_alive and backend_owned:
+            runtime_state = "recovering"
+            if not pids:
+                reasons.add("listener_not_ready")
+            if ready_probe.get("status") == "failed":
+                reasons.add("readiness_probe_failed")
+        elif not supervisor_alive and supervisor_pid:
+            runtime_state = "stale_pid"
+            reasons.add("supervisor_pid_not_alive")
         else:
-            runtime_state = "degraded"
-            reasons.add("heartbeat_stale")
-    elif backend_alive:
-        runtime_state = "recovering"
-        if not pids:
-            reasons.add("listener_not_ready")
-        if ready_probe.get("status") == "failed":
-            reasons.add("readiness_probe_failed")
-    elif not supervisor_alive and supervisor_pid:
-        runtime_state = "stale_pid"
-        reasons.add("supervisor_pid_not_alive")
-    else:
-        runtime_state = "unhealthy"
-        reasons.add("backend_not_running")
+            runtime_state = "unhealthy"
+            reasons.add("backend_not_running")
 
-    resource_usage = _pid_resource_usage(backend_pid) if backend_alive else {"status": "unknown", "reason": "backend_not_running"}
+    resource_usage = _pid_resource_usage(backend_pid) if backend_alive and backend_owned else {"status": "unknown", "reason": "backend_not_running"}
     resource_guard = _runtime_guard_from_usage(previous, resource_usage, reasons)
     guard_reasons = set(resource_guard.get("reason_codes") or [])
     if "runtime_memory_ceiling_exceeded" in guard_reasons:
@@ -974,6 +1286,7 @@ def _backend_env(host: str, port: int, runtime_dir: Path, boot_id: str) -> dict[
     env["CLEANHOUSE_HOST"] = host
     env["CLEANHOUSE_PORT"] = str(port)
     env["CLEANHOUSE_RUNTIME_DIR"] = str(runtime_dir)
+    env["CLEANHOUSE_EVENTS_DB"] = str(runtime_dir / "events" / "events.db")
     env["CLEANHOUSE_SUPERVISED"] = "1"
     env["CLEANHOUSE_BACKEND_BOOT_ID"] = boot_id
     # Safe default: keep native desktop notifications live-only and runtime-gated.
@@ -984,15 +1297,65 @@ def _backend_env(host: str, port: int, runtime_dir: Path, boot_id: str) -> dict[
     env.setdefault("CLEANHOUSE_NATIVE_REMINDERS", "0")
     env.setdefault("CLEANHOUSE_ACTIVE_CONTEXT_RESPONSE_NOTIFICATIONS", "1")
     env.setdefault("CLEANHOUSE_ACTIVE_CONTEXT_FOLLOW", "1")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONUNBUFFERED"] = "1"
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(REPO_ROOT) if not existing else f"{REPO_ROOT}{os.pathsep}{existing}"
     return env
 
 
+def _rotate_backend_log_if_needed(log_path: Path) -> None:
+    max_bytes = _env_int("CLEANHOUSE_BACKEND_LOG_MAX_BYTES", DEFAULT_BACKEND_LOG_MAX_BYTES)
+    backups = _env_int("CLEANHOUSE_BACKEND_LOG_BACKUPS", DEFAULT_BACKEND_LOG_BACKUPS)
+    if max_bytes <= 0 or backups <= 0:
+        return
+    for index in range(1, backups + 1):
+        backup = log_path.with_name(f"{log_path.name}.{index}")
+        tmp_path = None
+        try:
+            if not backup.exists() or backup.stat().st_size <= max_bytes:
+                continue
+            tmp_path = backup.with_suffix(backup.suffix + ".tmp")
+            with backup.open("rb") as source:
+                source.seek(-max_bytes, os.SEEK_END)
+                tail = source.read(max_bytes)
+            tmp_path.write_bytes(tail)
+            tmp_path.replace(backup)
+        except OSError:
+            try:
+                if tmp_path and tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+    try:
+        if not log_path.exists() or log_path.stat().st_size < max_bytes:
+            return
+    except OSError:
+        return
+    oldest = log_path.with_name(f"{log_path.name}.{backups}")
+    try:
+        if oldest.exists():
+            oldest.unlink()
+    except OSError:
+        pass
+    for index in range(backups - 1, 0, -1):
+        source = log_path.with_name(f"{log_path.name}.{index}")
+        target = log_path.with_name(f"{log_path.name}.{index + 1}")
+        try:
+            if source.exists():
+                source.replace(target)
+        except OSError:
+            continue
+    try:
+        log_path.replace(log_path.with_name(f"{log_path.name}.1"))
+    except OSError:
+        pass
+
+
 def _start_backend(interpreter: str, host: str, port: int, runtime_dir: Path, boot_id: str) -> subprocess.Popen:
     log_path = runtime_dir / "backend.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_backend_log_if_needed(log_path)
     log = log_path.open("ab")
     process = subprocess.Popen(
         [interpreter, str(BACKEND_SCRIPT)],
@@ -1011,6 +1374,8 @@ def _supervisor_spawn_env(runtime_dir: Path) -> dict[str, str]:
     env = os.environ.copy()
     env["CLEANHOUSE_RUNTIME_DIR"] = str(runtime_dir)
     env["CLEANHOUSE_SUPERVISOR_BOOT_ID"] = uuid.uuid4().hex
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["PYTHONUNBUFFERED"] = "1"
     env.pop("CLEANHOUSE_RUNTIME_ALLOW_AFTER_SELF_DEVIATION", None)
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(REPO_ROOT) if not existing else f"{REPO_ROOT}{os.pathsep}{existing}"
@@ -1041,6 +1406,11 @@ def _spawn_supervisor_process(interpreter: str, host: str, port: int, runtime_di
     return process
 
 
+def _resolve_supervisor_boot_interpreter(_previous: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Resolve against the supervisor's current runtime, never stale state."""
+    return _interpreter_summary(runtime_env.resolve_interpreter(REPO_ROOT))
+
+
 def supervisor_loop(host: str, port: int, runtime_dir: Path | None = None) -> int:
     rdir = runtime_dir or _runtime_dir()
     rdir.mkdir(parents=True, exist_ok=True)
@@ -1063,7 +1433,7 @@ def supervisor_loop(host: str, port: int, runtime_dir: Path | None = None) -> in
         "boot_id": boot_id,
         "start_time": state.get("start_time") or _now_iso(),
         "reason_codes": ["supervisor_starting"],
-        "interpreter": _interpreter_summary(runtime_env.resolve_interpreter(REPO_ROOT)),
+        "interpreter": _resolve_supervisor_boot_interpreter(state),
         "blocked_recovery": {},
     })
     write_state(state, rdir)
@@ -1075,12 +1445,17 @@ def supervisor_loop(host: str, port: int, runtime_dir: Path | None = None) -> in
             state["supervisor_pid"] = os.getpid()
             state["boot_id"] = boot_id
             state.setdefault("start_time", _now_iso())
-            resolved = runtime_env.resolve_interpreter(REPO_ROOT)
-            state["interpreter"] = _interpreter_summary(resolved)
+            cached_interpreter = _cached_interpreter_summary(previous)
+            if cached_interpreter.get("path") and cached_interpreter.get("supervisor_compatible"):
+                state["interpreter"] = cached_interpreter
+            else:
+                resolved = runtime_env.resolve_interpreter(REPO_ROOT)
+                state["interpreter"] = _interpreter_summary(resolved)
+            state = _clear_stale_self_deviation_restart_block(state)
             resource_guard = state.get("resource_guard") if isinstance(state.get("resource_guard"), dict) else {}
             guard_reasons = [str(reason) for reason in resource_guard.get("reason_codes", []) if str(reason)]
 
-            if _self_deviation_block_active(state) and not _allow_self_deviation_restart():
+            if _self_deviation_block_active(state) and not _allow_self_deviation_restart() and not _startup_self_deviation_recovery_allowed(state):
                 state["runtime_state"] = "unhealthy"
                 state["status"] = "unhealthy"
                 state["reason_codes"] = sorted(set(state.get("reason_codes", []) + ["runtime_self_deviation_restart_blocked"]))
@@ -1380,14 +1755,84 @@ def supervisor_loop(host: str, port: int, runtime_dir: Path | None = None) -> in
     return 0
 
 
+def _runtime_guard_hard_stop_active(state: dict[str, Any]) -> bool:
+    resource_guard = state.get("resource_guard") if isinstance(state.get("resource_guard"), dict) else {}
+    reason_codes = {
+        str(reason)
+        for reason in [
+            *(state.get("reason_codes") or []),
+            *(resource_guard.get("reason_codes") or []),
+        ]
+        if str(reason)
+    }
+    return resource_guard.get("action") == "hard_stop" or "runtime_memory_ceiling_exceeded" in reason_codes
+
+
+def _record_runtime_guard_hard_stop(
+    state: dict[str, Any],
+    *,
+    previous_state: dict[str, Any],
+    host: str,
+    port: int,
+    runtime_dir: Path,
+) -> dict[str, Any]:
+    resource_guard = state.get("resource_guard") if isinstance(state.get("resource_guard"), dict) else {}
+    guard_reasons = [str(reason) for reason in resource_guard.get("reason_codes", []) if str(reason)]
+    stopped_backend = _terminate_pid_if_owned(state.get("backend_pid"))
+    state["runtime_state"] = "unhealthy"
+    state["status"] = "unhealthy"
+    state["operator_ready"] = False
+    state["reason_codes"] = sorted(set(state.get("reason_codes", []) + guard_reasons + ["runtime_memory_ceiling_exceeded", "runtime_self_deviation_restart_blocked"]))
+    state["last_start_attempt"] = {
+        "status": "blocked",
+        "attempted_at": _now_iso(),
+        "failure_reason": "runtime_memory_ceiling_exceeded",
+    }
+    evidence = {
+        "resource_guard": resource_guard,
+        "stopped_backend": stopped_backend,
+        "backend_pid": state.get("backend_pid"),
+        "observed_behavior": f"CleanHouse backend exceeded {resource_guard.get('thresholds', {}).get('max_rss_mb')} MB RSS.",
+        "host": host,
+        "port": port,
+    }
+    if not _same_blocked_recovery(previous_state, "runtime_memory_ceiling_exceeded"):
+        return _record_self_deviation_and_state(
+            state,
+            action="runtime_memory_ceiling_exceeded",
+            previous_state=previous_state,
+            reason_codes=state["reason_codes"],
+            evidence=evidence,
+            runtime_dir=runtime_dir,
+        )
+    return write_state(state, runtime_dir)
+
+
 def ensure_runtime(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, timeout_seconds: float = 30.0) -> dict[str, Any]:
     rdir = _runtime_dir()
     rdir.mkdir(parents=True, exist_ok=True)
-    current = classify_state(read_state(rdir), host=host, port=port)
+    previous = read_state(rdir)
+    current = classify_state(previous, host=host, port=port)
     current["interpreter"] = _interpreter_summary(runtime_env.resolve_interpreter(REPO_ROOT))
+    current = _clear_stale_self_deviation_restart_block(current)
+    if _runtime_guard_hard_stop_active(current):
+        return _record_runtime_guard_hard_stop(current, previous_state=previous, host=host, port=port, runtime_dir=rdir)
     write_state(current, rdir)
 
-    if _self_deviation_block_active(current) and _allow_self_deviation_restart():
+    self_deviation_startup = _startup_self_deviation_classification(current)
+    if _self_deviation_block_active(current) and self_deviation_startup["status"] == "recoverable":
+        current["startup_recovery_allowed"] = {
+            "self_deviation_id": (current.get("self_deviation") or {}).get("id"),
+            "reason_codes": self_deviation_startup["reason_codes"],
+            "issued_at": _now_iso(),
+        }
+        current["reason_codes"] = sorted(
+            reason
+            for reason in set(current.get("reason_codes", []))
+            if reason != "runtime_self_deviation_restart_blocked"
+        )
+        write_state(current, rdir)
+    elif _self_deviation_block_active(current) and _allow_self_deviation_restart():
         current = _acknowledge_self_deviation_for_restart(current)
         write_state(current, rdir)
     elif _self_deviation_block_active(current):
@@ -1470,12 +1915,19 @@ def ensure_runtime(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, timeout_s
     deadline = time.monotonic() + timeout_seconds
     last = current
     while time.monotonic() < deadline:
-        last = classify_state(read_state(rdir), host=host, port=port)
-        last["interpreter"] = _interpreter_summary(runtime_env.resolve_interpreter(REPO_ROOT))
+        previous = read_state(rdir)
+        last = classify_state(previous, host=host, port=port)
+        last["interpreter"] = _cached_interpreter_summary(previous)
+        last = _clear_stale_self_deviation_restart_block(last)
+        if _runtime_guard_hard_stop_active(last):
+            return _record_runtime_guard_hard_stop(last, previous_state=previous, host=host, port=port, runtime_dir=rdir)
+        last["operator_ready"] = _launch_ready(last)
         if last["runtime_state"] in {"healthy", "recovering"}:
             last["blocked_recovery"] = {}
         write_state(last, rdir)
-        if last["runtime_state"] in {"healthy", "degraded", "orphaned_listener"}:
+        if _launch_ready(last) or last["runtime_state"] in {"healthy", "degraded"}:
+            return last
+        if last["runtime_state"] == "orphaned_listener" and last.get("foreign_listener_pids") and not last.get("owned_listener_pids"):
             return last
         if last["runtime_state"] == "unhealthy" and "restart_budget_exhausted" in set(last.get("reason_codes", [])):
             return last
@@ -1536,6 +1988,20 @@ def stop_runtime(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> dict[str
     previous = classify_state(read_state(rdir), host=host, port=port, probe=False)
     stopped_backend = _terminate_pid_if_owned(previous.get("backend_pid"))
     stopped_supervisor = _terminate_pid_if_owned(previous.get("supervisor_pid"), expected_supervisor=True)
+    stored_pids = {
+        int(pid)
+        for pid in (previous.get("backend_pid"), previous.get("supervisor_pid"))
+        if isinstance(pid, int) or (isinstance(pid, str) and pid.isdigit())
+    }
+    stopped_owned_listeners: dict[str, bool] = {}
+    for pid in previous.get("owned_listener_pids") or []:
+        try:
+            value = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if value in stored_pids:
+            continue
+        stopped_owned_listeners[str(value)] = _terminate_pid_if_owned(value)
     final = classify_state(read_state(rdir), host=host, port=port, probe=False)
     final["runtime_state"] = "unhealthy"
     final["status"] = "unhealthy"
@@ -1548,14 +2014,174 @@ def stop_runtime(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> dict[str
         evidence={
             "stopped_backend": stopped_backend,
             "stopped_supervisor": stopped_supervisor,
+            "stopped_owned_listeners": stopped_owned_listeners,
         },
     )
     final = _append_recovery_id(final, receipt)
     return write_state(final, rdir)
 
 
+def acknowledge_self_deviation(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    runtime_dir: Path | None = None,
+) -> dict[str, Any]:
+    rdir = runtime_dir or _runtime_dir()
+    previous = classify_state(read_state(rdir), host=host, port=port, probe=False)
+    acknowledged = _acknowledge_self_deviation_for_restart(dict(previous))
+    acknowledged["runtime_state"] = "unhealthy"
+    acknowledged["status"] = "unhealthy"
+    acknowledged["operator_ready"] = False
+    acknowledged["reason_codes"] = sorted(
+        reason
+        for reason in set(acknowledged.get("reason_codes", []))
+        if reason not in SELF_DEVIATION_BLOCK_TYPES and reason != "runtime_self_deviation_restart_blocked"
+    )
+    acknowledged["reason_codes"].append("runtime_self_deviation_acknowledged")
+    acknowledged["last_start_attempt"] = {
+        "status": "operator_acknowledged_self_deviation",
+        "attempted_at": _now_iso(),
+        "failure_reason": None,
+    }
+    receipt = persist_runtime_recovery(
+        action="runtime_self_deviation_acknowledge",
+        previous_state=previous,
+        final_state=acknowledged,
+        reason_codes=acknowledged["reason_codes"],
+        evidence={
+            "self_deviation_id": (previous.get("self_deviation") or {}).get("id"),
+            "evidence_artifact_path": (previous.get("self_deviation") or {}).get("evidence_artifact_path"),
+            "receipt_artifact_path": (previous.get("self_deviation") or {}).get("receipt_artifact_path"),
+        },
+    )
+    acknowledged = _append_recovery_id(acknowledged, receipt)
+    return write_state(acknowledged, rdir)
+
+
+def startup_preflight(
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+    *,
+    acknowledge_self_deviation_restart: bool = False,
+    runtime_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Classify user-facing startup before the launcher attempts any restart."""
+    rdir = runtime_dir or _runtime_dir()
+    rdir.mkdir(parents=True, exist_ok=True)
+    previous = read_state(rdir)
+    if acknowledge_self_deviation_restart:
+        previous = acknowledge_self_deviation(host, port, runtime_dir=rdir)
+
+    stale_pids: dict[str, int] = {}
+
+    def _clear_stale_pid(state: dict[str, Any], key: str, *, expected_supervisor: bool = False) -> None:
+        raw = state.get(key)
+        try:
+            pid = int(raw)
+        except (TypeError, ValueError):
+            return
+        if pid <= 0:
+            return
+        if not _pid_alive(pid) or not _pid_owned_by_cleanhouse(pid, expected_supervisor=expected_supervisor):
+            stale_pids[key] = pid
+            state[key] = None
+
+    cleaned_previous = dict(previous)
+    _clear_stale_pid(cleaned_previous, "backend_pid")
+    _clear_stale_pid(cleaned_previous, "supervisor_pid", expected_supervisor=True)
+    if stale_pids:
+        reasons = set(str(reason) for reason in cleaned_previous.get("reason_codes", []) if reason)
+        reasons.update(f"{name}_stale_cleared" for name in stale_pids)
+        reasons.add("stale_runtime_state_cleaned")
+        cleaned_previous["reason_codes"] = sorted(reasons)
+        cleaned_previous["runtime_state"] = cleaned_previous.get("runtime_state") or "unhealthy"
+        cleaned_previous["status"] = cleaned_previous.get("runtime_state")
+        previous = write_state(cleaned_previous, rdir)
+
+    try:
+        state = classify_state(previous, host=host, port=port, probe=False)
+    except Exception as exc:
+        invalid_state = {
+            "schema": "cleanhouse.runtime_startup_preflight.v1",
+            "status": "invalid_state",
+            "should_start": False,
+            "should_open_browser": False,
+            "operator_ready": False,
+            "host": host,
+            "port": int(port),
+            "reason_codes": ["startup_preflight_failed"],
+            "error": str(exc) or exc.__class__.__name__,
+            "state_path": str(state_path(rdir)),
+            "updated_at": _now_iso(),
+        }
+        return invalid_state
+
+    state["interpreter"] = _cached_interpreter_summary(state)
+    if stale_pids:
+        state["stale_pids_cleared"] = dict(stale_pids)
+        state["reason_codes"] = sorted(set(state.get("reason_codes", []) + ["stale_runtime_state_cleaned"]))
+    state = _clear_stale_self_deviation_restart_block(state)
+    write_state(state, rdir)
+
+    status = "ready_to_start"
+    should_start = True
+    should_open_browser = False
+    next_action = "Start CleanHouse once and open the operator overview after readiness passes."
+    startup_warning: dict[str, Any] = {}
+    self_deviation_startup = _startup_self_deviation_classification(state)
+
+    if state.get("runtime_state") == "orphaned_listener" and state.get("foreign_listener_pids") and not state.get("owned_listener_pids"):
+        status = "foreign_listener_blocked"
+        should_start = False
+        next_action = "Stop the process already listening on the CleanHouse port, or choose another CLEANHOUSE_PORT."
+    elif self_deviation_startup["status"] == "hard_blocking":
+        status = "blocked_self_deviation"
+        should_start = False
+        next_action = "Resolve the current CleanHouse port/process condition, then try cleanhouse again."
+    elif self_deviation_startup["status"] == "recoverable":
+        state["startup_recovery_allowed"] = {
+            "self_deviation_id": (state.get("self_deviation") or {}).get("id"),
+            "reason_codes": self_deviation_startup["reason_codes"],
+            "issued_at": _now_iso(),
+        }
+        write_state(state, rdir)
+        startup_warning = {
+            "type": "recoverable_self_deviation",
+            "self_deviation": _self_deviation_summary(state),
+            "reason_codes": self_deviation_startup["reason_codes"],
+            "message": "Previous CleanHouse runtime self-deviation remains available for review; startup is allowed because the port/process state is clean.",
+        }
+    elif stale_pids:
+        status = "stale_state_cleaned"
+
+    return {
+        "schema": "cleanhouse.runtime_startup_preflight.v1",
+        "status": status,
+        "should_start": should_start,
+        "should_open_browser": should_open_browser,
+        "operator_ready": False,
+        "host": host,
+        "port": int(port),
+        "runtime_state": state.get("runtime_state"),
+        "reason_codes": list(state.get("reason_codes") or []),
+        "state_path": str(state_path(rdir)),
+        "stale_pids_cleared": stale_pids,
+        "self_deviation": _self_deviation_summary(state),
+        "listener": {
+            "pids": state.get("listener_pids", []),
+            "owned_pids": state.get("owned_listener_pids", []),
+            "foreign_pids": state.get("foreign_listener_pids", []),
+            "details": state.get("listeners", []),
+        },
+        "last_start_attempt": state.get("last_start_attempt", {}),
+        "blocked_recovery": state.get("blocked_recovery", {}),
+        "startup_warning": startup_warning,
+        "next_action": next_action,
+        "updated_at": _now_iso(),
+    }
+
+
 def _launch_agent_observation() -> dict[str, Any]:
-    """Report launchd state without treating a plist as a liveness signal."""
     if sys.platform != "darwin":
         return {"required": False, "installed": False, "loaded": False, "state": "not_applicable"}
     path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
@@ -1584,21 +2210,14 @@ def _launch_agent_observation() -> dict[str, Any]:
     }
 
 
-def current_runtime_payload(host: str | None = None, port: int | None = None, *, probe: bool = True) -> dict[str, Any]:
-    stored = read_state()
-    resolved_host = host or str(stored.get("host") or os.getenv("CLEANHOUSE_HOST", DEFAULT_HOST) or DEFAULT_HOST)
-    resolved_port = int(port or stored.get("port") or os.getenv("CLEANHOUSE_PORT", DEFAULT_PORT) or DEFAULT_PORT)
-    state = classify_state(stored, host=resolved_host, port=resolved_port, probe=probe)
-    state["launch_agent"] = _launch_agent_observation()
-    state["interpreter"] = _interpreter_summary(runtime_env.resolve_interpreter(REPO_ROOT))
-    if state["runtime_state"] in {"healthy", "recovering"}:
-        state["blocked_recovery"] = {}
-    write_state(state)
-    operator_ready = state["runtime_state"] == "healthy"
+def _runtime_payload_from_state(state: dict[str, Any], resolved_host: str, resolved_port: int) -> dict[str, Any]:
+    operator_ready = _launch_ready(state)
+    runtime_state = str(state.get("runtime_state") or "unknown")
     return {
-        "status": state["runtime_state"],
-        "runtime_state": state["runtime_state"],
+        "status": runtime_state,
+        "runtime_state": runtime_state,
         "operator_ready": operator_ready,
+        "bootstrap_ready": operator_ready,
         "valid_states": sorted(VALID_RUNTIME_STATES),
         "reason_codes": state.get("reason_codes", []),
         "supervisor": {
@@ -1608,12 +2227,21 @@ def current_runtime_payload(host: str | None = None, port: int | None = None, *,
             "start_time": state.get("start_time"),
             "restart_count": state.get("restart_count", 0),
         },
+        "launch_agent": state.get("launch_agent", {}),
         "backend": {
             "pid": state.get("backend_pid"),
             "alive": state.get("backend_alive"),
             "boot_id": state.get("backend_boot_id"),
             "host": resolved_host,
             "port": resolved_port,
+        },
+        "startup": {
+            "phase": state.get("startup_phase"),
+            "started_at": state.get("startup_started_at"),
+            "bootstrap_started_at": state.get("bootstrap_started_at"),
+            "bootstrap_ready_at": state.get("bootstrap_ready_at"),
+            "warmup_started_at": state.get("warmup_started_at"),
+            "warmup_ready_at": state.get("warmup_ready_at"),
         },
         "listener": {
             "pids": state.get("listener_pids", []),
@@ -1629,8 +2257,7 @@ def current_runtime_payload(host: str | None = None, port: int | None = None, *,
         },
         "last_probe": state.get("last_probe", {}),
         "resource_guard": state.get("resource_guard", {}),
-        "self_deviation": state.get("self_deviation", {}),
-        "launch_agent": state.get("launch_agent", {}),
+        "self_deviation": _self_deviation_summary(state),
         "interpreter": state.get("interpreter", {}),
         "last_start_attempt": state.get("last_start_attempt", {}),
         "blocked_recovery": state.get("blocked_recovery", {}),
@@ -1640,9 +2267,119 @@ def current_runtime_payload(host: str | None = None, port: int | None = None, *,
     }
 
 
+def _cached_state_for_probe(
+    host: str | None = None,
+    port: int | None = None,
+) -> tuple[dict[str, Any], str, int]:
+    stored = read_state()
+    resolved_host = host or str(stored.get("host") or os.getenv("CLEANHOUSE_HOST", DEFAULT_HOST) or DEFAULT_HOST)
+    resolved_port = int(port or stored.get("port") or os.getenv("CLEANHOUSE_PORT", DEFAULT_PORT) or DEFAULT_PORT)
+    state = _base_state(resolved_host, resolved_port, stored)
+    reasons = {str(reason) for reason in state.get("reason_codes", []) if str(reason)}
+    backend_alive = _pid_alive(state.get("backend_pid"))
+    supervisor_alive = _pid_alive(state.get("supervisor_pid"))
+    heartbeat_fresh = _heartbeat_fresh(state)
+    resource_guard = state.get("resource_guard") if isinstance(state.get("resource_guard"), dict) else {}
+    guard_reasons = {str(reason) for reason in resource_guard.get("reason_codes", []) if str(reason)}
+    runtime_state = str(state.get("runtime_state") or "unhealthy")
+
+    if not backend_alive:
+        runtime_state = "unhealthy"
+        reasons.add("backend_not_running")
+    elif not heartbeat_fresh and state.get("heartbeat_at"):
+        runtime_state = "degraded"
+        reasons.add("heartbeat_stale")
+    elif runtime_state not in {"degraded", "recovering"}:
+        runtime_state = "healthy"
+
+    if "runtime_memory_ceiling_exceeded" in guard_reasons:
+        runtime_state = "unhealthy"
+        reasons.add("runtime_memory_ceiling_exceeded")
+    elif guard_reasons and runtime_state == "healthy":
+        runtime_state = "degraded"
+        reasons.update(guard_reasons)
+
+    state.update({
+        "runtime_state": runtime_state,
+        "status": runtime_state,
+        "reason_codes": sorted(reasons),
+        "backend_alive": backend_alive,
+        "supervisor_alive": supervisor_alive,
+        "heartbeat_fresh": heartbeat_fresh,
+        "interpreter": _cached_interpreter_summary(stored),
+        "updated_at": stored.get("updated_at"),
+    })
+    state = _clear_stale_self_deviation_restart_block(state)
+    if state["runtime_state"] in {"healthy", "recovering"}:
+        state["blocked_recovery"] = {}
+    return state, resolved_host, resolved_port
+
+
+def cached_runtime_payload(host: str | None = None, port: int | None = None) -> dict[str, Any]:
+    state, resolved_host, resolved_port = _cached_state_for_probe(host, port)
+    return _runtime_payload_from_state(state, resolved_host, resolved_port)
+
+
+def _read_only_runtime_state(
+    host: str | None = None,
+    port: int | None = None,
+    *,
+    probe: bool = False,
+) -> tuple[dict[str, Any], str, int, dict[str, Any]]:
+    stored = read_state()
+    resolved_host = host or str(stored.get("host") or os.getenv("CLEANHOUSE_HOST", DEFAULT_HOST) or DEFAULT_HOST)
+    resolved_port = int(port or stored.get("port") or os.getenv("CLEANHOUSE_PORT", DEFAULT_PORT) or DEFAULT_PORT)
+    state = classify_state(stored, host=resolved_host, port=resolved_port, probe=probe)
+    state["launch_agent"] = _launch_agent_observation()
+    state["interpreter"] = _cached_interpreter_summary(stored)
+    state = _clear_stale_self_deviation_restart_block(state)
+    if state["runtime_state"] in {"healthy", "recovering"}:
+        state["blocked_recovery"] = {}
+    return state, resolved_host, resolved_port, stored
+
+
+def current_runtime_payload(
+    host: str | None = None,
+    port: int | None = None,
+    *,
+    probe: bool = True,
+    write: bool = True,
+) -> dict[str, Any]:
+    if not probe and not write:
+        return cached_runtime_payload(host, port)
+    state, resolved_host, resolved_port, _stored = _read_only_runtime_state(host, port, probe=probe)
+    if write:
+        write_state(state)
+    return _runtime_payload_from_state(state, resolved_host, resolved_port)
+
+
+def readiness_payload(host: str | None = None, port: int | None = None) -> dict[str, Any]:
+    state, resolved_host, resolved_port = _cached_state_for_probe(host, port)
+    runtime_state = str(state.get("runtime_state") or "unknown")
+    ready = _launch_ready(state)
+    runtime = _runtime_payload_from_state(state, resolved_host, resolved_port)
+    return {
+        "status": "ok" if ready else "degraded",
+        "ready": ready,
+        "bootstrap_ready": ready,
+        "runtime_state": runtime_state,
+        "reason_codes": list(state.get("reason_codes") or []),
+        "runtime": runtime,
+        "backend": runtime.get("backend", {}),
+        "supervisor": runtime.get("supervisor", {}),
+        "listener": runtime.get("listener", {}),
+        "heartbeat": runtime.get("heartbeat", {}),
+        "resource_guard": runtime.get("resource_guard", {}),
+        "self_deviation": runtime.get("self_deviation", {}),
+        "state_path": str(state_path()),
+        "updated_at": state.get("updated_at"),
+    }
+
+
 def register_backend_start(host: str, port: int) -> dict[str, Any]:
     rdir = _runtime_dir()
     previous = read_state(rdir)
+    now = _now_iso()
     state = _base_state(host, port, previous)
     state.update({
         "runtime_state": "recovering",
@@ -1651,11 +2388,14 @@ def register_backend_start(host: str, port: int) -> dict[str, Any]:
         "backend_boot_id": os.getenv("CLEANHOUSE_BACKEND_BOOT_ID", uuid.uuid4().hex),
         "host": host,
         "port": int(port),
-        "heartbeat_at": _now_iso(),
+        "startup_phase": "booting",
+        "startup_started_at": previous.get("startup_started_at") or now,
+        "bootstrap_started_at": previous.get("bootstrap_started_at") or now,
+        "heartbeat_at": now,
         "heartbeat_sequence": int(previous.get("heartbeat_sequence", 0) or 0) + 1,
         "blocked_recovery": {},
     })
-    state["interpreter"] = _interpreter_summary(runtime_env.resolve_interpreter(REPO_ROOT))
+    state["interpreter"] = _cached_interpreter_summary(previous)
     return write_state(state, rdir)
 
 
@@ -1670,7 +2410,77 @@ def record_backend_heartbeat(host: str, port: int) -> dict[str, Any]:
         "heartbeat_at": _now_iso(),
         "heartbeat_sequence": int(previous.get("heartbeat_sequence", 0) or 0) + 1,
     })
-    state["interpreter"] = _interpreter_summary(runtime_env.resolve_interpreter(REPO_ROOT))
+    state["interpreter"] = _cached_interpreter_summary(previous)
+    return write_state(state, rdir)
+
+
+def mark_backend_bootstrap_ready(host: str, port: int) -> dict[str, Any]:
+    rdir = _runtime_dir()
+    previous = read_state(rdir)
+    now = _now_iso()
+    state = _base_state(host, port, previous)
+    state.update({
+        "backend_pid": os.getpid(),
+        "backend_alive": True,
+        "host": host,
+        "port": int(port),
+        "startup_phase": "bootstrap_ready",
+        "bootstrap_started_at": previous.get("bootstrap_started_at") or previous.get("startup_started_at") or now,
+        "bootstrap_ready_at": previous.get("bootstrap_ready_at") or now,
+    })
+    state["interpreter"] = _cached_interpreter_summary(previous)
+    state["operator_ready"] = _launch_ready(state)
+    return write_state(state, rdir)
+
+
+def mark_backend_warmup_started(host: str, port: int) -> dict[str, Any]:
+    rdir = _runtime_dir()
+    previous = read_state(rdir)
+    now = _now_iso()
+    state = _base_state(host, port, previous)
+    state.update({
+        "backend_pid": os.getpid(),
+        "backend_alive": True,
+        "host": host,
+        "port": int(port),
+        "startup_phase": "warming",
+        "warmup_started_at": previous.get("warmup_started_at") or now,
+    })
+    state["interpreter"] = _cached_interpreter_summary(previous)
+    state["operator_ready"] = _launch_ready(state)
+    return write_state(state, rdir)
+
+
+def mark_backend_warmup_complete(
+    host: str,
+    port: int,
+    *,
+    runtime_state: str = "healthy",
+    reason_codes: Iterable[str] = (),
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    rdir = _runtime_dir()
+    previous = read_state(rdir)
+    now = _now_iso()
+    state = _base_state(host, port, previous)
+    final_state = runtime_state if runtime_state in VALID_RUNTIME_STATES else "degraded"
+    merged_reasons = sorted({str(reason) for reason in [*(state.get("reason_codes") or []), *reason_codes] if str(reason)})
+    state.update({
+        "backend_pid": os.getpid(),
+        "backend_alive": True,
+        "host": host,
+        "port": int(port),
+        "startup_phase": "warm" if final_state == "healthy" else "degraded",
+        "warmup_started_at": previous.get("warmup_started_at") or previous.get("bootstrap_ready_at") or now,
+        "warmup_ready_at": previous.get("warmup_ready_at") or now,
+        "runtime_state": final_state,
+        "status": final_state,
+        "reason_codes": merged_reasons,
+    })
+    if details:
+        state["startup_details"] = {str(key): value for key, value in details.items()}
+    state["interpreter"] = _cached_interpreter_summary(previous)
+    state["operator_ready"] = _launch_ready(state)
     return write_state(state, rdir)
 
 
@@ -1682,7 +2492,7 @@ def register_backend_stop(host: str, port: int) -> dict[str, Any]:
         "reason_codes": ["backend_stopped"],
         "backend_pid": os.getpid(),
     })
-    state["interpreter"] = _interpreter_summary(runtime_env.resolve_interpreter(REPO_ROOT))
+    state["interpreter"] = _cached_interpreter_summary(previous)
     return write_state(state)
 
 
@@ -1699,7 +2509,11 @@ def start_backend_heartbeat(host: str, port: int) -> None:
             except Exception:
                 continue
 
-    register_backend_start(host, port)
+    state = read_state()
+    if not state.get("startup_started_at") or not state.get("backend_pid"):
+        register_backend_start(host, port)
+    else:
+        record_backend_heartbeat(host, port)
     _HEARTBEAT_THREAD = threading.Thread(target=_loop, name="cleanhouse-runtime-heartbeat", daemon=True)
     _HEARTBEAT_THREAD.start()
 
@@ -1716,11 +2530,12 @@ def _print_json(payload: dict[str, Any]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("start", "supervise", "status", "stop"):
+    for name in ("start", "supervise", "status", "stop", "acknowledge-self-deviation", "preflight"):
         sp = sub.add_parser(name)
         sp.add_argument("--host", default=os.getenv("CLEANHOUSE_HOST", DEFAULT_HOST) or DEFAULT_HOST)
         sp.add_argument("--port", type=int, default=int(os.getenv("CLEANHOUSE_PORT", DEFAULT_PORT) or DEFAULT_PORT))
-    sub.choices["start"].add_argument("--timeout", type=float, default=30.0)
+    sub.choices["start"].add_argument("--timeout", type=float, default=5.0)
+    sub.choices["preflight"].add_argument("--acknowledge-self-deviation", action="store_true")
     args = parser.parse_args(argv)
 
     if args.command == "supervise":
@@ -1728,13 +2543,24 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "start":
         payload = ensure_runtime(args.host, args.port, timeout_seconds=args.timeout)
         _print_json(payload)
-        return 0 if payload.get("runtime_state") == "healthy" else 1
+        return 0 if payload.get("ready") is True or payload.get("operator_ready") is True else 1
     if args.command == "status":
         _print_json(current_runtime_payload(args.host, args.port))
         return 0
     if args.command == "stop":
         _print_json(stop_runtime(args.host, args.port))
         return 0
+    if args.command == "acknowledge-self-deviation":
+        _print_json(acknowledge_self_deviation(args.host, args.port))
+        return 0
+    if args.command == "preflight":
+        payload = startup_preflight(
+            args.host,
+            args.port,
+            acknowledge_self_deviation_restart=args.acknowledge_self_deviation,
+        )
+        _print_json(payload)
+        return 0 if payload.get("should_start") is True else 1
     return 2
 
 

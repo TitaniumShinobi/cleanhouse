@@ -2,6 +2,8 @@ import json
 import os
 import tempfile
 import unittest
+import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +12,31 @@ from corefiles import config
 
 
 class RuntimeSupervisorTests(unittest.TestCase):
+    def test_supervisor_boot_replaces_stale_cached_interpreter(self):
+        stale = {
+            "interpreter": {
+                "path": "/protected/source/cleanhouse_env/bin/python3",
+                "runnable": True,
+                "supervisor_compatible": True,
+                "backend_compatible": True,
+            }
+        }
+        resolved = {
+            "status": "runnable",
+            "selected_path": "/Users/devon/.cleanhouse/runtime/python/bin/python3",
+            "selected_source": "active_sys_executable",
+            "runnable": True,
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+            "attempts": [],
+            "failures": [],
+        }
+        with patch.object(runtime_supervisor.runtime_env, "resolve_interpreter", return_value=resolved):
+            current = runtime_supervisor._resolve_supervisor_boot_interpreter(stale)
+
+        self.assertEqual(current["path"], resolved["selected_path"])
+        self.assertNotEqual(current["path"], stale["interpreter"]["path"])
+
     def setUp(self):
         self._data_tmp = tempfile.TemporaryDirectory()
         self._runtime_tmp = tempfile.TemporaryDirectory()
@@ -30,6 +57,8 @@ class RuntimeSupervisorTests(unittest.TestCase):
     def _classify(self, previous, *, listeners=None, alive=None, owned=True, ready=True, heartbeat=True):
         listeners = listeners if listeners is not None else [previous.get("backend_pid", 100)]
         alive = alive or {}
+        supervisor_pid = previous.get("supervisor_pid")
+        backend_pid = previous.get("backend_pid")
 
         def pid_alive(pid):
             if pid is None:
@@ -37,16 +66,36 @@ class RuntimeSupervisorTests(unittest.TestCase):
             return alive.get(int(pid), True)
 
         def pid_info(pid):
+            is_supervisor = supervisor_pid is not None and int(pid) == int(supervisor_pid)
+            command = (
+                f"python {runtime_supervisor.REPO_ROOT}/backend/runtime_supervisor.py"
+                if is_supervisor and owned
+                else f"python {runtime_supervisor.REPO_ROOT}/backend/server.py"
+                if owned
+                else "/usr/bin/python other.py"
+            )
             return {
                 "pid": pid,
                 "alive": pid_alive(pid),
-                "command": f"python {runtime_supervisor.REPO_ROOT}/backend/server.py" if owned else "/usr/bin/python other.py",
+                "command": command,
                 "cwd": str(runtime_supervisor.REPO_ROOT) if owned else "/tmp",
             }
+
+        def pid_owned_by_cleanhouse(pid, expected_supervisor=False):
+            if not pid_alive(pid):
+                return False
+            if expected_supervisor:
+                return bool(owned and supervisor_pid is not None and int(pid) == int(supervisor_pid))
+            return bool(owned and (
+                (backend_pid is not None and int(pid) == int(backend_pid))
+                or int(pid) in {int(item) for item in listeners if item is not None}
+            ))
 
         with patch.object(runtime_supervisor, "listener_pids", return_value=list(listeners)), patch.object(
             runtime_supervisor, "_pid_alive", side_effect=pid_alive
         ), patch.object(runtime_supervisor, "_pid_info", side_effect=pid_info), patch.object(
+            runtime_supervisor, "_pid_owned_by_cleanhouse", side_effect=pid_owned_by_cleanhouse
+        ), patch.object(
             runtime_supervisor, "_probe_ready", return_value={"status": "ok" if ready else "failed"}
         ), patch.object(
             runtime_supervisor, "_heartbeat_fresh", return_value=heartbeat
@@ -88,6 +137,17 @@ class RuntimeSupervisorTests(unittest.TestCase):
         self.assertEqual(state["foreign_listener_pids"], [333])
         self.assertIn("foreign_listener_present", state["reason_codes"])
 
+    def test_classifies_single_owned_listener_as_authoritative_backend(self):
+        state = self._classify({
+            "supervisor_pid": 200,
+            "backend_pid": None,
+            "heartbeat_at": "2026-05-27T00:00:00+00:00",
+        }, listeners=[333], owned=True)
+        self.assertEqual(state["runtime_state"], "healthy")
+        self.assertEqual(state["backend_pid"], 333)
+        self.assertEqual(state["owned_listener_pids"], [333])
+        self.assertNotIn("listener_pid_mismatch", state["reason_codes"])
+
     def test_classifies_recovering_backend_without_listener(self):
         state = self._classify({
             "supervisor_pid": 200,
@@ -112,6 +172,13 @@ class RuntimeSupervisorTests(unittest.TestCase):
             self.assertEqual(json.loads(raw)["runtime_state"], "healthy")
             self.assertEqual(payload["schema"], "cleanhouse.runtime_state.v1")
             self.assertFalse(list(runtime_dir.glob("*.tmp")))
+
+    def test_backend_env_uses_runtime_local_events_db(self):
+        runtime_dir = Path(self._runtime_tmp.name)
+        env = runtime_supervisor._backend_env("127.0.0.1", 3333, runtime_dir, "boot-id")
+        self.assertEqual(env["CLEANHOUSE_RUNTIME_DIR"], str(runtime_dir))
+        self.assertEqual(env["CLEANHOUSE_EVENTS_DB"], str(runtime_dir / "events" / "events.db"))
+        self.assertEqual(env["CLEANHOUSE_SUPERVISED"], "1")
 
     def test_runtime_recovery_receipt_hash_detects_tamper(self):
         receipt = runtime_supervisor.persist_runtime_recovery(
@@ -180,6 +247,70 @@ class RuntimeSupervisorTests(unittest.TestCase):
         self.assertEqual(result["last_start_attempt"]["status"], "blocked")
         self.assertGreaterEqual(len(result["recent_recovery_receipts"]), 1)
 
+    def test_delayed_warmup_does_not_block_bootstrap_thread(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_ENABLE_AUTH": "0",
+                "FLASK_SECRET_KEY": "runtime-supervisor-test-key",
+            },
+        ):
+            from backend import server
+
+        bootstrap_seen = threading.Event()
+        init_started = threading.Event()
+        init_release = threading.Event()
+        warmup_complete = threading.Event()
+        original_thread = server._EVENTS_START_THREAD
+        original_started = server._EVENTS_SERVICES_STARTED
+
+        def slow_init_db():
+            init_started.set()
+            init_release.wait(2)
+
+        try:
+            server._EVENTS_SERVICES_STARTED = False
+            server._EVENTS_START_THREAD = None
+            with patch.object(server, "_wait_for_listener_ready", return_value=True), patch.object(
+                server.cleanhouse_events, "init_db", side_effect=slow_init_db
+            ), patch.object(
+                server.cleanhouse_events, "start_watcher", return_value={"status": "running"}
+            ), patch.object(server, "_start_runtime_heartbeat", return_value=None), patch.object(
+                server.runtime_supervisor, "mark_backend_bootstrap_ready", side_effect=lambda *args, **kwargs: bootstrap_seen.set()
+            ), patch.object(
+                server.runtime_supervisor, "mark_backend_warmup_started", return_value={}
+            ), patch.object(
+                server.runtime_supervisor, "mark_backend_warmup_complete", side_effect=lambda *args, **kwargs: warmup_complete.set()
+            ):
+                started_at = time.monotonic()
+                server._start_events_services_background()
+                self.assertLess(time.monotonic() - started_at, 0.1)
+                self.assertTrue(bootstrap_seen.wait(1.0))
+                self.assertTrue(init_started.wait(1.0))
+                self.assertFalse(warmup_complete.is_set())
+                init_release.set()
+                self.assertTrue(warmup_complete.wait(1.0))
+                if server._EVENTS_START_THREAD is not None:
+                    server._EVENTS_START_THREAD.join(timeout=1.0)
+        finally:
+            init_release.set()
+            server._EVENTS_START_THREAD = original_thread
+            server._EVENTS_SERVICES_STARTED = original_started
+
+    def test_launch_ready_requires_bootstrap_marker(self):
+        state = {
+            "runtime_state": "recovering",
+            "backend_alive": True,
+            "bootstrap_started_at": "2026-08-18T16:40:00+00:00",
+            "startup_phase": "booting",
+            "listener_pids": [],
+            "owned_listener_pids": [],
+            "foreign_listener_pids": [],
+        }
+        self.assertFalse(runtime_supervisor._launch_ready(state))
+        state["bootstrap_ready_at"] = "2026-08-18T16:40:01+00:00"
+        self.assertTrue(runtime_supervisor._launch_ready(state))
+
     def test_ensure_runtime_timeout_persists_receipt(self):
         interpreter = {
             "status": "runnable",
@@ -215,6 +346,9 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "port": 3333,
             "supervisor_pid": 200,
             "backend_pid": 100,
+            "startup_phase": "bootstrap_ready",
+            "bootstrap_started_at": "2026-05-27T00:00:00+00:00",
+            "bootstrap_ready_at": "2026-05-27T00:00:01+00:00",
             "heartbeat_at": "2026-05-27T00:00:00+00:00",
         })
         with patch.object(runtime_supervisor, "classify_state", return_value={
@@ -226,6 +360,9 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "backend_alive": True,
             "boot_id": "boot",
             "start_time": "2026-05-27T00:00:00+00:00",
+            "startup_phase": "bootstrap_ready",
+            "bootstrap_started_at": "2026-05-27T00:00:00+00:00",
+            "bootstrap_ready_at": "2026-05-27T00:00:01+00:00",
             "restart_count": 0,
             "listener_pids": [100],
             "owned_listener_pids": [100],
@@ -319,6 +456,98 @@ class RuntimeSupervisorTests(unittest.TestCase):
         self.assertEqual(refused["last_start_attempt"]["status"], "blocked")
         self.assertIn("runtime_self_deviation_restart_blocked", refused["reason_codes"])
 
+    def test_ensure_runtime_hard_stops_ready_backend_over_memory_ceiling(self):
+        runtime_supervisor.write_state({
+            "runtime_state": "healthy",
+            "supervisor_pid": 200,
+            "backend_pid": 100,
+            "heartbeat_at": "2026-06-07T00:00:00+00:00",
+            "host": "127.0.0.1",
+            "port": 3333,
+        })
+        interpreter = {
+            "status": "runnable",
+            "selected_path": "/usr/bin/python3",
+            "selected_source": "system_python3",
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+            "runnable": True,
+            "attempts": [],
+            "failures": [],
+        }
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[100]), patch.object(
+            runtime_supervisor, "_pid_alive", return_value=True
+        ), patch.object(runtime_supervisor, "_pid_info", return_value={
+            "pid": 100,
+            "alive": True,
+            "command": f"python {runtime_supervisor.REPO_ROOT}/backend/server.py",
+            "cwd": str(runtime_supervisor.REPO_ROOT),
+        }), patch.object(runtime_supervisor, "_probe_ready", return_value={"status": "ok"}), patch.object(
+            runtime_supervisor, "_heartbeat_fresh", return_value=True
+        ), patch.object(runtime_supervisor, "_pid_resource_usage", return_value={
+            "status": "observed",
+            "pid": 100,
+            "rss_kb": 4 * 1024 * 1024,
+            "rss_mb": 4 * 1024,
+            "cpu_percent": 10.0,
+            "process_state": "R",
+            "elapsed": "00:02:00",
+            "command": "python backend/server.py",
+        }), patch.object(runtime_supervisor, "_terminate_pid_if_owned", return_value=True), patch.object(
+            runtime_supervisor.runtime_env, "resolve_interpreter", return_value=interpreter
+        ):
+            result = runtime_supervisor.ensure_runtime("127.0.0.1", 3333, timeout_seconds=0.01)
+
+        self.assertEqual(result["runtime_state"], "unhealthy")
+        self.assertIn("runtime_memory_ceiling_exceeded", result["reason_codes"])
+        self.assertEqual(result["blocked_recovery"]["type"], "runtime_memory_ceiling_exceeded")
+        self.assertEqual(result["self_deviation"]["finding"]["title"], "CleanHouse became the suspicious process")
+        self.assertTrue(Path(result["self_deviation"]["evidence_artifact_path"]).is_file())
+        self.assertTrue(Path(result["self_deviation"]["receipt_artifact_path"]).is_file())
+
+    def test_stop_runtime_terminates_owned_orphan_listener_without_touching_foreign_listener(self):
+        runtime_supervisor.write_state({
+            "runtime_state": "unhealthy",
+            "backend_pid": None,
+            "supervisor_pid": None,
+            "host": "127.0.0.1",
+            "port": 3333,
+        })
+
+        def pid_info(pid):
+            if pid == 111:
+                return {
+                    "pid": 111,
+                    "alive": True,
+                    "command": f"python {runtime_supervisor.REPO_ROOT}/backend/server.py",
+                    "cwd": str(runtime_supervisor.REPO_ROOT),
+                }
+            return {
+                "pid": pid,
+                "alive": True,
+                "command": "/usr/bin/python other.py",
+                "cwd": "/tmp",
+            }
+
+        terminated: list[int] = []
+
+        def terminate(pid, *, expected_supervisor=False):
+            if pid is not None:
+                terminated.append(int(pid))
+            return pid == 111
+
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[111, 222]), patch.object(
+            runtime_supervisor, "_pid_alive", return_value=True
+        ), patch.object(runtime_supervisor, "_pid_info", side_effect=pid_info), patch.object(
+            runtime_supervisor, "_terminate_pid_if_owned", side_effect=terminate
+        ):
+            result = runtime_supervisor.stop_runtime("127.0.0.1", 3333)
+
+        self.assertEqual(result["runtime_state"], "unhealthy")
+        self.assertIn("runtime_stop_requested", result["reason_codes"])
+        self.assertIn(111, terminated)
+        self.assertNotIn(222, terminated)
+
     def test_runtime_payload_exposes_resource_guard_self_deviation(self):
         self_deviation = {
             "id": "runtime_self_deviation:test",
@@ -372,6 +601,56 @@ class RuntimeSupervisorTests(unittest.TestCase):
         self.assertFalse(payload["operator_ready"])
         self.assertEqual(payload["resource_guard"]["status"], "blocked")
         self.assertEqual(payload["self_deviation"]["id"], "runtime_self_deviation:test")
+        self.assertEqual(payload["self_deviation"]["review_status"], "needs_review")
+        self.assertEqual(payload["self_deviation"]["runtime_impact"], "active_blocking")
+        self.assertTrue(payload["self_deviation"]["blocks_investigations"])
+
+    def test_healthy_runtime_keeps_open_self_deviation_historical(self):
+        self_deviation = {
+            "id": "runtime_self_deviation:history",
+            "status": "open",
+            "reason_codes": ["heartbeat_stale", "runtime_stuck_watchdog"],
+            "finding": {
+                "title": "CleanHouse became the suspicious process",
+                "reason_codes": ["heartbeat_stale", "runtime_stuck_watchdog"],
+            },
+            "evidence_artifact_path": "/tmp/history-evidence.json",
+            "receipt_artifact_path": "/tmp/history-receipt.json",
+        }
+        classified = {
+            "runtime_state": "healthy",
+            "reason_codes": [],
+            "supervisor_pid": 200,
+            "backend_pid": 100,
+            "supervisor_alive": True,
+            "backend_alive": True,
+            "boot_id": "boot",
+            "start_time": "2026-06-07T00:00:00+00:00",
+            "restart_count": 0,
+            "listener_pids": [100],
+            "owned_listener_pids": [100],
+            "foreign_listener_pids": [],
+            "listeners": [],
+            "heartbeat_at": "2026-06-07T00:00:00+00:00",
+            "heartbeat_sequence": 1,
+            "heartbeat_fresh": True,
+            "last_probe": {"status": "ok"},
+            "interpreter": {},
+            "last_start_attempt": {},
+            "blocked_recovery": {},
+            "recent_recovery_receipts": [],
+            "resource_guard": {"status": "ok", "action": "none", "reason_codes": []},
+            "self_deviation": self_deviation,
+            "updated_at": "2026-06-07T00:00:00+00:00",
+        }
+        with patch.object(runtime_supervisor, "classify_state", return_value=dict(classified)):
+            payload = runtime_supervisor.current_runtime_payload("127.0.0.1", 3333)
+
+        self.assertTrue(payload["operator_ready"])
+        self.assertEqual(payload["self_deviation"]["id"], "runtime_self_deviation:history")
+        self.assertEqual(payload["self_deviation"]["runtime_impact"], "monitoring")
+        self.assertFalse(payload["self_deviation"]["blocks_startup"])
+        self.assertFalse(payload["self_deviation"]["blocks_investigations"])
 
     def test_runtime_cpu_breach_records_self_deviation(self):
         previous = {
@@ -535,6 +814,304 @@ class RuntimeSupervisorTests(unittest.TestCase):
         future["blocked_recovery"] = {"type": "runtime_cpu_sustained_exceeded"}
         future["self_deviation"] = {"id": "runtime_self_deviation:future", "status": "open"}
         self.assertTrue(runtime_supervisor._self_deviation_block_active(future))
+
+    def test_startup_preflight_handles_block_ack_and_foreign_listener(self):
+        self_deviation = {
+            "id": "runtime_self_deviation:test",
+            "status": "open",
+            "finding": {"title": "CleanHouse became the suspicious process"},
+            "next_action": "Review evidence before restart.",
+            "evidence_artifact_path": "/tmp/evidence.json",
+            "receipt_artifact_path": "/tmp/receipt.json",
+        }
+        runtime_supervisor.write_state({
+            "runtime_state": "unhealthy",
+            "reason_codes": ["runtime_memory_ceiling_exceeded"],
+            "backend_pid": 999001,
+            "supervisor_pid": 999002,
+            "self_deviation": self_deviation,
+            "blocked_recovery": {"type": "runtime_memory_ceiling_exceeded"},
+        })
+
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[]), patch.object(
+            runtime_supervisor, "_pid_alive", return_value=False
+        ), patch.object(runtime_supervisor.runtime_env, "resolve_interpreter", return_value={
+            "status": "runnable",
+            "selected_path": "/usr/bin/python3",
+            "selected_source": "system_python3",
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+            "runnable": True,
+            "attempts": [],
+            "failures": [],
+        }):
+            allowed = runtime_supervisor.startup_preflight("127.0.0.1", 3333)
+
+        self.assertEqual(allowed["status"], "ready_to_start")
+        self.assertTrue(allowed["should_start"])
+        self.assertEqual(allowed["self_deviation"]["id"], "runtime_self_deviation:test")
+        self.assertEqual(allowed["startup_warning"]["type"], "recoverable_self_deviation")
+        self.assertEqual(allowed["stale_pids_cleared"], {"backend_pid": 999001, "supervisor_pid": 999002})
+        cleaned = runtime_supervisor.read_state()
+        self.assertIsNone(cleaned.get("backend_pid"))
+        self.assertIsNone(cleaned.get("supervisor_pid"))
+
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[]), patch.object(
+            runtime_supervisor, "_pid_alive", return_value=False
+        ), patch.object(runtime_supervisor.runtime_env, "resolve_interpreter", return_value={
+            "status": "runnable",
+            "selected_path": "/usr/bin/python3",
+            "selected_source": "system_python3",
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+            "runnable": True,
+            "attempts": [],
+            "failures": [],
+        }):
+            acknowledged = runtime_supervisor.startup_preflight(
+                "127.0.0.1",
+                3333,
+                acknowledge_self_deviation_restart=True,
+            )
+
+        self.assertIn(acknowledged["status"], {"ready_to_start", "stale_state_cleaned"})
+        self.assertTrue(acknowledged["should_start"])
+        self.assertEqual(runtime_supervisor.read_state()["self_deviation"]["status"], "acknowledged_for_restart")
+
+        runtime_supervisor.write_state({"runtime_state": "unhealthy", "reason_codes": []})
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[444]), patch.object(
+            runtime_supervisor, "_pid_alive", return_value=True
+        ), patch.object(runtime_supervisor, "_pid_info", return_value={
+            "pid": 444,
+            "alive": True,
+            "command": "/usr/bin/python other.py",
+            "cwd": "/tmp",
+        }), patch.object(runtime_supervisor.runtime_env, "resolve_interpreter", return_value={
+            "status": "runnable",
+            "selected_path": "/usr/bin/python3",
+            "selected_source": "system_python3",
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+            "runnable": True,
+            "attempts": [],
+            "failures": [],
+        }):
+            foreign = runtime_supervisor.startup_preflight("127.0.0.1", 3333)
+
+        self.assertEqual(foreign["status"], "foreign_listener_blocked")
+        self.assertFalse(foreign["should_start"])
+        self.assertEqual(foreign["listener"]["foreign_pids"], [444])
+
+    def test_startup_preflight_clears_reused_backend_pid(self):
+        runtime_supervisor.write_state({
+            "runtime_state": "unhealthy",
+            "reason_codes": ["listener_not_ready"],
+            "backend_pid": 2116,
+            "supervisor_pid": None,
+        })
+
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[]), patch.object(
+            runtime_supervisor, "_pid_alive", return_value=True
+        ), patch.object(runtime_supervisor, "_pid_info", return_value={
+            "pid": 2116,
+            "alive": True,
+            "command": "/usr/libexec/proactived",
+            "cwd": "/System/Library",
+        }), patch.object(runtime_supervisor.runtime_env, "resolve_interpreter", return_value={
+            "status": "runnable",
+            "selected_path": "/usr/bin/python3",
+            "selected_source": "system_python3",
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+            "runnable": True,
+            "attempts": [],
+            "failures": [],
+        }):
+            allowed = runtime_supervisor.startup_preflight("127.0.0.1", 3333)
+
+        self.assertEqual(allowed["status"], "stale_state_cleaned")
+        self.assertEqual(allowed["stale_pids_cleared"], {"backend_pid": 2116})
+        self.assertIsNone(runtime_supervisor.read_state().get("backend_pid"))
+
+    def test_startup_preflight_recovers_soft_self_deviation_without_clearing_evidence(self):
+        self_deviation = {
+            "id": "runtime_self_deviation:soft",
+            "status": "open",
+            "finding": {
+                "title": "CleanHouse became the suspicious process",
+                "reason_codes": [
+                    "readiness_probe_failed",
+                    "runtime_memory_degraded_threshold_exceeded",
+                    "runtime_unresponsive",
+                ],
+                "mitigation_action": "degraded_state",
+            },
+            "next_action": "Mark runtime degraded and avoid starting more investigations until readiness recovers.",
+            "evidence_artifact_path": "/tmp/soft-evidence.json",
+            "receipt_artifact_path": "/tmp/soft-receipt.json",
+            "reason_codes": [
+                "readiness_probe_failed",
+                "runtime_memory_degraded_threshold_exceeded",
+                "runtime_unresponsive",
+            ],
+            "mitigation_action": "degraded_state",
+        }
+        runtime_supervisor.write_state({
+            "runtime_state": "unhealthy",
+            "reason_codes": ["backend_not_running", "runtime_stop_requested"],
+            "backend_pid": None,
+            "supervisor_pid": None,
+            "self_deviation": self_deviation,
+            "blocked_recovery": {"type": "runtime_unresponsive"},
+        })
+
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[]), patch.object(
+            runtime_supervisor, "_pid_alive", return_value=False
+        ), patch.object(runtime_supervisor.runtime_env, "resolve_interpreter", return_value={
+            "status": "runnable",
+            "selected_path": "/usr/bin/python3",
+            "selected_source": "system_python3",
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+            "runnable": True,
+            "attempts": [],
+            "failures": [],
+        }):
+            preflight = runtime_supervisor.startup_preflight("127.0.0.1", 3333)
+
+        self.assertEqual(preflight["status"], "ready_to_start")
+        self.assertTrue(preflight["should_start"])
+        self.assertEqual(preflight["startup_warning"]["type"], "recoverable_self_deviation")
+        self.assertEqual(preflight["startup_warning"]["self_deviation"]["id"], "runtime_self_deviation:soft")
+        stored = runtime_supervisor.read_state()
+        self.assertEqual(stored["self_deviation"]["status"], "open")
+        self.assertEqual(stored["self_deviation"]["evidence_artifact_path"], "/tmp/soft-evidence.json")
+        self.assertEqual(stored["self_deviation"]["receipt_artifact_path"], "/tmp/soft-receipt.json")
+        self.assertEqual(stored["startup_recovery_allowed"]["self_deviation_id"], "runtime_self_deviation:soft")
+
+        class FakeProcess:
+            pid = 123456
+
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[]), patch.object(
+            runtime_supervisor, "_pid_alive", return_value=False
+        ), patch.object(runtime_supervisor.runtime_env, "resolve_interpreter", return_value={
+            "status": "runnable",
+            "selected_path": "/usr/bin/python3",
+            "selected_source": "system_python3",
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+            "runnable": True,
+            "attempts": [],
+            "failures": [],
+        }), patch.object(runtime_supervisor, "_spawn_supervisor_process", return_value=FakeProcess()):
+            ensured = runtime_supervisor.ensure_runtime("127.0.0.1", 3333, timeout_seconds=0.01)
+
+        self.assertNotEqual(ensured.get("last_start_attempt", {}).get("failure_reason"), "runtime_self_deviation_restart_blocked")
+        self.assertNotIn("runtime_self_deviation_restart_blocked", ensured.get("reason_codes", []))
+
+    def test_startup_preflight_allows_historical_self_deviation_when_port_clear(self):
+        self_deviation = {
+            "id": "runtime_self_deviation:hard",
+            "status": "open",
+            "finding": {
+                "title": "CleanHouse became the suspicious process",
+                "reason_codes": ["runtime_memory_ceiling_exceeded"],
+                "mitigation_action": "runtime_stop",
+            },
+            "next_action": "Review evidence before restart.",
+            "evidence_artifact_path": "/tmp/hard-evidence.json",
+            "receipt_artifact_path": "/tmp/hard-receipt.json",
+            "reason_codes": ["runtime_memory_ceiling_exceeded"],
+        }
+        runtime_supervisor.write_state({
+            "runtime_state": "unhealthy",
+            "reason_codes": ["backend_not_running"],
+            "self_deviation": self_deviation,
+            "blocked_recovery": {"type": "runtime_memory_ceiling_exceeded"},
+        })
+
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[]), patch.object(
+            runtime_supervisor, "_pid_alive", return_value=False
+        ), patch.object(runtime_supervisor.runtime_env, "resolve_interpreter", return_value={
+            "status": "runnable",
+            "selected_path": "/usr/bin/python3",
+            "selected_source": "system_python3",
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+            "runnable": True,
+            "attempts": [],
+            "failures": [],
+        }):
+            preflight = runtime_supervisor.startup_preflight("127.0.0.1", 3333)
+
+        self.assertEqual(preflight["status"], "ready_to_start")
+        self.assertTrue(preflight["should_start"])
+        self.assertEqual(preflight["self_deviation"]["id"], "runtime_self_deviation:hard")
+        self.assertEqual(preflight["self_deviation"]["review_status"], "needs_review")
+        self.assertEqual(preflight["self_deviation"]["runtime_impact"], "historical_record")
+        self.assertFalse(preflight["self_deviation"]["blocks_startup"])
+        self.assertEqual(preflight["startup_warning"]["type"], "recoverable_self_deviation")
+        self.assertEqual(preflight["startup_warning"]["self_deviation"]["id"], "runtime_self_deviation:hard")
+        stored = runtime_supervisor.read_state()
+        self.assertEqual(stored["self_deviation"]["status"], "open")
+        self.assertEqual(stored["self_deviation"]["evidence_artifact_path"], "/tmp/hard-evidence.json")
+        self.assertEqual(stored["self_deviation"]["receipt_artifact_path"], "/tmp/hard-receipt.json")
+        self.assertEqual(stored["startup_recovery_allowed"]["self_deviation_id"], "runtime_self_deviation:hard")
+
+    def test_startup_preflight_allows_self_deviation_when_port_clear_with_lingering_pids(self):
+        self_deviation = {
+            "id": "runtime_self_deviation:runtime",
+            "status": "open",
+            "finding": {
+                "title": "CleanHouse became the suspicious process",
+                "reason_codes": ["readiness_probe_failed", "runtime_unresponsive"],
+                "mitigation_action": "degraded_state",
+            },
+            "next_action": "Mark runtime degraded and avoid starting more investigations until readiness recovers.",
+            "evidence_artifact_path": "/tmp/runtime-evidence.json",
+            "receipt_artifact_path": "/tmp/runtime-receipt.json",
+            "reason_codes": ["readiness_probe_failed", "runtime_unresponsive"],
+        }
+        runtime_supervisor.write_state({
+            "runtime_state": "unhealthy",
+            "backend_pid": 94716,
+            "supervisor_pid": 94701,
+            "reason_codes": ["listener_not_ready", "runtime_stop_requested"],
+            "blocked_recovery": {"type": "runtime_unresponsive"},
+            "self_deviation": self_deviation,
+            "interpreter": {
+                "path": "/usr/bin/python3",
+                "source": "system_python3",
+                "status": "runnable",
+                "supervisor_compatible": True,
+                "backend_compatible": True,
+                "runnable": True,
+            },
+        })
+
+        def fake_pid_alive(pid):
+            return int(pid or 0) in {94716, 94701}
+
+        def fake_pid_owned_by_cleanhouse(pid, expected_supervisor=False):
+            return int(pid or 0) in {94716, 94701}
+
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[]), patch.object(
+            runtime_supervisor, "_pid_alive", side_effect=fake_pid_alive
+        ), patch.object(runtime_supervisor, "_pid_owned_by_cleanhouse", side_effect=fake_pid_owned_by_cleanhouse), patch.object(
+            runtime_supervisor.runtime_env, "resolve_interpreter", side_effect=AssertionError("preflight should not probe interpreters")
+        ):
+            preflight = runtime_supervisor.startup_preflight("127.0.0.1", 3333)
+
+        self.assertEqual(preflight["status"], "ready_to_start")
+        self.assertTrue(preflight["should_start"])
+        self.assertEqual(preflight["runtime_state"], "recovering")
+        self.assertEqual(preflight["self_deviation"]["id"], "runtime_self_deviation:runtime")
+        self.assertEqual(preflight["self_deviation"]["runtime_impact"], "monitoring")
+        self.assertFalse(preflight["self_deviation"]["blocks_startup"])
+        self.assertEqual(preflight["startup_warning"]["type"], "recoverable_self_deviation")
+        stored = runtime_supervisor.read_state()
+        self.assertEqual(stored["startup_recovery_allowed"]["self_deviation_id"], "runtime_self_deviation:runtime")
+        self.assertEqual(stored["interpreter"]["path"], "/usr/bin/python3")
 
     def test_record_recovery_state_embeds_actionability(self):
         previous = {"runtime_state": "recovering", "reason_codes": ["readiness_probe_failed"]}

@@ -18,6 +18,7 @@ except ImportError:
     webview = None
 
 from backend import runtime_supervisor
+from backend import launch_agent
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -72,6 +73,11 @@ def main() -> None:
 
     host = _resolve_cleanhouse_host()
     port = _resolve_cleanhouse_port()
+    if sys.platform == "darwin":
+        launchd = launch_agent.install(sys.executable, host=host, port=port, start=True)
+        if launchd.get("status") == "error":
+            print(f"launch agent setup failed: {launchd.get('message')}")
+            sys.exit(1)
     runtime = runtime_supervisor.ensure_runtime(host, port, timeout_seconds=30.0)
     if runtime.get("runtime_state") not in {"healthy", "degraded"}:
         print(f"startup failed: runtime_state={runtime.get('runtime_state')} reasons={runtime.get('reason_codes')}")

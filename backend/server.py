@@ -5,12 +5,15 @@ Serves static files and provides API endpoints.
 
 from pathlib import Path
 import atexit
+import socket
+import time
 from flask import Flask, send_from_directory, jsonify, request, session, redirect
 from flask_cors import CORS
 import sys
 import os
 import secrets
 import logging
+import threading
 
 def _read_secret_key() -> str:
     """Load or create a local secret key for Flask session signing."""
@@ -58,6 +61,22 @@ DEFAULT_PORT = 3333
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
+
+class _QuietReadinessAccessFilter(logging.Filter):
+    QUIET_FRAGMENTS = (
+        "GET /health",
+        "HEAD /health",
+        "GET /cleanhouse/status?ready=1",
+        "HEAD /cleanhouse/status?ready=1",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(fragment in message for fragment in self.QUIET_FRAGMENTS)
+
+
+logging.getLogger("werkzeug").addFilter(_QuietReadinessAccessFilter())
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -66,8 +85,15 @@ try:
     from dotenv import load_dotenv
     env_path = Path(__file__).parent.parent / '.env'
     if env_path.exists():
-        load_dotenv(env_path)
-        logging.info(f"Loaded environment variables from {env_path}")
+        env_stat = env_path.stat()
+        if getattr(env_stat, "st_blocks", 1) == 0 and env_stat.st_size > 0:
+            logging.warning(
+                ".env exists but is dataless/unavailable; skipping dotenv load: %s",
+                env_path,
+            )
+        else:
+            load_dotenv(env_path)
+            logging.info(f"Loaded environment variables from {env_path}")
     else:
         logging.warning(f".env file not found at {env_path}")
 except ImportError:
@@ -276,6 +302,8 @@ def _require_auth_for_app_pages():
 
 _EVENTS_SERVICES_STARTED = False
 _RUNTIME_HEARTBEAT_STARTED = False
+_EVENTS_START_THREAD = None
+_BOOTSTRAP_READY_TIMEOUT_SECONDS = 5.0
 
 
 def _cleanhouse_host():
@@ -293,17 +321,106 @@ def _start_runtime_heartbeat() -> None:
         logging.warning("cleanhouse runtime heartbeat not started: %s", exc)
 
 
+def _wait_for_listener_ready(host: str, port: int, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                return True
+        except OSError:
+            time.sleep(0.05)
+    return False
+
+
 def _start_events_services():
     global _EVENTS_SERVICES_STARTED
-    _start_runtime_heartbeat()
     if _EVENTS_SERVICES_STARTED:
         return
     _EVENTS_SERVICES_STARTED = True
+    host = _cleanhouse_host()
+    port = _cleanhouse_port()
+    failure_reasons: list[str] = []
+    warmup_details: dict[str, object] = {
+        "events_db": {"status": "pending"},
+        "filesystem_watcher": {"status": "pending"},
+        "heartbeat": {"status": "pending"},
+    }
+
+    if not _wait_for_listener_ready(host, port, _BOOTSTRAP_READY_TIMEOUT_SECONDS):
+        failure_reasons.append("listener_not_ready")
+        warmup_details["listener"] = {
+            "status": "failed",
+            "error": "listener did not become ready within bootstrap timeout",
+        }
+        try:
+            runtime_supervisor.mark_backend_warmup_complete(
+                host,
+                port,
+                runtime_state="degraded",
+                reason_codes=failure_reasons,
+                details=warmup_details,
+            )
+        except Exception as exc:
+            logging.warning("cleanhouse warmup completion state could not be recorded: %s", exc)
+        return
+
+    try:
+        runtime_supervisor.mark_backend_bootstrap_ready(host, port)
+    except Exception as exc:
+        logging.warning("cleanhouse bootstrap ready state could not be recorded: %s", exc)
+    try:
+        runtime_supervisor.mark_backend_warmup_started(host, port)
+    except Exception as exc:
+        logging.warning("cleanhouse warmup start state could not be recorded: %s", exc)
+
     try:
         cleanhouse_events.init_db()
-        cleanhouse_events.start_watcher()
+        warmup_details["events_db"] = {"status": "ok"}
     except Exception as exc:
-        logging.warning("cleanhouse event services not started: %s", exc)
+        failure_reasons.append("events_db_init_failed")
+        warmup_details["events_db"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
+        logging.warning("cleanhouse events db not initialized: %s", exc)
+    try:
+        watcher_status = cleanhouse_events.start_watcher()
+        warmup_details["filesystem_watcher"] = watcher_status
+        if watcher_status.get("status") != "running":
+            failure_reasons.append("filesystem_watcher_unavailable")
+    except Exception as exc:
+        failure_reasons.append("filesystem_watcher_start_failed")
+        warmup_details["filesystem_watcher"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
+        logging.warning("cleanhouse filesystem watcher not started: %s", exc)
+    try:
+        _start_runtime_heartbeat()
+        warmup_details["heartbeat"] = {"status": "ok"}
+    except Exception as exc:
+        failure_reasons.append("heartbeat_start_failed")
+        warmup_details["heartbeat"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
+        logging.warning("cleanhouse runtime heartbeat not started: %s", exc)
+
+    try:
+        runtime_supervisor.mark_backend_warmup_complete(
+            host,
+            port,
+            runtime_state="degraded" if failure_reasons else "healthy",
+            reason_codes=failure_reasons,
+            details=warmup_details,
+        )
+    except Exception as exc:
+        logging.warning("cleanhouse warmup completion state could not be recorded: %s", exc)
+
+
+def _start_events_services_background() -> None:
+    global _EVENTS_START_THREAD
+    if _EVENTS_SERVICES_STARTED:
+        return
+    if _EVENTS_START_THREAD is not None and _EVENTS_START_THREAD.is_alive():
+        return
+    _EVENTS_START_THREAD = threading.Thread(
+        target=_start_events_services,
+        name="cleanhouse-events-startup",
+        daemon=True,
+    )
+    _EVENTS_START_THREAD.start()
 
 
 def _stop_events_services() -> None:
@@ -321,18 +438,15 @@ atexit.register(_stop_events_services)
 
 
 if hasattr(app, "before_serving"):
-    app.before_serving(_start_events_services)
+    app.before_serving(_start_events_services_background)
 elif hasattr(app, "before_first_request"):
-    app.before_first_request(_start_events_services)
+    app.before_first_request(_start_events_services_background)
 else:
     @app.before_request
     def _legacy_start_events_services_once() -> None:
-        _start_events_services()
+        _start_events_services_background()
 
 if __name__ == '__main__':
-    cleanhouse_events.init_db()
-    _start_runtime_heartbeat()
-
     # Run on localhost for desktop wrapper
     app.run(
         host=_cleanhouse_host(),
