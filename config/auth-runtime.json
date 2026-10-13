@@ -1,0 +1,22 @@
+{
+  "schema": "cleanhouse.auth-runtime.v1",
+  "appId": "cleanhouse",
+  "allowedOrigins": [
+    "http://localhost:3333",
+    "http://127.0.0.1:3333"
+  ],
+  "publicOrigin": "http://localhost:3333",
+  "providers": {
+    "google": {
+      "enabled": true,
+      "label": "Continue with Google",
+      "callbackPath": "/api/auth/google/callback",
+      "clientIdEnvironment": "CLEANHOUSE_GOOGLE_CLIENT_ID",
+      "clientSecretEnvironment": "CLEANHOUSE_GOOGLE_CLIENT_SECRET",
+      "clientSecretKeychain": {
+        "service": "org.cleanhouse.auth.google",
+        "account": "client-secret-v2"
+      }
+    }
+  }
+}

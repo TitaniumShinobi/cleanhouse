@@ -1,5 +1,7 @@
 # CleanHouse Authentication Setup Guide
 
+> **Superseded historical reference.** Do not implement this document. The canonical server-session architecture is [AUTHENTICATION_SYSTEM.md](AUTHENTICATION_SYSTEM.md).
+
 **Date**: November 13, 2025  
 **Status**: Complete Implementation Guide  
 **Architecture**: Flask Backend + Vanilla JS Frontend + pywebview Desktop Wrapper

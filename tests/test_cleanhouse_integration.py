@@ -469,10 +469,11 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("Continue with Microsoft", signup_html)
         self.assertIn("Continue with Apple", signup_html)
         self.assertIn("Continue with GitHub", signup_html)
-        self.assertIn('id="oauth-google" onclick="signInWithGoogle()" disabled aria-disabled="true"', signup_html)
-        self.assertIn('id="oauth-microsoft" onclick="signInWithMicrosoft()" disabled aria-disabled="true"', signup_html)
-        self.assertIn('id="oauth-apple" onclick="signInWithApple()" disabled aria-disabled="true"', signup_html)
-        self.assertIn('id="oauth-github" onclick="signInWithGithub()" disabled aria-disabled="true"', signup_html)
+        for provider in ("google", "microsoft", "apple", "github"):
+            self.assertIn(f'id="oauth-{provider}"', signup_html)
+            self.assertIn(f'data-provider="{provider}"', signup_html)
+            self.assertIn(f'onclick="signInWith{provider.title()}()"', signup_html)
+        self.assertEqual(signup_html.count('disabled aria-disabled="true"'), 4)
         self.assertNotIn('id="role"', signup_html)
         self.assertNotIn("Select your role", signup_html)
 
@@ -514,15 +515,14 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertNotIn("Select your role", simple_webview_auth)
 
         self.assertEqual(cleanhouse_auth_config["app"]["id"], "cleanhouse")
-        self.assertEqual(cleanhouse_auth_config["redirects"]["postLoginPath"], "/dashboard")
-        self.assertIn("http://localhost:3333", cleanhouse_auth_config["allowedOrigins"])
-        self.assertIn("http://127.0.0.1:3333", cleanhouse_auth_config["allowedOrigins"])
+        self.assertEqual(cleanhouse_auth_config["redirects"]["postLoginPath"], "/overview")
+        self.assertEqual(cleanhouse_auth_config["allowedOrigins"], ["http://localhost:3333"])
         self.assertTrue(cleanhouse_auth_config["turnstile"]["required"])
         self.assertTrue(cleanhouse_auth_config["turnstile"]["enabled"])
         doc_keys = {doc["key"] for doc in cleanhouse_auth_config["docs"]}
         self.assertEqual(doc_keys, {"cleanhouse:terms", "cleanhouse:privacy", "cleanhouse:eeccd"})
         provider_ids = {provider["provider"] for provider in cleanhouse_auth_config["providers"]}
-        self.assertEqual(provider_ids, {"google", "microsoft", "apple", "github"})
+        self.assertEqual(provider_ids, {"google"})
 
     def test_dashboard_receipt_scope_panel_exposes_receipt_evidence(self):
         repo_root = Path(__file__).resolve().parents[1]

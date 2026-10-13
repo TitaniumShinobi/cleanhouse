@@ -5,7 +5,7 @@ Serves static files and provides API endpoints.
 
 from pathlib import Path
 import atexit
-from flask import Flask, send_from_directory, jsonify, request, session
+from flask import Flask, send_from_directory, jsonify, request, session, redirect
 from flask_cors import CORS
 import sys
 import os
@@ -73,6 +73,12 @@ try:
 except ImportError:
     logging.warning("python-dotenv not installed, environment variables must be set manually")
 
+# AUTH configuration must be resolved before auth routes or token helpers are
+# imported. The managed runtime uses its staged public contract plus Keychain.
+from backend import auth_runtime_config
+
+auth_runtime_config.initialize_auth_runtime()
+
 # Safe defaults: native notifications enabled with live-only delivery gates.
 os.environ.setdefault("CLEANHOUSE_NATIVE_NOTIFICATIONS", "1")
 os.environ.setdefault("CLEANHOUSE_NATIVE_CODEX_ACTIVITY", "1")
@@ -130,6 +136,14 @@ def _auth_enabled():
     return os.environ.get('CLEANHOUSE_ENABLE_AUTH', '1').lower() not in {'0', 'false', 'no', 'off'}
 
 
+def _requires_login():
+    return os.environ.get('CLEANHOUSE_REQUIRE_LOGIN', '1').lower() not in {'0', 'false', 'no', 'off'}
+
+
+def _has_cleanhouse_session():
+    return bool(session.get('user_id') or session.get('oauth_user'))
+
+
 if _auth_enabled():
     try:
         from backend.api import auth
@@ -153,6 +167,14 @@ def login():
 def signup():
     """Serve signup page"""
     return send_from_directory(str(FRONTEND_DIR), 'signup.html')
+
+@app.route('/account-recovery')
+def account_recovery():
+    return send_from_directory(str(FRONTEND_DIR), 'account-recovery.html')
+
+@app.route('/password-reset')
+def password_reset():
+    return send_from_directory(str(FRONTEND_DIR), 'password-reset.html')
 
 @app.route('/account/delete')
 def account_delete():
@@ -182,6 +204,7 @@ def dashboard():
     """Serve monitoring dashboard"""
     return send_from_directory(str(FRONTEND_DIR), 'dashboard.html')
 
+@app.route('/overview')
 @app.route('/investigations')
 def investigations():
     """Serve investigation-first operator surface"""
@@ -218,6 +241,37 @@ def assets(filename):
     if frontend_asset.exists():
         return send_from_directory(str(FRONTEND_DIR / 'assets'), filename)
     return send_from_directory(str(BASE_DIR / 'assets'), filename)
+
+
+@app.before_request
+def _require_auth_for_app_pages():
+    if not _auth_enabled() or not _requires_login():
+        return None
+    if request.method == 'OPTIONS':
+        return None
+
+    public_prefixes = (
+        '/api/auth',
+        '/cleanhouse/',
+        '/assets/',
+        '/css/',
+        '/js/',
+        '/legal/',
+    )
+    public_paths = {
+        '/',
+        '/login',
+        '/signup',
+        '/account-recovery',
+        '/password-reset',
+        '/health',
+        '/favicon.ico',
+    }
+    if request.path in public_paths or any(request.path.startswith(prefix) for prefix in public_prefixes):
+        return None
+    if _has_cleanhouse_session():
+        return None
+    return redirect('/login', code=302)
 
 
 _EVENTS_SERVICES_STARTED = False

@@ -1,5 +1,7 @@
 # CleanHouse Authentication Quick Reference
 
+> **Superseded historical reference.** Do not implement this document. The canonical server-session architecture is [AUTHENTICATION_SYSTEM.md](AUTHENTICATION_SYSTEM.md).
+
 **Quick setup guide for implementing authentication**
 
 ---

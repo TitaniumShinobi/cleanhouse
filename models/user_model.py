@@ -541,6 +541,25 @@ class UserService:
                 return False
         
         return False
+
+    def set_password(self, user_id: str, password: str) -> bool:
+        """Replace a sharded user's password hash atomically."""
+        if len(password) < 8:
+            return False
+        auth_path = self.shard_manager.get_user_path(user_id) / "identity" / "auth.json"
+        if not auth_path.exists():
+            return False
+        try:
+            auth = json.loads(auth_path.read_text(encoding="utf-8"))
+            auth["password_hash"] = self._hash_password(password)
+            auth["password_updated_at"] = datetime.now().isoformat()
+            temp_path = auth_path.with_suffix(".json.tmp")
+            temp_path.write_text(json.dumps(auth, indent=2), encoding="utf-8")
+            temp_path.replace(auth_path)
+            return True
+        except (OSError, json.JSONDecodeError, RuntimeError):
+            logging.exception("Failed to update password for %s", user_id)
+            return False
     
     def delete_user(self, user_id: str = None, legacy_id: int = None) -> bool:
         """

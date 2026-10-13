@@ -196,9 +196,6 @@
 		                }
 
 		                async function loadAuthConfig() {
-		                    if (!document.getElementById('signupForm')) {
-		                        return authConfig;
-		                    }
 		                    try {
 		                        const response = await fetch(`${AUTH_BASE_PATH}/config`, {
 		                            method: 'GET',
@@ -219,8 +216,26 @@
 		                    } catch (error) {
 		                        authConfig = DEFAULT_AUTH_CONFIG;
 		                    }
+		                    renderProviderControls();
 		                    renderTurnstile();
 		                    return authConfig;
+		                }
+
+		                function providerAvailable(provider) {
+		                    return (authConfig.providers || []).some((item) => (
+		                        item.provider === provider && item.enabled === true && item.available === true
+		                    ));
+		                }
+
+		                function renderProviderControls() {
+		                    document.querySelectorAll('.oauth-btn[data-provider]').forEach((button) => {
+		                        const available = providerAvailable(button.dataset.provider);
+		                        button.hidden = !available;
+		                        if (!available) {
+		                            button.disabled = true;
+		                            button.setAttribute('aria-disabled', 'true');
+		                        }
+		                    });
 		                }
 
 		                function requiredAuthDocs() {
@@ -324,35 +339,82 @@
 		                function updateSignupOauthState() {
 		                    const accepted = document.getElementById('terms')?.checked === true;
 		                    document.querySelectorAll('#oauth-section .oauth-btn').forEach((button) => {
-		                        button.disabled = !accepted;
-		                        button.setAttribute('aria-disabled', String(!accepted));
+		                        const available = providerAvailable(button.dataset.provider);
+		                        button.disabled = !accepted || !available;
+		                        button.setAttribute('aria-disabled', String(!accepted || !available));
 		                    });
 		                }
 
 	                function dashboardRedirectWithLoginReport(data) {
 	                    const reportId = data.login_report?.id || data.login_report?.report_id;
 	                    if (reportId) {
-	                        return `/dashboard?login_report_id=${encodeURIComponent(reportId)}`;
+	                        return `/overview?login_report_id=${encodeURIComponent(reportId)}`;
 	                    }
-	                    return '/dashboard';
+	                    return '/overview';
+	                }
+
+	                async function waitForDesktopOAuth() {
+	                    for (let attempt = 0; attempt < 150; attempt += 1) {
+	                        await new Promise((resolve) => setTimeout(resolve, 2000));
+	                        try {
+	                            const response = await fetch(`${AUTH_BASE_PATH}/oauth/user`, {
+	                                headers: { 'Accept': 'application/json' },
+	                                credentials: 'include',
+	                            });
+	                            if (!response.ok) continue;
+	                            const result = await response.json();
+	                            if (result.success) {
+	                                completeAuth(result);
+	                                return;
+	                            }
+	                        } catch (_) {
+	                            // The managed runtime can briefly restart; keep the bounded poll active.
+	                        }
+	                    }
+	                    showOAuthLoading(false);
+	                    showError('Google sign-in timed out. Please try again.');
 	                }
 
 	                function completeAuth(result) {
-	                    if (result.token) {
-	                        localStorage.setItem('cleanhouse.authToken', result.token);
-	                    }
-	                    if (result.user) {
-	                        localStorage.setItem('cleanhouse.user', JSON.stringify(result.user));
-	                    }
+	                    if (window.authState && result.user) window.authState.setUser(result.user, null);
 	                    showSuccess(result.message || 'Signed in.');
 	                    setTimeout(() => {
 	                        window.location.href = dashboardRedirectWithLoginReport(result);
 	                    }, 350);
 	                }
 
-		                function openOAuthProvider(provider) {
-		                    showOAuthLoading(true);
-		                    if (document.getElementById('signupForm') && !validateSignupRequirements()) {
+	                async function completeOAuthRedirectIfPresent() {
+	                    const params = new URLSearchParams(window.location.search);
+	                    if (params.get('oauth_success') !== '1') {
+	                        return false;
+	                    }
+	                    showOAuthLoading(true);
+	                    try {
+	                        const response = await fetch(`${AUTH_BASE_PATH}/oauth/user`, {
+	                            method: 'GET',
+	                            headers: { 'Accept': 'application/json' },
+	                            credentials: 'include',
+	                        });
+	                        const result = await response.json().catch(() => ({
+	                            success: false,
+	                            message: 'OAuth response was not valid JSON.',
+	                        }));
+	                        if (response.ok && result.success) {
+	                            completeAuth(result);
+	                            return true;
+	                        }
+	                        showError(result.message || 'OAuth sign-in could not be completed.');
+	                    } catch (error) {
+	                        showError(`OAuth sign-in failed: ${error.message}`);
+	                    } finally {
+	                        showOAuthLoading(false);
+	                    }
+	                    return false;
+	                }
+
+	                function openOAuthProvider(provider) {
+	                    showOAuthLoading(true);
+	                    if (document.getElementById('signupForm') && !validateSignupRequirements()) {
 		                        showOAuthLoading(false);
 		                        return true;
 		                    }
@@ -486,7 +548,7 @@
 		                }
 
 	                // OAuth functions - use system browser with full OAuth flow
-                function signInWithGoogle() {
+                async function signInWithGoogle() {
                     if (hasAPI()) {
                         try {
                             window.pywebview.api.log_click('button', '"Continue with Google"');
@@ -502,7 +564,7 @@
                     if (window.pywebview && window.pywebview.api) {
                         try {
                             console.log('[OAUTH] Calling openOAuthUrl for Google...');
-                            const result = window.pywebview.api.openOAuthUrl(null, 'google');
+                            const result = await window.pywebview.api.openOAuthUrl(null, 'google');
                             console.log('[OAUTH] Result received:', result);
 
                             if (result) {
@@ -511,6 +573,7 @@
                                     const message = result.message || 'Opening Google authentication in your browser. Please complete the sign-in there.';
                                     console.log('[OAUTH] Success:', message);
                                     showSuccess(message);
+	                                waitForDesktopOAuth();
 
                                     if (result.user) {
                                         // Already authenticated (shouldn't happen, but handle it)
@@ -802,10 +865,14 @@
                     }
                 }
 
-	                // Focus first input
-		                if (document.getElementById('signupForm')) {
-		                    loadAuthConfig();
+		                const query = new URLSearchParams(window.location.search);
+		                if (query.get('error') === 'provider_unavailable') {
+		                    showError('Google sign-in is not configured for this CleanHouse runtime.');
 		                }
+		                completeOAuthRedirectIfPresent();
+
+		                // Focus first input
+		                loadAuthConfig();
 		                const emailField = document.getElementById('email');
 		                if (emailField) {
 		                    emailField.focus();

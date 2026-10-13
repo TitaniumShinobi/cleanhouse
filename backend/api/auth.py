@@ -19,7 +19,7 @@ import queue
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Optional, Dict, Any
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -27,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from models import UserService, DatabaseManager
 from backend.utils.jwt_utils import generate_jwt_token, verify_jwt_token, get_user_from_token
 from backend.utils.csrf import generate_csrf_token, csrf_protect
+from backend import auth_runtime_config
+from backend.auth_recovery import issue_recovery, consume_recovery, deliver_recovery
 
 bp = Blueprint('auth', __name__)
 
@@ -34,9 +36,8 @@ bp = Blueprint('auth', __name__)
 _db_manager = None
 _user_service = None
 
-# OAuth state storage (in production, use Redis or database)
-_oauth_states = {}  # {state: {provider, code_verifier, timestamp}}
 _ALLOWED_OAUTH_PROVIDERS = {"google", "microsoft", "github", "apple"}
+_OAUTH_STATE_TTL_SECONDS = 600
 
 
 def _bad_request(reason: str):
@@ -44,6 +45,10 @@ def _bad_request(reason: str):
         'success': False,
         'message': reason,
     }), 400
+
+
+def _public_error(code: str, message: str, status: int):
+    return jsonify({'success': False, 'code': code, 'message': message}), status
 
 
 def _get_json_payload():
@@ -92,6 +97,19 @@ def _extract_bearer_token(auth_header: str):
 def _cleanhouse_public_origin() -> str:
     """Return the local browser origin used for CleanHouse OAuth callbacks."""
     return os.getenv('CLEANHOUSE_PUBLIC_ORIGIN') or f"http://127.0.0.1:{os.getenv('CLEANHOUSE_PORT', '3333')}"
+
+
+def _oauth_redirect_uri(provider: str) -> str:
+    """Return the callback URI registered with the OAuth provider."""
+    configured = auth_runtime_config.provider_config(provider).get('callback_url')
+    if configured:
+        return str(configured)
+    provider_key = str(provider or '').strip().upper()
+    for name in (f'{provider_key}_CALLBACK_URL', f'{provider_key}_CALLBACK'):
+        value = os.getenv(name, '').strip()
+        if value:
+            return value
+    return f"{_cleanhouse_public_origin().rstrip('/')}/api/auth/oauth/callback"
 
 
 def _env_flag(name: str, default: str = '1') -> bool:
@@ -358,6 +376,7 @@ def generate_pkce():
 
 @bp.route('/auth/config', methods=['GET'])
 def auth_config():
+    public_auth = auth_runtime_config.public_config_payload()
     return jsonify({
         'success': True,
         'ok': True,
@@ -365,12 +384,7 @@ def auth_config():
             'credentials': {'enabled': True},
             'docs': _cleanhouse_auth_docs(),
             'turnstile': _turnstile_config(),
-            'providers': [
-                {'provider': 'google', 'label': 'Continue with Google', 'enabled': True, 'available': True},
-                {'provider': 'microsoft', 'label': 'Continue with Microsoft', 'enabled': True, 'available': True},
-                {'provider': 'apple', 'label': 'Continue with Apple', 'enabled': True, 'available': True},
-                {'provider': 'github', 'label': 'Continue with GitHub', 'enabled': True, 'available': True},
-            ],
+            'providers': public_auth['providers'],
         },
     })
 
@@ -484,7 +498,7 @@ def create_account():
         logging.error(f"Account creation error: {e}", exc_info=True)
         return jsonify({
             'success': False,
-            'message': f'Account creation failed: {str(e)}'
+            'code': 'ACCOUNT_CREATION_FAILED', 'message': 'Account creation failed.'
         }), 500
 
 @bp.route('/auth/login', methods=['POST'])
@@ -549,7 +563,7 @@ def login():
         logging.error(f"Login error: {e}", exc_info=True)
         return jsonify({
             'success': False,
-            'message': f'Login failed: {str(e)}'
+            'code': 'LOGIN_FAILED', 'message': 'Sign in failed.'
         }), 500
 
 @bp.route('/auth/oauth/<provider>', methods=['GET', 'POST'])
@@ -563,43 +577,32 @@ def oauth(provider):
                 'message': f'Unknown OAuth provider: {provider}'
             }), 400
 
+        provider_runtime = auth_runtime_config.provider_config(provider)
+        if not provider_runtime.get('enabled') or not provider_runtime.get('available'):
+            return redirect(
+                '/login?error=provider_unavailable&provider=' + urllib.parse.quote(provider)
+            )
+
         # Generate PKCE codes
         code_verifier, code_challenge = generate_pkce()
 
         # Generate state for CSRF protection
         state = secrets.token_urlsafe(32)
 
-        # Store state and verifier (in production, use Redis or database)
-        _oauth_states[state] = {
+        oauth_states = dict(session.get('oauth_states') or {})
+        oauth_states[state] = {
             'provider': provider,
             'code_verifier': code_verifier,
-            'timestamp': threading.current_thread().ident
+            'created_at': int(datetime.now(timezone.utc).timestamp()),
         }
+        session['oauth_states'] = oauth_states
+        session.modified = True
 
         # Get client ID from environment
-        client_id = os.getenv(f'{provider.upper()}_CLIENT_ID', '')
-        if not client_id:
-            logging.error(f"{provider.upper()}_CLIENT_ID not found in environment")
-            logging.debug(f"Available env vars with CLIENT_ID: {[k for k in os.environ.keys() if 'CLIENT_ID' in k]}")
-            # Try to load from .env file if not already loaded
-            try:
-                from dotenv import load_dotenv
-                env_path = Path(__file__).parent.parent.parent / '.env'
-                if env_path.exists():
-                    load_dotenv(env_path, override=False)
-                    client_id = os.getenv(f'{provider.upper()}_CLIENT_ID', '')
-                    logging.info(f"Reloaded .env file, {provider.upper()}_CLIENT_ID: {'found' if client_id else 'not found'}")
-            except ImportError:
-                pass
-
-            if not client_id:
-                return jsonify({
-                    'success': False,
-                    'message': f'{provider.capitalize()} OAuth not configured. Please set {provider.upper()}_CLIENT_ID in environment.'
-                }), 400
+        client_id = str(provider_runtime.get('client_id') or '')
 
         # Build redirect URI (points back to our callback endpoint)
-        redirect_uri = f'{_cleanhouse_public_origin()}/api/auth/oauth/callback'
+        redirect_uri = _oauth_redirect_uri(provider)
 
         # Build OAuth URL based on provider
         if provider.lower() == 'google':
@@ -658,9 +661,7 @@ def oauth(provider):
         oauth_url = f"{auth_url}?{urllib.parse.urlencode(params)}"
 
         logging.info(f"[OAUTH] Redirecting to {provider} OAuth")
-        logging.info(f"[OAUTH] Client ID: {client_id[:20]}...")
         logging.info(f"[OAUTH] Redirect URI: {redirect_uri}")
-        logging.info(f"[OAUTH] OAuth URL: {oauth_url[:150]}...")
 
         # Redirect to OAuth provider
         return redirect(oauth_url)
@@ -669,9 +670,10 @@ def oauth(provider):
         logging.error(f"OAuth error: {e}", exc_info=True)
         return jsonify({
             'success': False,
-            'message': f'OAuth error: {str(e)}'
+            'code': 'OAUTH_START_FAILED', 'message': 'OAuth sign in could not be started.'
         }), 500
 
+@bp.route('/auth/google/callback', methods=['GET', 'POST'])
 @bp.route('/auth/oauth/callback', methods=['GET', 'POST'])
 def oauth_callback():
     """Handle OAuth callback from provider"""
@@ -706,11 +708,16 @@ def oauth_callback():
             return redirect('/login?error=invalid_callback')
 
         # Verify state
-        if state not in _oauth_states:
+        oauth_states = dict(session.get('oauth_states') or {})
+        oauth_data = oauth_states.pop(state, None)
+        session['oauth_states'] = oauth_states
+        session.modified = True
+        if not oauth_data:
             logging.error(f"OAuth state mismatch: {state}")
             return redirect('/login?error=invalid_state')
-
-        oauth_data = _oauth_states.pop(state)
+        created_at = int(oauth_data.get('created_at') or 0)
+        if int(datetime.now(timezone.utc).timestamp()) - created_at > _OAUTH_STATE_TTL_SECONDS:
+            return redirect('/login?error=expired_state')
         provider = oauth_data['provider']
         code_verifier = oauth_data['code_verifier']
         if not isinstance(code_verifier, str) or not code_verifier.strip():
@@ -770,9 +777,6 @@ def oauth_callback():
             trigger=f'auth/oauth/{provider}',
         )
 
-        # Generate JWT token
-        token = generate_jwt_token(user_data)
-
         # Store user data in session
         session['oauth_user'] = {
             'id': user_data['user_id'],
@@ -782,32 +786,15 @@ def oauth_callback():
             'name': user_data['full_name'],
             'role': user_data['role']
         }
-        session['oauth_token'] = token
         session['oauth_success'] = True
         session['oauth_login_report'] = login_report
-
-        # Save token to file for desktop app to pick up
-        from pathlib import Path
-        cleanhouse_root = Path.home() / '.cleanhouse'
-        cleanhouse_root.mkdir(parents=True, exist_ok=True)
-
-        # Save token to .auth_token file
-        auth_token_file = cleanhouse_root / '.auth_token'
-        auth_token_file.write_text(token, encoding='utf-8')
-
-        # Save user data to .auth_user.json
-        auth_user_file = cleanhouse_root / '.auth_user.json'
-        import json as json_lib
-        auth_user_file.write_text(json_lib.dumps(session['oauth_user'], indent=2), encoding='utf-8')
-
-        logging.info(f"Saved authentication token for desktop app: {user_data['email']}")
 
         # Redirect to login page with success indicator
         return redirect('/login?oauth_success=1')
 
     except Exception as e:
         logging.error(f"OAuth callback error: {e}", exc_info=True)
-        return redirect('/login?error=' + urllib.parse.quote(str(e)))
+        return redirect('/login?error=oauth_callback_failed')
 
 @bp.route('/auth/oauth/user', methods=['GET'])
 def oauth_user():
@@ -815,110 +802,36 @@ def oauth_user():
     from flask import session
     if session.get('oauth_success') and session.get('oauth_user'):
         user_data = session.pop('oauth_user')
-        token = session.pop('oauth_token', None)
         login_report = session.pop('oauth_login_report', None)
         session.pop('oauth_success', None)
+        session['user_id'] = user_data['user_id']
+        session['email'] = user_data['email']
         return jsonify({
             'success': True,
             'user': user_data,
-            'token': token,
             'login_report': login_report
         })
-    else:
-        return jsonify({
-            'success': False,
-            'message': 'No OAuth user data found'
-        }), 404
 
-@bp.route('/auth/launch-desktop', methods=['POST'])
-def launch_desktop():
-    """Save JWT token and launch desktop app"""
-    try:
-        data, error = _get_json_payload()
-        if error:
-            return error
-        token, error = _require_string(data.get('token'), 'token')
-        if error:
-            return error
-        user_data, error = _require_dict(data.get('user'), 'user')
-        if error:
-            return error
-        if not token:
-            return jsonify({
-                'success': False,
-                'message': 'Token required'
-            }), 400
-
-        # Save token to file that desktop app can read
-        from pathlib import Path
-        cleanhouse_root = Path.home() / '.cleanhouse'
-        cleanhouse_root.mkdir(parents=True, exist_ok=True)
-
-        # Save token to .auth_token file
-        auth_token_file = cleanhouse_root / '.auth_token'
-        auth_token_file.write_text(token, encoding='utf-8')
-
-        # Save user data to .auth_user.json
-        auth_user_file = cleanhouse_root / '.auth_user.json'
-        import json as json_lib
-        auth_user_file.write_text(json_lib.dumps(user_data, indent=2), encoding='utf-8')
-
-        logging.info(f"Saved authentication token for user: {user_data.get('email', 'unknown')}")
-
-        # Launch desktop app
-        import subprocess
-        import sys
-        from pathlib import Path as PathLib
-
-        # Get the project root directory
-        project_root = PathLib(__file__).parent.parent.parent
-        brain_py = project_root / 'corefiles' / 'brain.py'
-
-        if not brain_py.exists():
-            logging.error(f"Desktop app not found at: {brain_py}")
-            return jsonify({
-                'success': False,
-                'message': 'Desktop app not found'
-            }), 500
-
-        # Launch desktop app in background
-        # Use sys.executable to use the same Python interpreter
-        subprocess.Popen(
-            [sys.executable, str(brain_py)],
-            cwd=str(project_root),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True  # Detach from parent process
-        )
-
-        logging.info("Desktop app launched successfully")
-
-        return jsonify({
-            'success': True,
-            'message': 'Desktop app launched'
-        })
-
-    except Exception as e:
-        logging.error(f"Launch desktop error: {e}", exc_info=True)
-        return jsonify({
-            'success': False,
-            'message': f'Failed to launch desktop app: {str(e)}'
-        }), 500
+    return jsonify({
+        'success': False,
+        'message': 'No OAuth user data found'
+    }), 404
 
 @bp.route('/auth/me', methods=['GET'])
 def get_current_user():
-    """Get current authenticated user from JWT token"""
+    """Get the current browser session, with bearer support for native clients."""
     try:
-        # Get token from Authorization header
         auth_header = request.headers.get('Authorization', '')
-        token, error = _extract_bearer_token(auth_header)
-        if error:
-            return jsonify({
-                'success': False,
-                'message': error[0]['message'] if isinstance(error[0], dict) else 'Authorization header missing or invalid'
-            }), 401
-
-        user_data = get_user_from_token(token)
+        user_data = None
+        if auth_header:
+            token, error = _extract_bearer_token(auth_header)
+            if error:
+                return _public_error('INVALID_AUTHORIZATION', 'Authorization header must be in the format: Bearer <token>', 401)
+            user_data = get_user_from_token(token)
+        elif session.get('user_id'):
+            user = get_user_service().get_user_by_id(user_id=str(session['user_id']))
+            if user:
+                user_data = {'user_id': _model_user_id(user), 'email': user.email, 'full_name': user.full_name, 'role': user.role}
 
         if user_data:
             return jsonify({
@@ -939,10 +852,7 @@ def get_current_user():
             }), 401
     except Exception as e:
         logging.error(f"Get current user error: {e}", exc_info=True)
-        return jsonify({
-            'success': False,
-            'message': f'Error getting user: {str(e)}'
-        }), 500
+        return _public_error('AUTH_SESSION_FAILED', 'Unable to validate the current session.', 500)
 
 
 @bp.route('/auth/account', methods=['DELETE'])
@@ -951,14 +861,16 @@ def delete_account():
     """Delete the authenticated CleanHouse account and clear local VVAULT user rows."""
     try:
         auth_header = request.headers.get('Authorization', '')
-        token, error = _extract_bearer_token(auth_header)
-        if error:
-            return jsonify({
-                'success': False,
-                'message': error[0]['message'] if isinstance(error[0], dict) else 'Authorization header missing or invalid',
-            }), 401
-
-        user_data = get_user_from_token(token)
+        user_data = None
+        if auth_header:
+            token, error = _extract_bearer_token(auth_header)
+            if error:
+                return _public_error('INVALID_AUTHORIZATION', 'Authorization header must be in the format: Bearer <token>', 401)
+            user_data = get_user_from_token(token)
+        elif session.get('user_id'):
+            user = get_user_service().get_user_by_id(user_id=str(session['user_id']))
+            if user:
+                user_data = {'user_id': _model_user_id(user), 'email': user.email, 'full_name': user.full_name, 'role': user.role}
         if not user_data:
             return jsonify({
                 'success': False,
@@ -1012,30 +924,48 @@ def delete_account():
         logging.error(f"Account deletion error: {e}", exc_info=True)
         return jsonify({
             'success': False,
-            'message': f'Account deletion failed: {str(e)}',
+            'code': 'ACCOUNT_DELETION_FAILED', 'message': 'Account deletion failed.',
         }), 500
 
 
-@bp.route('/auth/test-oauth', methods=['GET'])
-def test_oauth():
-    """Test endpoint to check OAuth configuration"""
-    providers = ['google', 'microsoft', 'apple', 'github']
-    config = {}
+@bp.route('/auth/recovery/request', methods=['POST'])
+def request_recovery():
+    data, error = _get_json_payload()
+    if error:
+        return error
+    email, error = _require_string(data.get('email'), 'email', max_len=320)
+    if error:
+        return error
+    user = get_user_service().get_user_by_email(email)
+    if user:
+        raw_token = issue_recovery(str(_model_user_id(user)), user.email)
+        try:
+            deliver_recovery(user.email, raw_token, _cleanhouse_public_origin())
+        except Exception:
+            logging.exception('Account recovery delivery failed')
+    return jsonify({'success': True, 'message': 'If that account exists, recovery instructions have been sent.'})
 
-    for provider in providers:
-        client_id = os.getenv(f'{provider.upper()}_CLIENT_ID', '')
-        client_secret = os.getenv(f'{provider.upper()}_CLIENT_SECRET', '')
-        config[provider] = {
-            'client_id_set': bool(client_id),
-            'client_secret_set': bool(client_secret),
-            'client_id_preview': client_id[:20] + '...' if client_id else None
-        }
 
-    return jsonify({
-        'success': True,
-        'oauth_config': config,
-        'env_file_exists': (Path(__file__).parent.parent.parent / '.env').exists()
-    })
+@bp.route('/auth/recovery/reset', methods=['POST'])
+def reset_password():
+    data, error = _get_json_payload()
+    if error:
+        return error
+    token, error = _require_string(data.get('token'), 'token', max_len=512)
+    if error:
+        return error
+    password, error = _require_string(data.get('password'), 'password', max_len=4096)
+    if error:
+        return error
+    if len(password) < 8:
+        return _bad_request('Password must be at least 8 characters')
+    recovery = consume_recovery(token)
+    if not recovery:
+        return _public_error('INVALID_RECOVERY_TOKEN', 'Recovery link is invalid or expired.', 400)
+    if not get_user_service().set_password(recovery['user_id'], password):
+        return _public_error('RECOVERY_FAILED', 'Password could not be updated.', 500)
+    session.clear()
+    return jsonify({'success': True, 'message': 'Password updated. Please sign in.'})
 
 @bp.route('/auth/logout', methods=['POST'])
 def logout():
@@ -1043,6 +973,13 @@ def logout():
     try:
         # Clear session
         session.clear()
+        for local_name in ('.auth_token', '.auth_user.json'):
+            try:
+                (Path.home() / '.cleanhouse' / local_name).unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logging.warning('Unable to remove saved local auth state %s: %s', local_name, exc)
 
         return jsonify({
             'success': True,
@@ -1052,7 +989,7 @@ def logout():
         logging.error(f"Logout error: {e}", exc_info=True)
         return jsonify({
             'success': False,
-            'message': f'Logout failed: {str(e)}'
+            'code': 'LOGOUT_FAILED', 'message': 'Logout failed.'
         }), 500
 
 def exchange_oauth_token(provider: str, code: str, code_verifier: str) -> Optional[Dict[str, Any]]:
@@ -1065,9 +1002,10 @@ def exchange_oauth_token(provider: str, code: str, code_verifier: str) -> Option
         if not isinstance(code_verifier, str) or not code_verifier.strip():
             return None
 
-        client_id = os.getenv(f'{provider.upper()}_CLIENT_ID', '')
-        client_secret = os.getenv(f'{provider.upper()}_CLIENT_SECRET', '')
-        redirect_uri = f'{_cleanhouse_public_origin()}/api/auth/oauth/callback'
+        provider_runtime = auth_runtime_config.provider_config(provider)
+        client_id = str(provider_runtime.get('client_id') or '')
+        client_secret = str(provider_runtime.get('client_secret') or '')
+        redirect_uri = _oauth_redirect_uri(provider)
 
         token_data = {
             'client_id': client_id,

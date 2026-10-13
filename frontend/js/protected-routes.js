@@ -5,7 +5,13 @@
 
 // List of protected routes (paths that require authentication)
 const PROTECTED_ROUTES = [
-    '/dashboard',
+    '/overview',
+    '/advanced',
+    '/zaelith',
+    '/zaelith/connect',
+    '/identity',
+    '/reports',
+    '/help',
     '/settings',
     '/scan',
     '/results',
@@ -16,27 +22,40 @@ const PROTECTED_ROUTES = [
 const PUBLIC_ROUTES = [
     '/login',
     '/signup',
+    '/account-recovery',
+    '/password-reset',
     '/'
 ];
+
+/**
+ * Match an exact route or one of its child paths without treating `/` as a
+ * prefix for every page in the application.
+ */
+function matchesRoute(path, route) {
+    if (route === '/') {
+        return path === '/';
+    }
+    return path === route || path.startsWith(route + '/');
+}
 
 /**
  * Check if current route requires authentication
  */
 function isProtectedRoute(path) {
-    return PROTECTED_ROUTES.some(route => path.startsWith(route));
+    return PROTECTED_ROUTES.some(route => matchesRoute(path, route));
 }
 
 /**
  * Check if current route is public
  */
 function isPublicRoute(path) {
-    return PUBLIC_ROUTES.some(route => path === route || path.startsWith(route));
+    return PUBLIC_ROUTES.some(route => matchesRoute(path, route));
 }
 
 /**
  * Protect route - redirect to login if not authenticated
  */
-function protectRoute() {
+async function protectRoute() {
     const currentPath = window.location.pathname;
     
     // Skip protection for public routes
@@ -46,22 +65,13 @@ function protectRoute() {
     
     // Check if route is protected
     if (isProtectedRoute(currentPath)) {
-        // Verify authentication
+        if (window.authState) await window.authState.init();
         if (!window.authState || !window.authState.isAuthenticated()) {
             console.log('[AUTH] Protected route accessed without authentication, redirecting to login');
             window.location.href = '/login?redirect=' + encodeURIComponent(currentPath);
             return false;
         }
         
-        // Verify token is still valid
-        if (window.authState) {
-            window.authState.verifyToken().then(isValid => {
-                if (!isValid) {
-                    console.log('[AUTH] Token expired, redirecting to login');
-                    window.location.href = '/login?redirect=' + encodeURIComponent(currentPath);
-                }
-            });
-        }
     }
     
     return true;
@@ -70,9 +80,10 @@ function protectRoute() {
 /**
  * Redirect authenticated users away from login/signup pages
  */
-function redirectIfAuthenticated() {
+async function redirectIfAuthenticated() {
     const currentPath = window.location.pathname;
     
+    if (window.authState) await window.authState.init();
     if (isPublicRoute(currentPath) && window.authState && window.authState.isAuthenticated()) {
         // Check for redirect parameter
         const urlParams = new URLSearchParams(window.location.search);
@@ -81,7 +92,7 @@ function redirectIfAuthenticated() {
         if (redirect) {
             window.location.href = redirect;
         } else {
-            window.location.href = '/dashboard';
+            window.location.href = '/overview';
         }
     }
 }
@@ -89,15 +100,12 @@ function redirectIfAuthenticated() {
 // Run protection on page load
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
-        protectRoute();
-        redirectIfAuthenticated();
+        protectRoute().then(() => redirectIfAuthenticated());
     });
 } else {
-    protectRoute();
-    redirectIfAuthenticated();
+    protectRoute().then(() => redirectIfAuthenticated());
 }
 
 // Export functions
 window.protectRoute = protectRoute;
 window.redirectIfAuthenticated = redirectIfAuthenticated;
-

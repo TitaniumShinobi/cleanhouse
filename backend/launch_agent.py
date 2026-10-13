@@ -9,6 +9,7 @@ privileges; it only manages the current user's LaunchAgents domain.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -19,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from backend import auth_runtime_config
+
 
 LABEL = "org.cleanhouse.runtime"
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -27,6 +30,18 @@ DEFAULT_PORT = 3333
 STAGED_RUNTIME_NAME = "launchagent-runtime"
 RUNTIME_DIRECTORIES = ("backend", "corefiles", "frontend", "models", "assets")
 RUNTIME_FILES: tuple[str, ...] = ()
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _installed_keychain_helper() -> Path:
+    return auth_runtime_config.INSTALLED_KEYCHAIN_HELPER
 
 
 def launch_agents_dir() -> Path:
@@ -85,6 +100,25 @@ def stage_runtime(interpreter: str, *, repo_root: Path = REPO_ROOT) -> dict[str,
             if not source.is_file():
                 raise FileNotFoundError(source)
             shutil.copy2(source, app_root / name)
+
+        public_auth = auth_runtime_config.staged_public_contract(source_repo)
+        auth_config_path = app_root / "config" / "auth-runtime.json"
+        auth_config_path.parent.mkdir(parents=True, exist_ok=True)
+        auth_config_path.write_text(
+            json.dumps(public_auth, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.chmod(auth_config_path, 0o600)
+
+        helper_source = _installed_keychain_helper().expanduser().resolve(strict=True)
+        source_mode = helper_source.stat().st_mode & 0o777
+        if not helper_source.is_file() or not os.access(helper_source, os.X_OK) or source_mode & 0o077:
+            raise PermissionError("installed Keychain helper must be an owner-only executable")
+        staged_helper = app_root / "backend" / "keychain-helper"
+        shutil.copy2(helper_source, staged_helper)
+        os.chmod(staged_helper, 0o700)
+        if _sha256(helper_source) != _sha256(staged_helper):
+            raise OSError("staged Keychain helper verification failed")
 
         legal_source = source_repo / "docs" / "legal"
         if legal_source.is_dir():
@@ -199,6 +233,8 @@ def build_payload(
             "CLEANHOUSE_SOURCE_REPO_ROOT": str(resolved_source_repo),
             "CLEANHOUSE_WATCH_DIR": str(resolved_source_repo),
             "CLEANHOUSE_DATA_ROOT": str(runtime_dir / "data"),
+            "CLEANHOUSE_AUTH_CONFIG_PATH": str(resolved_repo / "config" / "auth-runtime.json"),
+            "CLEANHOUSE_KEYCHAIN_HELPER_PATH": str(resolved_repo / "backend" / "keychain-helper"),
             "PYTHONPATH": str(resolved_repo),
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONUNBUFFERED": "1",

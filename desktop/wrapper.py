@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import webbrowser
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -21,6 +22,24 @@ from backend import runtime_supervisor
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 3333
+
+
+class DesktopAuthApi:
+    """Minimal system-browser handoff for the AUTH-configured Google flow."""
+
+    def __init__(self, host: str, port: int):
+        self.origin = f"http://{host}:{port}"
+
+    def openOAuthUrl(self, _unused=None, provider: str = "") -> dict[str, object]:
+        normalized = str(provider or "").strip().lower()
+        if normalized != "google":
+            return {"success": False, "message": "This sign-in provider is unavailable."}
+        opened = webbrowser.open(f"{self.origin}/api/auth/oauth/google")
+        return {
+            "success": bool(opened),
+            "message": "Opening Google authentication in your browser. Please complete sign-in there."
+            if opened else "The system browser could not be opened.",
+        }
 
 
 def _resolve_cleanhouse_host() -> str:
@@ -61,6 +80,7 @@ def main() -> None:
     webview.create_window(
         "CleanHouse",
         cleanhouse_url("/dashboard"),
+        js_api=DesktopAuthApi(host, port),
         width=450,
         height=775,
         resizable=True,

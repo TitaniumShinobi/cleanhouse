@@ -8,56 +8,33 @@ class AuthState {
         this.user = null;
         this.token = null;
         this.initialized = false;
+        this.ready = null;
     }
     
     /**
-     * Initialize auth state from localStorage
+     * Initialize auth state from the HttpOnly server session.
      */
     init() {
-        if (this.initialized) return;
-        
-        // Load token and user from localStorage
-        this.token = localStorage.getItem('auth_token');
-        const userStr = localStorage.getItem('user');
-        
-        if (userStr) {
-            try {
-                this.user = JSON.parse(userStr);
-            } catch (e) {
-                console.error('[AUTH] Failed to parse user data:', e);
-                this.clear();
-            }
-        }
-        
-        // Verify token is still valid
-        if (this.token) {
-            this.verifyToken();
-        }
-        
+        if (this.ready) return this.ready;
+        this.ready = this.verifyToken();
         this.initialized = true;
+        return this.ready;
     }
     
     /**
      * Verify JWT token is still valid
      */
     async verifyToken() {
-        if (!this.token) {
-            this.clear();
-            return false;
-        }
-        
         try {
             const response = await fetch('/api/auth/me', {
-                headers: {
-                    'Authorization': `Bearer ${this.token}`
-                }
+                credentials: 'include',
+                headers: { 'Accept': 'application/json' }
             });
             
             if (response.ok) {
                 const data = await response.json();
                 if (data.success && data.user) {
                     this.user = data.user;
-                    localStorage.setItem('user', JSON.stringify(data.user));
                     return true;
                 }
             }
@@ -74,7 +51,7 @@ class AuthState {
      * Check if user is authenticated
      */
     isAuthenticated() {
-        return this.user !== null && this.token !== null;
+        return this.user !== null;
     }
     
     /**
@@ -96,9 +73,7 @@ class AuthState {
      */
     setUser(user, token) {
         this.user = user;
-        this.token = token;
-        localStorage.setItem('auth_token', token);
-        localStorage.setItem('user', JSON.stringify(user));
+        this.token = null;
     }
     
     /**
@@ -107,8 +82,6 @@ class AuthState {
     clear() {
         this.user = null;
         this.token = null;
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user');
     }
     
     /**
@@ -118,9 +91,7 @@ class AuthState {
         try {
             await fetch('/api/auth/logout', {
                 method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${this.token}`
-                }
+                credentials: 'include'
             });
         } catch (error) {
             console.error('[AUTH] Logout error:', error);
@@ -142,4 +113,3 @@ if (document.readyState === 'loading') {
 
 // Export for use in other scripts
 window.authState = authState;
-

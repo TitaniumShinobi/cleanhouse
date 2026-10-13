@@ -97,7 +97,10 @@ class AuthApiValidationTests(unittest.TestCase):
     def setUp(self):
         self._original_request = auth_api.request
         self._original_session = auth_api.session
-        self.session = {}
+        class _Session(dict):
+            modified = False
+
+        self.session = _Session()
         auth_api.session = self.session
         auth_api.request = types.SimpleNamespace(
             get_json=lambda silent=True: None,
@@ -160,10 +163,56 @@ class AuthApiValidationTests(unittest.TestCase):
         response = auth_api.login()
         self._assert_bad_request(response, "JSON object")
 
-    def test_launch_desktop_rejects_invalid_payload(self):
-        self._set_request_json({"token": 123, "user": "not-a-dict"})
-        response = auth_api.launch_desktop()
-        self._assert_bad_request(response, "must be")
+    def test_auth_config_reports_resolved_provider_availability(self):
+        with patch.object(auth_api.auth_runtime_config, "public_config_payload", return_value={
+            "providers": [{
+                "provider": "google",
+                "label": "Continue with Google",
+                "enabled": True,
+                "available": False,
+            }]
+        }):
+            response = auth_api.auth_config()
+        self.assertFalse(response["data"]["providers"][0]["available"])
+
+    def test_unconfigured_google_redirects_to_intentional_login_error(self):
+        auth_api.request = types.SimpleNamespace(method="GET", args={}, form={}, headers={})
+        with patch.object(auth_api.auth_runtime_config, "provider_config", return_value={
+            "enabled": True,
+            "available": False,
+        }):
+            response = auth_api.oauth("google")
+        self.assertEqual(response, "/login?error=provider_unavailable&provider=google")
+
+    def test_obsolete_desktop_token_endpoint_is_removed(self):
+        self.assertFalse(hasattr(auth_api, "launch_desktop"))
+
+    def test_oauth_callback_rejects_and_consumes_expired_state(self):
+        self.session["oauth_states"] = {
+            "expired": {"provider": "google", "code_verifier": "verifier", "created_at": 0}
+        }
+        auth_api.request = types.SimpleNamespace(
+            method="GET", args={"code": "code", "state": "expired"}, form={}, headers={}
+        )
+
+        response = auth_api.oauth_callback()
+
+        self.assertEqual(response, "/login?error=expired_state")
+        self.assertNotIn("expired", self.session["oauth_states"])
+
+    def test_oauth_callback_replay_fails_after_one_time_state_consumption(self):
+        self.session["oauth_states"] = {
+            "once": {"provider": "google", "code_verifier": "", "created_at": 9_999_999_999}
+        }
+        auth_api.request = types.SimpleNamespace(
+            method="GET", args={"code": "code", "state": "once"}, form={}, headers={}
+        )
+
+        first = auth_api.oauth_callback()
+        second = auth_api.oauth_callback()
+
+        self.assertEqual(first, "/login?error=invalid_state")
+        self.assertEqual(second, "/login?error=invalid_state")
 
     def test_me_rejects_invalid_authorization_header(self):
         self._set_request_headers({"Authorization": "bad header"})
@@ -198,6 +247,28 @@ class AuthApiValidationTests(unittest.TestCase):
             response_body = response
         self.assertTrue(response_body.get("success"))
         self.assertEqual(response_body.get("login_report", {}).get("id"), "report:login")
+        self.assertEqual(self.session.get("user_id"), "user-1")
+
+    def test_logout_clears_session(self):
+        self.session.update({"user_id": "user-1", "email": "user@example.com"})
+        with tempfile.TemporaryDirectory() as root, patch.object(auth_api.Path, "home", return_value=Path(root)):
+            response = auth_api.logout()
+        self.assertTrue(response.get("success"))
+        self.assertEqual(self.session, {})
+
+    def test_recovery_request_is_enumeration_resistant(self):
+        self._set_request_json({"email": "missing@example.com"})
+        service = type("S", (), {"get_user_by_email": lambda self, email: None})()
+        with patch.object(auth_api, "get_user_service", return_value=service):
+            response = auth_api.request_recovery()
+        self.assertTrue(response.get("success"))
+
+    def test_reset_requires_valid_single_use_token(self):
+        self._set_request_json({"token": "expired", "password": "new-password"})
+        with patch.object(auth_api, "consume_recovery", return_value=None):
+            body, status = auth_api.reset_password()
+        self.assertEqual(status, 400)
+        self.assertEqual(body.get("code"), "INVALID_RECOVERY_TOKEN")
 
     def test_create_account_accepts_valid_payload(self):
         class _User:
@@ -416,7 +487,9 @@ class AuthApiValidationTests(unittest.TestCase):
                     "job": {"state": "queued"},
                 }
 
-        with patch("backend.api.cleanhouse.get_cleanhouse_monitoring_adapter", return_value=_Adapter()):
+        cleanhouse_api = types.ModuleType("backend.api.cleanhouse")
+        cleanhouse_api.get_cleanhouse_monitoring_adapter = lambda: _Adapter()
+        with patch.dict(sys.modules, {"backend.api.cleanhouse": cleanhouse_api}):
             result = auth_api._build_login_report_payload(
                 {"user_id": "user-1", "email": "user@example.com"},
                 previous_login_at="2026-05-26T09:00:00",

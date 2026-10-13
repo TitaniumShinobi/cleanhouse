@@ -1,4 +1,5 @@
 import os
+import json
 import plistlib
 import sys
 import tempfile
@@ -70,6 +71,14 @@ class LaunchAgentTests(unittest.TestCase):
                 directory = repo / name
                 directory.mkdir(parents=True)
                 (directory / "sentinel.py").write_text(name, encoding="utf-8")
+            (repo / "config").mkdir()
+            (repo / "config" / "auth-runtime.json").write_text(
+                json.dumps({
+                    "schema": "cleanhouse.auth-runtime.v1",
+                    "providers": {"google": {"enabled": True}},
+                }),
+                encoding="utf-8",
+            )
             (repo / ".env").write_text("SECRET=value\n", encoding="utf-8")
             environment = repo / "cleanhouse_env"
             interpreter = environment / "bin" / "python3"
@@ -88,8 +97,13 @@ class LaunchAgentTests(unittest.TestCase):
             wazuh_source.mkdir(parents=True)
             for name, content in wazuh_artifacts.items():
                 (wazuh_source / name).write_bytes(content)
+            helper = root / "installed-keychain-helper"
+            helper.write_bytes(b"stable helper executable")
+            helper.chmod(0o700)
 
-            with patch.object(launch_agent, "_runtime_dir", return_value=root / "runtime"):
+            with patch.object(launch_agent, "_runtime_dir", return_value=root / "runtime"), patch.object(
+                launch_agent, "_installed_keychain_helper", return_value=helper
+            ):
                 staged = launch_agent.stage_runtime(str(interpreter), repo_root=repo)
 
             staged_repo = Path(staged["repo_root"])
@@ -100,6 +114,15 @@ class LaunchAgentTests(unittest.TestCase):
             self.assertTrue(staged_interpreter.exists())
             self.assertNotIn(str(repo), str(staged_interpreter))
             self.assertFalse((staged_repo / ".env").exists())
+            auth_contract = json.loads(
+                (staged_repo / "config" / "auth-runtime.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(auth_contract["schema"], "cleanhouse.auth-runtime.v1")
+            self.assertNotIn("clientSecret", json.dumps(auth_contract))
+            staged_helper = staged_repo / "backend" / "keychain-helper"
+            self.assertEqual(staged_helper.read_bytes(), helper.read_bytes())
+            self.assertEqual(staged_helper.stat().st_mode & 0o777, 0o700)
+            self.assertEqual((staged_repo / "config" / "auth-runtime.json").stat().st_mode & 0o777, 0o600)
             staged_wazuh = staged_repo / "bundled" / "wazuh" / "darwin-arm64"
             for name, content in wazuh_artifacts.items():
                 self.assertEqual((staged_wazuh / name).read_bytes(), content)
@@ -117,8 +140,13 @@ class LaunchAgentTests(unittest.TestCase):
             interpreter.parent.mkdir(parents=True)
             interpreter.symlink_to(Path(sys.executable))
             (environment / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
+            helper = root / "installed-keychain-helper"
+            helper.write_bytes(b"stable helper executable")
+            helper.chmod(0o700)
 
-            with patch.object(launch_agent, "_runtime_dir", return_value=root / "runtime"):
+            with patch.object(launch_agent, "_runtime_dir", return_value=root / "runtime"), patch.object(
+                launch_agent, "_installed_keychain_helper", return_value=helper
+            ):
                 staged = launch_agent.stage_runtime(str(interpreter), repo_root=repo)
 
             self.assertEqual(Path(staged["interpreter"]), interpreter)
@@ -184,6 +212,23 @@ class LaunchAgentTests(unittest.TestCase):
 
         self.assertTrue(status["required"])
         self.assertFalse(status["loaded"])
+
+    def test_plist_points_to_staged_helper_without_secret_material(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            interpreter = root / "python3"
+            interpreter.write_text("", encoding="utf-8")
+            repo = root / "app"
+            repo.mkdir()
+            payload = launch_agent.build_payload(str(interpreter), repo_root=repo)
+        environment = payload["EnvironmentVariables"]
+        self.assertEqual(
+            environment["CLEANHOUSE_KEYCHAIN_HELPER_PATH"],
+            str(repo.resolve() / "backend" / "keychain-helper"),
+        )
+        serialized = plistlib.dumps(payload).decode("utf-8")
+        self.assertNotIn("CLIENT_SECRET", serialized)
+        self.assertNotIn("client-secret-v2", serialized)
 
 
 if __name__ == "__main__":

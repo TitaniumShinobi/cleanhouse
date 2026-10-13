@@ -1,5 +1,7 @@
 # Authentication Setup Inquiry Prompt
 
+> **Superseded historical prompt.** Do not run it. CleanHouse now follows the transient lowercase `auth` alignment contract documented in [AUTHENTICATION_SYSTEM.md](AUTHENTICATION_SYSTEM.md).
+
 Copy and paste this prompt into your other coding LLM application:
 
 ---
