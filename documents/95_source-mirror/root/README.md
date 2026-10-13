@@ -36,7 +36,7 @@ CHATTY_API_URL=http://localhost:5000
 /bin/bash scripts/cleanhouse-up.sh
 ```
 
-Then open your browser to: **http://localhost:3333/dashboard**
+Then open your browser to: **http://localhost:3333/overview**
 
 ### 3c. Debug-only startup paths
 
@@ -54,10 +54,12 @@ cleanhouse-raw() {
 
 `cleanhouse` is the operator-facing launcher:
 - starts/reuses the local app from `127.0.0.1:3333`
-- waits for readiness at `http://127.0.0.1:3333/cleanhouse/status`
-- resolves the runtime interpreter deterministically before supervisor start
-- opens `http://localhost:3333/dashboard`
-- prints `cleanhouse is running at http://localhost:3333/dashboard`
+- waits for `operator_ready=true` at `http://127.0.0.1:3333/cleanhouse/status`
+- requires the explicit readiness contract: healthy state, warm startup, live supervisor/backend, one matching owned listener, fresh heartbeat, successful readiness probe, and no active runtime block
+- treats bootstrap timestamps and LaunchAgent persistence as evidence only; neither can make a recovering or degraded runtime ready
+- resolves the runtime interpreter deterministically and proves `backend.server` plus its transitive launch imports before supervisor start
+- opens `http://localhost:3333/overview`
+- prints `cleanhouse is running at http://localhost:3333/overview`
 
 Debug-only paths (non-canonical):
 
@@ -102,10 +104,13 @@ Smoke checks (after launch from a separate shell):
 python3 - <<'PY'
 import json
 import urllib.request
-print("dashboard:", urllib.request.urlopen("http://127.0.0.1:3333/dashboard").status)
+print("overview:", urllib.request.urlopen("http://127.0.0.1:3333/overview").status)
 print("status:", json.loads(urllib.request.urlopen("http://127.0.0.1:3333/cleanhouse/status").read().decode("utf-8")))
 PY
 ```
+
+Normal operator startup opens `/overview`; `/dashboard` remains available for its existing route.
+If startup is blocked by an open runtime self-deviation, review the printed evidence and receipt, then run `cleanhouse --acknowledge-self-deviation` for one guarded restart attempt.
 
 Delivery scope for v1: deterministic local install and launch. This is not an auto-update or remote-distribution workflow.
 
@@ -293,6 +298,15 @@ python3 scripts/separate_css_js.py
 ---
 
 ## 📚 Documentation
+
+### Runtime supervision
+
+On macOS, `scripts/cleanhouse-up.sh` installs and starts the current user's
+`org.cleanhouse.runtime` LaunchAgent. The launcher can exit while `launchd`
+keeps the supervisor alive. Persistence alone is not readiness: the explicit
+operator contract still requires healthy/warm state, live process and listener
+ownership, a fresh heartbeat, a passing readiness probe, and no active runtime
+block. A stale state file or bootstrap timestamp is never sufficient evidence.
 
 - **Quick Start:** `QUICK_START.md`
 - **Documentation Index:** `docs/README.md`

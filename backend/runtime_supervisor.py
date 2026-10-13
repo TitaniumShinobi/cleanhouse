@@ -58,6 +58,8 @@ DEFAULT_RUNTIME_CPU_DEGRADED_PERCENT = 250.0
 CPU_DEGRADED_SAMPLE_LIMIT = 3
 DEFAULT_BACKEND_LOG_MAX_BYTES = 10 * 1024 * 1024
 DEFAULT_BACKEND_LOG_BACKUPS = 3
+OPERATOR_READY_RUNTIME_STATE = "healthy"
+OPERATOR_READY_STARTUP_PHASES = frozenset({"warm"})
 SELF_DEVIATION_BLOCK_TYPES = frozenset({
     "runtime_memory_ceiling_exceeded",
     "runtime_cpu_sustained_exceeded",
@@ -790,28 +792,48 @@ def _blocked_recovery_payload(kind: str, reason: str, *, details: dict[str, Any]
     return payload
 
 
-def _launch_ready(state: dict[str, Any] | None) -> bool:
+def _operator_readiness_contract(state: dict[str, Any] | None) -> dict[str, Any]:
     state = state or {}
     runtime_state = str(state.get("runtime_state") or "unknown")
+    startup_phase = str(state.get("startup_phase") or "")
     backend_alive = bool(state.get("backend_alive"))
+    supervisor_alive = bool(state.get("supervisor_alive"))
+    heartbeat_fresh = bool(state.get("heartbeat_fresh"))
     active_block = _self_deviation_block_active(state)
     hard_resource_block = _runtime_guard_hard_stop_active(state)
-    foreign_listener = bool(state.get("foreign_listener_pids")) and not bool(state.get("owned_listener_pids"))
+    owned_listener_pids = [int(pid) for pid in state.get("owned_listener_pids", []) if str(pid).isdigit()]
+    foreign_listener_pids = [int(pid) for pid in state.get("foreign_listener_pids", []) if str(pid).isdigit()]
+    try:
+        backend_pid = int(state.get("backend_pid"))
+    except (TypeError, ValueError):
+        backend_pid = None
     probe_status = str((state.get("last_probe") or {}).get("status") or "")
-    bootstrap_ready = (
-        bool(state.get("bootstrap_ready_at"))
-        or bool(state.get("warmup_started_at"))
-        or bool(state.get("warmup_ready_at"))
-        or (runtime_state == "healthy" and probe_status == "ok")
-    )
-    return bool(
-        backend_alive
-        and bootstrap_ready
-        and not active_block
-        and not hard_resource_block
-        and not foreign_listener
-        and runtime_state not in {"unhealthy", "stale_pid", "orphaned_listener"}
-    )
+    checks = {
+        "runtime_healthy": runtime_state == OPERATOR_READY_RUNTIME_STATE,
+        "startup_warm": startup_phase in OPERATOR_READY_STARTUP_PHASES,
+        "backend_alive": backend_alive,
+        "supervisor_alive": supervisor_alive,
+        "heartbeat_fresh": heartbeat_fresh,
+        "readiness_probe_ok": probe_status == "ok",
+        "single_owned_listener": len(owned_listener_pids) == 1,
+        "listener_matches_backend": backend_pid is not None and owned_listener_pids == [backend_pid],
+        "no_foreign_listener": not foreign_listener_pids,
+        "no_self_deviation_block": not active_block,
+        "no_resource_guard_block": not hard_resource_block,
+    }
+    failed = [name for name, satisfied in checks.items() if not satisfied]
+    return {
+        "schema": "cleanhouse.runtime_operator_readiness.v1",
+        "satisfied": not failed,
+        "required_runtime_state": OPERATOR_READY_RUNTIME_STATE,
+        "required_startup_phases": sorted(OPERATOR_READY_STARTUP_PHASES),
+        "checks": checks,
+        "failed_checks": failed,
+    }
+
+
+def _launch_ready(state: dict[str, Any] | None) -> bool:
+    return bool(_operator_readiness_contract(state).get("satisfied"))
 
 
 def _same_blocked_recovery(previous_state: dict[str, Any] | None, action: str) -> bool:
@@ -2211,13 +2233,15 @@ def _launch_agent_observation() -> dict[str, Any]:
 
 
 def _runtime_payload_from_state(state: dict[str, Any], resolved_host: str, resolved_port: int) -> dict[str, Any]:
-    operator_ready = _launch_ready(state)
+    readiness_contract = _operator_readiness_contract(state)
+    operator_ready = bool(readiness_contract["satisfied"])
     runtime_state = str(state.get("runtime_state") or "unknown")
     return {
         "status": runtime_state,
         "runtime_state": runtime_state,
         "operator_ready": operator_ready,
-        "bootstrap_ready": operator_ready,
+        "bootstrap_ready": bool(state.get("bootstrap_ready_at")),
+        "readiness_contract": readiness_contract,
         "valid_states": sorted(VALID_RUNTIME_STATES),
         "reason_codes": state.get("reason_codes", []),
         "supervisor": {
@@ -2279,13 +2303,31 @@ def _cached_state_for_probe(
     backend_alive = _pid_alive(state.get("backend_pid"))
     supervisor_alive = _pid_alive(state.get("supervisor_pid"))
     heartbeat_fresh = _heartbeat_fresh(state)
+    pids = listener_pids(resolved_port, resolved_host)
+    listeners = [_pid_info(pid) for pid in pids]
+    owned_listener_pids = [item["pid"] for item in listeners if _is_cleanhouse_owned_process(item)]
+    foreign_listener_pids = [item["pid"] for item in listeners if not _is_cleanhouse_owned_process(item)]
     resource_guard = state.get("resource_guard") if isinstance(state.get("resource_guard"), dict) else {}
     guard_reasons = {str(reason) for reason in resource_guard.get("reason_codes", []) if str(reason)}
     runtime_state = str(state.get("runtime_state") or "unhealthy")
 
+    try:
+        backend_pid = int(state.get("backend_pid"))
+    except (TypeError, ValueError):
+        backend_pid = None
+
     if not backend_alive:
         runtime_state = "unhealthy"
         reasons.add("backend_not_running")
+    elif not supervisor_alive:
+        runtime_state = "degraded"
+        reasons.add("supervisor_not_running")
+    elif not owned_listener_pids or backend_pid not in owned_listener_pids:
+        runtime_state = "degraded"
+        reasons.add("listener_not_ready")
+    elif foreign_listener_pids:
+        runtime_state = "degraded"
+        reasons.add("foreign_listener_present")
     elif not heartbeat_fresh and state.get("heartbeat_at"):
         runtime_state = "degraded"
         reasons.add("heartbeat_stale")
@@ -2306,6 +2348,10 @@ def _cached_state_for_probe(
         "backend_alive": backend_alive,
         "supervisor_alive": supervisor_alive,
         "heartbeat_fresh": heartbeat_fresh,
+        "listener_pids": pids,
+        "listeners": listeners,
+        "owned_listener_pids": owned_listener_pids,
+        "foreign_listener_pids": foreign_listener_pids,
         "interpreter": _cached_interpreter_summary(stored),
         "updated_at": stored.get("updated_at"),
     })
@@ -2356,14 +2402,20 @@ def current_runtime_payload(
 def readiness_payload(host: str | None = None, port: int | None = None) -> dict[str, Any]:
     state, resolved_host, resolved_port = _cached_state_for_probe(host, port)
     runtime_state = str(state.get("runtime_state") or "unknown")
-    ready = _launch_ready(state)
+    readiness_contract = _operator_readiness_contract(state)
+    ready = bool(readiness_contract["satisfied"])
     runtime = _runtime_payload_from_state(state, resolved_host, resolved_port)
+    reason_codes = sorted({
+        *[str(reason) for reason in state.get("reason_codes", []) if str(reason)],
+        *[f"operator_readiness_{name}" for name in readiness_contract["failed_checks"]],
+    })
     return {
         "status": "ok" if ready else "degraded",
         "ready": ready,
-        "bootstrap_ready": ready,
+        "bootstrap_ready": bool(state.get("bootstrap_ready_at")),
         "runtime_state": runtime_state,
-        "reason_codes": list(state.get("reason_codes") or []),
+        "reason_codes": reason_codes,
+        "readiness_contract": readiness_contract,
         "runtime": runtime,
         "backend": runtime.get("backend", {}),
         "supervisor": runtime.get("supervisor", {}),
@@ -2514,8 +2566,14 @@ def start_backend_heartbeat(host: str, port: int) -> None:
         register_backend_start(host, port)
     else:
         record_backend_heartbeat(host, port)
-    _HEARTBEAT_THREAD = threading.Thread(target=_loop, name="cleanhouse-runtime-heartbeat", daemon=True)
-    _HEARTBEAT_THREAD.start()
+    candidate = threading.Thread(target=_loop, name="cleanhouse-runtime-heartbeat", daemon=True)
+    try:
+        candidate.start()
+    except Exception:
+        _HEARTBEAT_STOP.set()
+        _HEARTBEAT_THREAD = None
+        raise
+    _HEARTBEAT_THREAD = candidate
 
 
 def stop_backend_heartbeat(host: str, port: int) -> None:

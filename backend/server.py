@@ -314,11 +314,12 @@ def _start_runtime_heartbeat() -> None:
     global _RUNTIME_HEARTBEAT_STARTED
     if _RUNTIME_HEARTBEAT_STARTED:
         return
-    _RUNTIME_HEARTBEAT_STARTED = True
     try:
         runtime_supervisor.start_backend_heartbeat(_cleanhouse_host(), _cleanhouse_port())
     except Exception as exc:
-        logging.warning("cleanhouse runtime heartbeat not started: %s", exc)
+        _RUNTIME_HEARTBEAT_STARTED = False
+        raise RuntimeError("cleanhouse runtime heartbeat not started") from exc
+    _RUNTIME_HEARTBEAT_STARTED = True
 
 
 def _wait_for_listener_ready(host: str, port: int, timeout_seconds: float) -> bool:

@@ -297,19 +297,45 @@ class RuntimeSupervisorTests(unittest.TestCase):
             server._EVENTS_START_THREAD = original_thread
             server._EVENTS_SERVICES_STARTED = original_started
 
-    def test_launch_ready_requires_bootstrap_marker(self):
+    def test_operator_ready_requires_healthy_warm_contract(self):
+        state = {
+            "runtime_state": "healthy",
+            "backend_alive": True,
+            "supervisor_alive": True,
+            "heartbeat_fresh": True,
+            "bootstrap_started_at": "2026-08-18T16:40:00+00:00",
+            "bootstrap_ready_at": "2026-08-18T16:40:01+00:00",
+            "startup_phase": "warm",
+            "backend_pid": 100,
+            "listener_pids": [100],
+            "owned_listener_pids": [100],
+            "foreign_listener_pids": [],
+            "last_probe": {"status": "ok"},
+        }
+        self.assertTrue(runtime_supervisor._launch_ready(state))
+
+        for runtime_state in ("recovering", "degraded"):
+            with self.subTest(runtime_state=runtime_state):
+                state["runtime_state"] = runtime_state
+                self.assertFalse(runtime_supervisor._launch_ready(state))
+
+    def test_bootstrap_timestamp_alone_does_not_make_runtime_operator_ready(self):
         state = {
             "runtime_state": "recovering",
             "backend_alive": True,
-            "bootstrap_started_at": "2026-08-18T16:40:00+00:00",
-            "startup_phase": "booting",
-            "listener_pids": [],
-            "owned_listener_pids": [],
+            "supervisor_alive": True,
+            "heartbeat_fresh": True,
+            "bootstrap_ready_at": "2026-08-18T16:40:01+00:00",
+            "startup_phase": "bootstrap_ready",
+            "backend_pid": 100,
+            "owned_listener_pids": [100],
             "foreign_listener_pids": [],
+            "last_probe": {"status": "ok"},
         }
-        self.assertFalse(runtime_supervisor._launch_ready(state))
-        state["bootstrap_ready_at"] = "2026-08-18T16:40:01+00:00"
-        self.assertTrue(runtime_supervisor._launch_ready(state))
+        contract = runtime_supervisor._operator_readiness_contract(state)
+        self.assertFalse(contract["satisfied"])
+        self.assertIn("runtime_healthy", contract["failed_checks"])
+        self.assertIn("startup_warm", contract["failed_checks"])
 
     def test_ensure_runtime_timeout_persists_receipt(self):
         interpreter = {
@@ -346,9 +372,11 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "port": 3333,
             "supervisor_pid": 200,
             "backend_pid": 100,
-            "startup_phase": "bootstrap_ready",
+            "startup_phase": "warm",
             "bootstrap_started_at": "2026-05-27T00:00:00+00:00",
             "bootstrap_ready_at": "2026-05-27T00:00:01+00:00",
+            "warmup_started_at": "2026-05-27T00:00:01+00:00",
+            "warmup_ready_at": "2026-05-27T00:00:02+00:00",
             "heartbeat_at": "2026-05-27T00:00:00+00:00",
         })
         with patch.object(runtime_supervisor, "classify_state", return_value={
@@ -360,9 +388,11 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "backend_alive": True,
             "boot_id": "boot",
             "start_time": "2026-05-27T00:00:00+00:00",
-            "startup_phase": "bootstrap_ready",
+            "startup_phase": "warm",
             "bootstrap_started_at": "2026-05-27T00:00:00+00:00",
             "bootstrap_ready_at": "2026-05-27T00:00:01+00:00",
+            "warmup_started_at": "2026-05-27T00:00:01+00:00",
+            "warmup_ready_at": "2026-05-27T00:00:02+00:00",
             "restart_count": 0,
             "listener_pids": [100],
             "owned_listener_pids": [100],
@@ -389,6 +419,112 @@ class RuntimeSupervisorTests(unittest.TestCase):
         }):
             payload = runtime_supervisor.current_runtime_payload("127.0.0.1", 3333)
         self.assertTrue(payload["operator_ready"])
+        self.assertTrue(payload["readiness_contract"]["satisfied"])
+
+    def test_readiness_detects_listener_loss_from_cached_state(self):
+        runtime_supervisor.write_state({
+            "runtime_state": "healthy",
+            "reason_codes": [],
+            "host": "127.0.0.1",
+            "port": 3333,
+            "supervisor_pid": 200,
+            "backend_pid": 100,
+            "startup_phase": "warm",
+            "bootstrap_ready_at": "2026-05-27T00:00:01+00:00",
+            "warmup_ready_at": "2026-05-27T00:00:02+00:00",
+            "heartbeat_at": "2026-05-27T00:00:02+00:00",
+            "last_probe": {"status": "ok"},
+        })
+        with patch.object(runtime_supervisor, "_pid_alive", return_value=True), patch.object(
+            runtime_supervisor, "_heartbeat_fresh", return_value=True
+        ), patch.object(runtime_supervisor, "listener_pids", return_value=[]):
+            payload = runtime_supervisor.readiness_payload("127.0.0.1", 3333)
+
+        self.assertFalse(payload["ready"])
+        self.assertEqual(payload["runtime_state"], "degraded")
+        self.assertIn("listener_not_ready", payload["reason_codes"])
+        self.assertIn("operator_readiness_single_owned_listener", payload["reason_codes"])
+
+    def test_heartbeat_start_failure_resets_flag_and_allows_retry(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_ENABLE_AUTH": "0",
+                "FLASK_SECRET_KEY": "runtime-supervisor-test-key",
+            },
+        ):
+            from backend import server
+
+        original = server._RUNTIME_HEARTBEAT_STARTED
+        try:
+            server._RUNTIME_HEARTBEAT_STARTED = False
+            with patch.object(
+                server.runtime_supervisor,
+                "start_backend_heartbeat",
+                side_effect=[RuntimeError("thread start failed"), None],
+            ) as start:
+                with self.assertRaisesRegex(RuntimeError, "heartbeat not started"):
+                    server._start_runtime_heartbeat()
+                self.assertFalse(server._RUNTIME_HEARTBEAT_STARTED)
+                server._start_runtime_heartbeat()
+                self.assertTrue(server._RUNTIME_HEARTBEAT_STARTED)
+                self.assertEqual(start.call_count, 2)
+        finally:
+            server._RUNTIME_HEARTBEAT_STARTED = original
+
+    def test_events_warmup_records_degraded_state_when_heartbeat_fails(self):
+        with patch.dict(
+            os.environ,
+            {
+                "CLEANHOUSE_ENABLE_AUTH": "0",
+                "FLASK_SECRET_KEY": "runtime-supervisor-test-key",
+            },
+        ):
+            from backend import server
+
+        original_started = server._EVENTS_SERVICES_STARTED
+        recorded: dict[str, object] = {}
+        try:
+            server._EVENTS_SERVICES_STARTED = False
+            with patch.object(server, "_wait_for_listener_ready", return_value=True), patch.object(
+                server.cleanhouse_events, "init_db", return_value=None
+            ), patch.object(
+                server.cleanhouse_events, "start_watcher", return_value={"status": "running"}
+            ), patch.object(
+                server, "_start_runtime_heartbeat", side_effect=RuntimeError("heartbeat unavailable")
+            ), patch.object(
+                server.runtime_supervisor, "mark_backend_bootstrap_ready", return_value={}
+            ), patch.object(
+                server.runtime_supervisor, "mark_backend_warmup_started", return_value={}
+            ), patch.object(
+                server.runtime_supervisor,
+                "mark_backend_warmup_complete",
+                side_effect=lambda *args, **kwargs: recorded.update(kwargs),
+            ):
+                server._start_events_services()
+        finally:
+            server._EVENTS_SERVICES_STARTED = original_started
+
+        self.assertEqual(recorded["runtime_state"], "degraded")
+        self.assertIn("heartbeat_start_failed", recorded["reason_codes"])
+        self.assertEqual(recorded["details"]["heartbeat"]["status"], "failed")
+
+    def test_wrapper_rejects_degraded_label_without_operator_readiness(self):
+        from desktop import wrapper
+
+        runtime = {
+            "runtime_state": "degraded",
+            "operator_ready": False,
+            "reason_codes": ["heartbeat_start_failed"],
+        }
+        with patch.object(wrapper, "WEBVIEW_AVAILABLE", True), patch.object(
+            wrapper.sys, "platform", "linux"
+        ), patch.object(
+            wrapper.runtime_supervisor, "ensure_runtime", return_value=runtime
+        ), patch.object(wrapper, "webview", create=True) as webview:
+            with self.assertRaises(SystemExit):
+                wrapper.main()
+        webview.create_window.assert_not_called()
 
     def test_runtime_memory_ceiling_blocks_restart_and_persists_self_finding(self):
         previous = {
@@ -626,6 +762,9 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "backend_alive": True,
             "boot_id": "boot",
             "start_time": "2026-06-07T00:00:00+00:00",
+            "startup_phase": "warm",
+            "bootstrap_ready_at": "2026-06-07T00:00:01+00:00",
+            "warmup_ready_at": "2026-06-07T00:00:02+00:00",
             "restart_count": 0,
             "listener_pids": [100],
             "owned_listener_pids": [100],

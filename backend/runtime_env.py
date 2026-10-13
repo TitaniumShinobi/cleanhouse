@@ -45,7 +45,7 @@ def _candidate_entries(repo_root: Path | None = None) -> list[dict[str, str]]:
 
 def _probe_code(repo_root: Path) -> str:
     return (
-        "import importlib, importlib.util, json, os, sys\n"
+        "import importlib, json, os, sys\n"
         f"sys.path.insert(0, {str(repo_root)!r})\n"
         "result = {'runtime_supervisor_importable': False, 'flask_importable': False, 'backend_server_importable': False, 'errors': []}\n"
         "try:\n"
@@ -54,15 +54,13 @@ def _probe_code(repo_root: Path) -> str:
         "except Exception as exc:\n"
             "    result['errors'].append({'component': 'backend.runtime_supervisor', 'error': f'{exc.__class__.__name__}: {exc}'})\n"
         "try:\n"
-        "    result['flask_importable'] = importlib.util.find_spec('flask') is not None\n"
-        "    if not result['flask_importable']:\n"
-        "        result['errors'].append({'component': 'flask', 'error': 'ModuleNotFoundError: No module named \\'flask\\''})\n"
+        "    importlib.import_module('flask')\n"
+        "    result['flask_importable'] = True\n"
         "except Exception as exc:\n"
             "    result['errors'].append({'component': 'flask', 'error': f'{exc.__class__.__name__}: {exc}'})\n"
         "try:\n"
-        "    result['backend_server_importable'] = importlib.util.find_spec('backend.server') is not None\n"
-        "    if not result['backend_server_importable']:\n"
-        "        result['errors'].append({'component': 'backend.server', 'error': 'ModuleNotFoundError: No module named \\'backend.server\\''})\n"
+        "    importlib.import_module('backend.server')\n"
+        "    result['backend_server_importable'] = True\n"
         "except Exception as exc:\n"
             "    result['errors'].append({'component': 'backend.server', 'error': f'{exc.__class__.__name__}: {exc}'})\n"
         "print(json.dumps(result, sort_keys=True))\n"

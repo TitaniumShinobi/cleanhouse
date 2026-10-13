@@ -79,8 +79,13 @@ def main() -> None:
             print(f"launch agent setup failed: {launchd.get('message')}")
             sys.exit(1)
     runtime = runtime_supervisor.ensure_runtime(host, port, timeout_seconds=30.0)
-    if runtime.get("runtime_state") not in {"healthy", "degraded"}:
-        print(f"startup failed: runtime_state={runtime.get('runtime_state')} reasons={runtime.get('reason_codes')}")
+    if runtime.get("operator_ready") is not True:
+        print(
+            "startup failed: "
+            f"operator_ready={runtime.get('operator_ready')} "
+            f"runtime_state={runtime.get('runtime_state')} "
+            f"reasons={runtime.get('reason_codes')}"
+        )
         sys.exit(1)
 
     webview.create_window(

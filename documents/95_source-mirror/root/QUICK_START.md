@@ -18,7 +18,15 @@ cd /Users/devonwoodson/Documents/GitHub/cleanhouse
 /bin/bash scripts/cleanhouse-up.sh
 ```
 
-This resolves the interpreter deterministically, starts the supervised runtime, waits for readiness, and opens: **http://localhost:3333/dashboard**
+This resolves the interpreter deterministically, preferring the managed runtime at
+`~/.cleanhouse/runtime/python/bin/python3` before repository environments, starts the
+supervised runtime, waits for `operator_ready=true`, and opens: **http://localhost:3333/overview**
+
+Operator readiness is fail-closed: runtime state must be `healthy`, startup must be `warm`,
+the supervisor and backend must be alive, one CleanHouse-owned listener must match the backend
+PID, heartbeat and readiness probes must be current, and no runtime block may be active. A
+bootstrap timestamp or LaunchAgent `KeepAlive` state alone is not readiness. The interpreter
+probe imports `backend.server`, so missing transitive launch dependencies fail before startup.
 
 ### Debug-Only Startup Paths (Non-Canonical)
 
@@ -54,6 +62,12 @@ pip install -r requirements.txt
 Set `CLEANHOUSE_PORT` before starting the supervisor:
 ```sh
 CLEANHOUSE_PORT=3334 python3 -m backend.runtime_supervisor start
+```
+
+### Runtime self-deviation blocks startup
+If CleanHouse previously became unsafe, `cleanhouse` refuses to restart and prints the finding, evidence path, receipt path, and recovery command:
+```sh
+cleanhouse --acknowledge-self-deviation
 ```
 
 ### Frontend files not found

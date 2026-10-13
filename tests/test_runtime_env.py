@@ -1,5 +1,7 @@
 import unittest
 import os
+import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -158,6 +160,29 @@ class RuntimeEnvTests(unittest.TestCase):
             runtime_env.probe_interpreter("/repo/.venv/bin/python3", Path("/repo"))
 
         self.assertEqual(run_mock.call_args.kwargs["timeout"], 7.0)
+
+    def test_probe_interpreter_rejects_transitive_backend_import_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            backend = root / "backend"
+            backend.mkdir()
+            (backend / "__init__.py").write_text("", encoding="utf-8")
+            (backend / "runtime_supervisor.py").write_text("", encoding="utf-8")
+            (backend / "server.py").write_text(
+                "import cleanhouse_missing_transitive_dependency\n",
+                encoding="utf-8",
+            )
+
+            result = runtime_env.probe_interpreter(sys.executable, root)
+
+        self.assertFalse(result["backend_compatible"])
+        self.assertFalse(result["runnable"])
+        self.assertEqual(result["failure_reason"], "backend_dependencies_unavailable")
+        self.assertTrue(any(
+            error.get("component") == "backend.server"
+            and "cleanhouse_missing_transitive_dependency" in error.get("error", "")
+            for error in result["errors"]
+        ))
 
 
 if __name__ == "__main__":

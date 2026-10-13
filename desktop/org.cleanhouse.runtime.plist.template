@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Canonical shape only. backend.launch_agent renders the installed plist with absolute paths. -->
+<!-- Canonical persistence shape only. backend.launch_agent renders the installed plist with absolute paths. RunAtLoad/KeepAlive do not imply operator readiness; the supervisor's explicit live readiness contract remains authoritative. -->
 <plist version="1.0">
 <dict>
   <key>Label</key><string>org.cleanhouse.runtime</string>
