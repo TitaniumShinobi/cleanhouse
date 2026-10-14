@@ -48,39 +48,38 @@ metadata only and can never substitute for that live Apple signature check.
    staged runtime includes the complete Wazuh shipping closure: package, source
    archive, manifest, license, third-party notices, and source-compliance
    record; focused LaunchAgent tests verify byte-for-byte staging.
-2. The Wazuh macOS agent sends FIM evidence to a manager-only Wazuh service on
-   the existing VVAULT host. No indexer, dashboard, Filebeat, container, or new
-   database is deployed. Wazuh's required manager state remains under
-   `/var/ossec`; canonical preserved evidence remains in `ovvaults.vault_files`.
-3. The VVAULT backend reads the manager-local JSON alert stream and queries the
-   loopback-only manager API for inventory. CleanHouse authenticates to
-   owner-scoped VVAULT routes, never to Wazuh administration. Each raw Wazuh
+2. The intended provider topology is a Wazuh macOS agent sending FIM evidence
+   to a manager-only Wazuh service on the existing VVAULT host. Deployment and
+   enrollment are not part of this boundary and are not claimed complete.
+   No indexer, dashboard, Filebeat, container, or new database is introduced.
+3. When the provider route is configured, CleanHouse authenticates to
+   owner-scoped VVAULT routes, never to Wazuh administration. Each accepted
    alert keeps its provider identifier, agent, manager, rule, timestamp,
    canonical payload hash, and evidence references.
 4. Event insertion and cursor advancement share one SQLite transaction. A
    provider source key prevents replay duplicates without rewriting raw
    provenance.
 5. Every committed file observation advances an immutable hash-chain
-   generation. Periodic checkpoints hold a complete state projection; a
-   reconcile compares Wazuh inventory and then advances another generation.
+   generation. Authoritative inventory reconciliation remains a separately
+   guarded mutation boundary and is not exposed by this closure.
 6. Normalized evidence is mirrored locally and queued in a durable OVVAULTS
    outbox. A batch is marked synced only when OVVAULTS returns a receipt that
    echoes the SHA-256 batch ID and every accepted evidence ID. Remote failure
    or an incomplete receipt remains visible as preservation backlog.
-7. Watchdog remains a labeled fallback. Fallback reconcile only inspects paths
-   already observed inside its configured scope and is explicitly partial.
+7. Watchdog remains a labeled local fallback. Its observations are never
+   relabeled as Wazuh evidence.
 
 ## Files v2 contract
 
-`cleanhouse.files.v2` retains v1 fields and adds:
+The read-only `cleanhouse.files.v2` snapshot provides:
 
 - `collector`: provider, lifecycle, authenticated evidence state, version,
   connection health, monitored scope, event time, latency, cursor, and fallback
-  reason.
+  reason and an explicit `operational` Boolean.
 - `powered_by_wazuh`: true only after an authenticated poll and a successfully
   committed Wazuh event.
 - `integrity`: generation, state root, chain hash, checkpoint, entry count,
-  drift state, and last reconciliation receipt.
+  current immutable local projection.
 - `preservation`: local mirror, authenticated remote state, backlog, oldest
   pending evidence, and last success/error.
 
@@ -88,10 +87,9 @@ The explicit product states are `live`, `warming`, `degraded`, `unavailable`,
 `fallback`, and `no_data`. SSE event IDs are durable event cursors; reconnects
 honor `Last-Event-ID` and receive state changes even without a new file event.
 
-Mediation remains durable and non-executing. Queue and transition actions have
-immutable receipts and evidence references, while every item reports
-`execution_state: unavailable_until_zaelith`. Attention counts exclude routine
-in-progress work.
+This boundary intentionally returns empty mediation, suggestion, finding, and
+attention projections. Their state-changing routes remain deferred rather than
+being exposed without a complete authorization contract.
 
 ## Security and release rubric
 
@@ -100,7 +98,7 @@ in-progress work.
 | Package | Exact pinned SHA-512 and trusted Apple package signature |
 | Privilege | One normal macOS administrator prompt; no silent elevation |
 | Enrollment | Secret stored in Keychain, temporary file mode `0600`, no logs |
-| Transport | TLS; mTLS supported; least-privileged Wazuh credentials |
+| Transport | HTTPS except explicit loopback development; owner-scoped credentials; bounded timeout and response size |
 | Replay | Atomic event/cursor commit and unique provider source key |
 | Integrity | Immutable chain, full checkpoints, stable state root |
 | Preservation | Idempotent evidence IDs, durable offline outbox, honest backlog |
@@ -109,10 +107,38 @@ in-progress work.
 
 ## Current implementation boundary
 
-The local code, contracts, packaging gate, runtime bundle verification, and
-focused tests are complete without external side effects. The following remain
-gated operations and must not be represented as complete until separately
-approved and evidenced:
+The local collector now starts as an optional server-owned evidence service.
+Missing credentials or enrolled-agent identity leave it `unavailable`;
+configured but unproven transport is `warming`; failed acquisition is
+`degraded`; a running installed agent with authenticated transport and no
+events is `no_data`; and the same complete lifecycle with current evidence is
+`live`. `powered_by_wazuh` is durable historical truth only after authenticated
+evidence was committed; later outages degrade current health without rewriting
+that provenance. Current authentication and operational status also expire
+when the manager-status attestation or feed is stale, or when the bounded
+collector worker is no longer alive. Files reports continuous monitoring only
+while either that current Wazuh observer or the labeled watchdog fallback is
+actually running. Optional provider failure is recorded in startup diagnostics
+without blocking the local CleanHouse runtime.
+
+Remote acquisition accepts HTTPS destinations only, with plain HTTP reserved
+for explicit loopback development. Credential-bearing endpoints must share the
+configured VVAULT origin and redirects are rejected. Requests have a fixed
+timeout, response bodies are size-bounded before JSON parsing, embedded URL
+credentials and URL fragments are rejected, and failures expose stable reason codes rather than
+response bodies, tokens, or private destination URLs. Retry waits and inventory
+pagination are bounded and interruptible.
+
+The server-owned OVVAULTS preservation worker is Files-scoped. It does not
+activate or drain Network evidence; Network remote synchronization remains a
+separate deferred boundary.
+
+This closure contains authenticated read-only snapshot, SSE, and Wazuh-status
+routes. It contains no new browser UI or state-changing route. Provider setup,
+reconciliation, mediation, and the remaining mixed Files UI work stay deferred.
+
+The following remain provider/operator actions and must not be represented as
+complete until separately approved and evidenced:
 
 - stage and install the manager-only Wazuh package on the existing VVAULT host;
 - invoke the administrator-authorized macOS agent installer;

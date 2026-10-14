@@ -363,7 +363,15 @@ def _agent_status() -> dict[str, Any]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"running": False, "summary": type(exc).__name__, "returncode": None}
     summary = (result.stdout + "\n" + result.stderr).strip()
-    running = result.returncode == 0 and "not running" not in summary.lower()
+    normalized = summary.lower()
+    running = bool(
+        result.returncode == 0
+        and "not running" not in normalized
+        and re.search(
+            r"\bwazuh-(?:agentd|modulesd|logcollector|syscheckd)\s+is\s+running\b",
+            normalized,
+        )
+    )
     return {"running": running, "summary": summary[:2048], "returncode": result.returncode}
 
 
@@ -373,7 +381,8 @@ def lifecycle_status(*, ingestion: dict[str, Any] | None = None) -> dict[str, An
     enrolled = _safe_is_file(INSTALL_ROOT / "etc" / "client.keys")
     agent = _agent_status() if installed else {"running": False, "summary": ""}
     ingestion = ingestion if isinstance(ingestion, dict) else {}
-    connected = bool(ingestion.get("authenticated"))
+    transport_authenticated = bool(ingestion.get("authenticated"))
+    connected = bool(installed and enrolled and agent.get("running") and transport_authenticated)
     scanning = connected and int(ingestion.get("authenticated_event_count") or 0) > 0
     if scanning:
         lifecycle = "scanning"
@@ -396,6 +405,7 @@ def lifecycle_status(*, ingestion: dict[str, Any] | None = None) -> dict[str, An
         "installed": installed,
         "installed_version": _installed_version(),
         "enrolled": enrolled,
+        "transport_authenticated": transport_authenticated,
         "connected": connected,
         "scanning": scanning,
         "agent": agent,

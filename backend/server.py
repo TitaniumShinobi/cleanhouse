@@ -117,6 +117,7 @@ os.environ.setdefault("CLEANHOUSE_ACTIVE_CONTEXT_FOLLOW", "1")
 from backend.api.cleanhouse import bp as cleanhouse_bp
 from backend import events as cleanhouse_events
 from backend import runtime_supervisor
+from backend import vvault_sync, wazuh_files
 from backend.network_runtime import (
     start_network_collector_service,
     start_network_history_service,
@@ -350,6 +351,8 @@ def _start_events_services():
     warmup_details: dict[str, object] = {
         "events_db": {"status": "pending"},
         "filesystem_watcher": {"status": "pending"},
+        "files_preservation": {"status": "pending"},
+        "wazuh_files": {"status": "pending"},
         "network_history": {"status": "pending"},
         "network_collector": {"status": "pending"},
         "heartbeat": {"status": "pending"},
@@ -398,6 +401,26 @@ def _start_events_services():
         failure_reasons.append("filesystem_watcher_start_failed")
         warmup_details["filesystem_watcher"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
         logging.warning("cleanhouse filesystem watcher not started: %s", exc)
+    try:
+        warmup_details["files_preservation"] = vvault_sync.start_service(surface="files")
+    except Exception as exc:
+        warmup_details["files_preservation"] = {
+            "status": "degraded",
+            "reason_code": "files_preservation_start_failed",
+            "error": exc.__class__.__name__,
+        }
+        logging.warning("cleanhouse Files preservation not started: %s", exc.__class__.__name__)
+    try:
+        warmup_details["wazuh_files"] = wazuh_files.start_service()
+    except Exception as exc:
+        # Wazuh is an optional external evidence provider. Its failure must be
+        # visible without blocking the local CleanHouse runtime from warming.
+        warmup_details["wazuh_files"] = {
+            "status": "degraded",
+            "reason_code": "wazuh_files_start_failed",
+            "error": exc.__class__.__name__,
+        }
+        logging.warning("cleanhouse Wazuh Files collector not started: %s", exc.__class__.__name__)
     try:
         history_status = start_network_history_service()
         warmup_details["network_history"] = history_status
@@ -463,6 +486,14 @@ def _start_events_services_background() -> None:
 
 
 def _stop_events_services() -> None:
+    try:
+        wazuh_files.stop_service(timeout=5.0)
+    except Exception as exc:  # pragma: no cover
+        logging.warning("cleanhouse Wazuh Files collector not stopped cleanly: %s", exc.__class__.__name__)
+    try:
+        vvault_sync.stop_service(timeout=5.0)
+    except Exception as exc:  # pragma: no cover
+        logging.warning("cleanhouse Files preservation not stopped cleanly: %s", exc.__class__.__name__)
     try:
         stop_network_collector_service(timeout=5.0)
     except Exception as exc:  # pragma: no cover

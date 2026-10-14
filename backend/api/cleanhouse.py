@@ -12,13 +12,14 @@ import json
 import plistlib
 import shutil
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, Response, jsonify, request, send_file
-from backend import events
+from flask import Blueprint, Response, jsonify, request, send_file, session, stream_with_context
+from backend import events, file_integrity, vvault_sync, wazuh_files
 from backend.utils.jwt_utils import get_user_from_token
 
 from backend.api.cleanhouse_monitoring import CleanHouseMonitoringAdapter, LOGIN_REPORT_WAIT_SECONDS
@@ -156,6 +157,28 @@ def _require_allowed_origin(origin: str | None) -> tuple[dict, bool]:
     if origin in explicit:
         return {}, True
     return {"status": "error", "message": "Origin not allowed"}, False
+
+
+def _require_files_read_request():
+    """Protect path-bearing Files evidence without creating another auth model."""
+    origin = request.headers.get("Origin")
+    if origin:
+        origin_error, allowed = _require_allowed_origin(origin)
+        if not allowed:
+            return origin_error, 403
+    else:
+        raw_host = str(getattr(request, "host", "") or "").lower()
+        host = "::1" if raw_host.startswith("[::1]") else raw_host.split(":", 1)[0]
+        if host not in {"localhost", "127.0.0.1", "::1"}:
+            return {"status": "error", "message": "Same-origin local host required"}, 403
+    fetch_site = str(request.headers.get("Sec-Fetch-Site") or "same-origin").lower()
+    if fetch_site not in {"same-origin", "same-site", "none"}:
+        return {"status": "error", "message": "Cross-site request rejected"}, 403
+    auth_enabled = os.getenv("CLEANHOUSE_ENABLE_AUTH", "1").lower() not in {"0", "false", "no", "off"}
+    require_login = os.getenv("CLEANHOUSE_REQUIRE_LOGIN", "1").lower() not in {"0", "false", "no", "off"}
+    if auth_enabled and require_login and not (session.get("user_id") or session.get("oauth_user")):
+        return {"status": "error", "message": "Authentication required"}, 401
+    return None
 
 
 def _allowed_repo_roots():
@@ -3519,6 +3542,216 @@ def prune_artifacts():
 def list_retention_events():
     adapter = get_cleanhouse_monitoring_adapter()
     return jsonify(adapter.get_retention_events())
+
+
+FILES_WATCHER_SOURCE = "filesystem_watcher"
+FILES_WAZUH_SOURCE = "wazuh_fim"
+
+
+def _files_event_epoch(row: dict[str, Any]) -> float | None:
+    value = str(row.get("timestamp") or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _files_presentable_event(row: dict[str, Any]) -> bool:
+    path = Path(str(row.get("path") or ""))
+    if not str(path):
+        return False
+    if set(path.parts).intersection({".git", "__pycache__", "node_modules", "cleanhouse_env"}):
+        return False
+    return path.name != ".DS_Store" and path.suffix.lower() not in {".pyc", ".pyo", ".swp", ".tmp"}
+
+
+def _files_correlated(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    """Prefer live Wazuh projection while retaining raw provider rows durably."""
+    projected: list[dict[str, Any]] = []
+    for original in rows:
+        if not _files_presentable_event(original):
+            continue
+        row = dict(original)
+        path = str(row.get("path") or "")
+        event_type = str(row.get("event_type") or "")
+        provider = str(row.get("provider") or row.get("source_surface") or "")
+        timestamp = _files_event_epoch(row)
+        matched = None
+        for index, existing in enumerate(projected):
+            if str(existing.get("path") or "") != path or str(existing.get("event_type") or "") != event_type:
+                continue
+            existing_provider = str(existing.get("provider") or existing.get("source_surface") or "")
+            existing_timestamp = _files_event_epoch(existing)
+            if existing_provider == provider or timestamp is None or existing_timestamp is None:
+                continue
+            if abs(timestamp - existing_timestamp) <= 5:
+                matched = index
+                break
+        if matched is not None:
+            existing = projected[matched]
+            existing_provider = str(existing.get("provider") or existing.get("source_surface") or "")
+            providers = sorted({provider, existing_provider})
+            if provider == "wazuh" and existing_provider != "wazuh":
+                row["correlated_providers"] = providers
+                projected[matched] = row
+            else:
+                existing["correlated_providers"] = providers
+            continue
+        row["correlated_providers"] = [provider] if provider else []
+        projected.append(row)
+        if len(projected) >= limit:
+            break
+    return projected
+
+
+def _files_snapshot(limit: int = 200) -> dict[str, Any]:
+    bounded_limit = min(max(1, int(limit)), 500)
+    source_rows = events.list_events_by_sources({
+        FILES_WATCHER_SOURCE: min(max(500, bounded_limit * 4), 1000),
+        FILES_WAZUH_SOURCE: min(max(500, bounded_limit * 4), 1000),
+    })
+    candidates = sorted(
+        [*source_rows.get(FILES_WAZUH_SOURCE, []), *source_rows.get(FILES_WATCHER_SOURCE, [])],
+        key=lambda row: int(row.get("id") or 0),
+        reverse=True,
+    )
+    projected = _files_correlated(candidates, limit=bounded_limit)
+    watcher = events.get_watcher_status()
+    wazuh = wazuh_files.status()
+    preservation = vvault_sync.status(surface="files")
+    current_wazuh_live = bool(wazuh.get("operational")) and wazuh.get("health") in {"live", "no_data"}
+    fallback_active = not current_wazuh_live and watcher.get("status") == "running"
+    if current_wazuh_live:
+        state = str(wazuh.get("health") or "live")
+        provider = "wazuh"
+    elif fallback_active:
+        state = "fallback"
+        provider = "watchdog"
+    elif wazuh.get("configured"):
+        state = "degraded" if wazuh.get("last_error") else "warming"
+        provider = "none"
+    else:
+        state = "unavailable"
+        provider = "none"
+    cursor = max([int(row.get("id") or 0) for row in projected] or [0])
+    collector = {
+        "provider": provider,
+        "health": state,
+        "lifecycle": str(wazuh.get("lifecycle") or "unavailable"),
+        "configured": bool(wazuh.get("configured")),
+        "operational": bool(wazuh.get("operational")),
+        "evidence_authenticated": bool(wazuh.get("authenticated")),
+        "powered_by_wazuh": bool(wazuh.get("powered_by_wazuh")),
+        "historical_wazuh_proof": bool(wazuh.get("historical_wazuh_proof")),
+        "agent_id": wazuh.get("agent_id") or None,
+        "manager": wazuh.get("manager") or None,
+        "manager_version": wazuh.get("manager_version") or None,
+        "monitored_scope": wazuh.get("monitored_scope") or watcher.get("watch_dir"),
+        "last_event_at": wazuh.get("last_event_at") or (projected[0].get("timestamp") if projected else None),
+        "ingestion_latency_ms": wazuh.get("ingestion_latency_ms"),
+        "cursor": wazuh.get("cursor") or "",
+        "gap_state": wazuh.get("gap_state") or "unknown",
+        "fallback": {
+            "active": fallback_active,
+            "provider": "watchdog",
+            "status": watcher.get("status") or "unknown",
+            "reason": "wazuh_not_operational" if fallback_active else "inactive",
+        },
+        "last_error": wazuh.get("last_error") or "",
+    }
+    return {
+        "status": "ok" if state in {"live", "no_data", "fallback"} else state,
+        "schema": "cleanhouse.files.v2",
+        "cursor": cursor,
+        "collector": collector,
+        "powered_by_wazuh": collector["powered_by_wazuh"],
+        "monitoring": {
+            "always_on": bool(current_wazuh_live or fallback_active),
+            "status": state,
+            "provider": provider,
+            "watch_dir": collector["monitored_scope"],
+            "fallback": collector["fallback"],
+        },
+        "events": projected,
+        "findings": [],
+        "integrity": file_integrity.snapshot(),
+        "locations": [],
+        "mediations": [],
+        "suggestions": [],
+        "attention_count": 0,
+        "attention": [],
+        "reconciliation": {},
+        "preservation": preservation,
+    }
+
+
+def _files_sse_event(event: str, payload: dict[str, Any], *, event_id: str) -> str:
+    data = json.dumps(payload, separators=(",", ":"), default=str)
+    return f"id: {event_id}\nevent: {event}\ndata: {data}\n\n"
+
+
+@bp.route("/cleanhouse/files/snapshot", methods=["GET"])
+def get_files_snapshot():
+    guard = _require_files_read_request()
+    if guard is not None:
+        return guard
+    limit, error = _optional_positive_int_arg("limit", max_value=500)
+    if error:
+        return error
+    return jsonify(_files_snapshot(limit or 200))
+
+
+@bp.route("/cleanhouse/files/live", methods=["GET"])
+def stream_files_live():
+    guard = _require_files_read_request()
+    if guard is not None:
+        return guard
+    raw_after = request.args.get("after") or request.headers.get("Last-Event-ID") or "0"
+    try:
+        initial_cursor = max(0, int(raw_after))
+    except (TypeError, ValueError):
+        initial_cursor = 0
+
+    @stream_with_context
+    def generate():
+        last_cursor = initial_cursor
+        last_signature = ""
+        last_keepalive = time.monotonic()
+        while True:
+            snapshot = _files_snapshot(200)
+            cursor = int(snapshot.get("cursor") or 0)
+            signature = hashlib.sha256(json.dumps({
+                "collector": snapshot.get("collector"),
+                "integrity": snapshot.get("integrity"),
+                "preservation": snapshot.get("preservation"),
+            }, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+            if cursor != last_cursor or signature != last_signature:
+                yield _files_sse_event("files-snapshot", snapshot, event_id=str(cursor))
+                last_cursor = cursor
+                last_signature = signature
+                last_keepalive = time.monotonic()
+            elif time.monotonic() - last_keepalive >= 15:
+                yield ": keepalive\n\n"
+                last_keepalive = time.monotonic()
+            time.sleep(0.5)
+
+    response = Response(generate(), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@bp.route("/cleanhouse/files/wazuh/status", methods=["GET"])
+def get_files_wazuh_status():
+    guard = _require_files_read_request()
+    if guard is not None:
+        return guard
+    return jsonify(wazuh_files.status())
 
 
 @bp.route("/events", methods=["GET"])

@@ -45,6 +45,8 @@ RETRY_MAX_SECONDS = 300
 DEGRADED_BACKLOG_COUNT = 100
 DEGRADED_PENDING_AGE_SECONDS = 60
 KEYCHAIN_READ_TIMEOUT_SECONDS = 15
+REMOTE_TIMEOUT_SECONDS = 10
+MAX_REMOTE_RESPONSE_BYTES = 2 * 1024 * 1024
 _LOCK = threading.RLock()
 _STOP = threading.Event()
 _THREAD: threading.Thread | None = None
@@ -289,9 +291,35 @@ def _credential_type() -> str:
 
 def _safe_remote_url(url: str) -> bool:
     parsed = urllib.parse.urlparse(url)
+    if parsed.username or parsed.password or parsed.fragment or not parsed.hostname:
+        return False
     if parsed.scheme == "https" and parsed.hostname:
         return True
     return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+def _remote_origin(url: str) -> tuple[str, str, int] | None:
+    parsed = urllib.parse.urlparse(url)
+    if not _safe_remote_url(url):
+        return None
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return parsed.scheme.lower(), str(parsed.hostname or "").lower(), port
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+        return None
+
+
+def _open_remote(request: urllib.request.Request):
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        _NoRedirectHandler(),
+    )
+    return opener.open(request, timeout=REMOTE_TIMEOUT_SECONDS)
 
 
 def enqueue(evidence_id: str, payload: dict[str, Any], *, surface: str = "files") -> dict[str, Any]:
@@ -332,7 +360,7 @@ def enqueue(evidence_id: str, payload: dict[str, Any], *, surface: str = "files"
                 != _canonical_json(_replay_equivalent_payload(payload))
             ):
                 raise ValueError(f"OVVAULTS evidence ID collision: {evidence_id}")
-    start_service()
+    start_service(surface=scoped_surface)
     return {
         "status": "queued" if inserted else "existing",
         "evidence_id": evidence_id,
@@ -372,6 +400,8 @@ def _pending(*, surface: str | None = None, limit: int = MAX_BATCH_SIZE, due_onl
 
 
 def _default_transport(url: str, token: str, body: bytes) -> dict[str, Any]:
+    if _remote_origin(url) != _remote_origin(remote_base_url()):
+        raise RuntimeError("OVVAULTS endpoint must share the authenticated VVAULT origin")
     batch_id = hashlib.sha256(body).hexdigest()
     identity = _owner_identity()
     if not identity["email"]:
@@ -383,10 +413,32 @@ def _default_transport(url: str, token: str, body: bytes) -> dict[str, Any]:
         "X-CleanHouse-Batch-Id": batch_id,
     }
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=10, context=ssl.create_default_context()) as response:
-        if response.status >= 400:
-            raise urllib.error.HTTPError(url, response.status, "OVVAULTS sync failed", response.headers, None)
-        payload = json.loads(response.read().decode("utf-8") or "{}")
+    try:
+        with _open_remote(request) as response:
+            if response.status >= 400:
+                raise RuntimeError(f"OVVAULTS endpoint returned HTTP {response.status}")
+            raw_length = response.headers.get("Content-Length") if hasattr(response, "headers") else None
+            try:
+                content_length = int(raw_length) if raw_length is not None else None
+            except (TypeError, ValueError):
+                content_length = None
+            if content_length is not None and content_length > MAX_REMOTE_RESPONSE_BYTES:
+                raise RuntimeError("OVVAULTS response exceeded the size limit")
+            raw_payload = response.read(MAX_REMOTE_RESPONSE_BYTES + 1)
+    except urllib.error.HTTPError as exc:
+        if 300 <= int(exc.code) < 400:
+            raise RuntimeError("OVVAULTS endpoint redirect was rejected") from None
+        raise RuntimeError(f"OVVAULTS endpoint returned HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise RuntimeError("OVVAULTS endpoint is unreachable") from None
+    except TimeoutError:
+        raise RuntimeError("OVVAULTS endpoint timed out") from None
+    if len(raw_payload) > MAX_REMOTE_RESPONSE_BYTES:
+        raise RuntimeError("OVVAULTS response exceeded the size limit")
+    try:
+        payload = json.loads(raw_payload.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("OVVAULTS endpoint returned malformed JSON") from None
     if not isinstance(payload, dict):
         raise RuntimeError("OVVAULTS returned an invalid preservation receipt")
     return payload
@@ -430,6 +482,8 @@ def flush_once(
         return {"status": "unavailable", "reason": "missing_canonical_owner_identity"}
     if not _safe_remote_url(url):
         return {"status": "unavailable", "reason": "secure_endpoint_required"}
+    if _remote_origin(url) != _remote_origin(remote_base_url()):
+        return {"status": "unavailable", "reason": "credential_origin_mismatch"}
     requested_surface = _surface(surface) if surface is not None else None
     candidates = _pending(surface=requested_surface, limit=MAX_BATCH_SIZE, due_only=True)
     if not candidates:
@@ -485,7 +539,7 @@ def flush_once(
             "receipt_id": receipt["receipt_id"], "batch_id": batch_id,
         }
     except Exception as exc:
-        message = str(exc)[:1024]
+        message = "ovvaults_sync_failed"
         error_at = _now()
         with _LOCK, _managed_connection() as conn:
             for item in batch:
@@ -500,7 +554,7 @@ def flush_once(
                 )
         return {
             "status": "degraded", "surface": batch_surface, "reason": "sync_failed",
-            "error": message, "pending": len(batch),
+            "error": type(exc).__name__, "pending": len(batch),
         }
 
 
@@ -541,11 +595,18 @@ def status(surface: str | None = None) -> dict[str, Any]:
     url, token = _config()
     identity = _owner_identity()
     keychain = _keychain_credentials()
-    configured = bool(url and token and identity["email"] and _safe_remote_url(url))
+    configured = bool(
+        url
+        and token
+        and identity["email"]
+        and _safe_remote_url(url)
+        and _remote_origin(url) == _remote_origin(remote_base_url())
+    )
     pending = int(row["pending"] or 0)
     oldest_pending_at = str(row["oldest"] or "")
     oldest_age = _age_seconds(oldest_pending_at)
-    last_error = str(error_row["last_error"] or "") if error_row else ""
+    has_error = bool(error_row and str(error_row["last_error"] or ""))
+    last_error = "ovvaults_sync_failed" if has_error else ""
     authenticated = bool(receipt_row)
     backlog_degraded = pending >= DEGRADED_BACKLOG_COUNT or oldest_age >= DEGRADED_PENDING_AGE_SECONDS
     if not configured:
@@ -591,20 +652,30 @@ def status(surface: str | None = None) -> dict[str, Any]:
     }
 
 
-def _worker() -> None:
+def _worker(surface: str | None = None) -> None:
     while not _STOP.is_set():
-        result = flush_once()
+        result = flush_once(surface=surface)
         _STOP.wait(1 if result.get("status") == "ok" else 2)
 
 
-def start_service() -> dict[str, Any]:
+def start_service(*, surface: str | None = None) -> dict[str, Any]:
     global _THREAD
+    scoped_surface = _surface(surface) if surface is not None else None
     with _LOCK:
         if _THREAD is None or not _THREAD.is_alive():
             _STOP.clear()
-            _THREAD = threading.Thread(target=_worker, name="cleanhouse-ovvaults-evidence-sync", daemon=True)
+            _THREAD = threading.Thread(
+                target=_worker,
+                args=(scoped_surface,),
+                name=(
+                    f"cleanhouse-ovvaults-{scoped_surface}-evidence-sync"
+                    if scoped_surface
+                    else "cleanhouse-ovvaults-evidence-sync"
+                ),
+                daemon=True,
+            )
             _THREAD.start()
-    return status()
+    return status(scoped_surface)
 
 
 def stop_service(timeout: float = 5) -> dict[str, Any]:

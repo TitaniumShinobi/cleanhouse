@@ -10,6 +10,22 @@ from backend import wazuh_agent_configure, wazuh_runtime
 
 
 class WazuhRuntimeTests(unittest.TestCase):
+    def test_agent_status_requires_affirmative_wazuh_process_evidence(self):
+        control = Mock()
+        control.__str__ = Mock(return_value="/Library/Ossec/bin/wazuh-control")
+        with patch.object(wazuh_runtime, "INSTALL_ROOT") as root, patch.object(
+            wazuh_runtime, "_safe_is_file", return_value=True
+        ), patch.object(wazuh_runtime.subprocess, "run") as run:
+            root.__truediv__.return_value.__truediv__.return_value = control
+            run.return_value = Mock(returncode=0, stdout="", stderr="")
+            self.assertFalse(wazuh_runtime._agent_status()["running"])
+
+            run.return_value = Mock(returncode=0, stdout="status unavailable", stderr="")
+            self.assertFalse(wazuh_runtime._agent_status()["running"])
+
+            run.return_value = Mock(returncode=0, stdout="wazuh-agentd is running", stderr="")
+            self.assertTrue(wazuh_runtime._agent_status()["running"])
+
     def test_unverified_bundle_never_invokes_installer(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             wazuh_runtime.platform, "system", return_value="Darwin"
@@ -114,7 +130,9 @@ class WazuhRuntimeTests(unittest.TestCase):
             )
 
         self.assertFalse(result["scanning"])
-        self.assertEqual(result["lifecycle"], "connected")
+        self.assertFalse(result["connected"])
+        self.assertTrue(result["transport_authenticated"])
+        self.assertEqual(result["lifecycle"], "packaged")
 
     def test_protected_installed_paths_do_not_break_lifecycle_reporting(self):
         protected = Mock()

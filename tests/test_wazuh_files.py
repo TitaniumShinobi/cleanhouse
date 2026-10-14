@@ -21,6 +21,8 @@ class WazuhFilesTests(unittest.TestCase):
             "CLEANHOUSE_WAZUH_EVENTS_URL",
             "CLEANHOUSE_WAZUH_INVENTORY_URL",
             "CLEANHOUSE_WAZUH_ENROLL_URL",
+            "CLEANHOUSE_WAZUH_AGENT_ID",
+            "CLEANHOUSE_VVAULT_URL",
             "CLEANHOUSE_VVAULT_SERVICE_TOKEN",
             "CLEANHOUSE_VVAULT_USER_EMAIL",
             "CLEANHOUSE_VVAULT_USER_ID",
@@ -31,9 +33,28 @@ class WazuhFilesTests(unittest.TestCase):
         os.environ["CLEANHOUSE_FILES_INTEGRITY_DB"] = str(Path(self.tmp.name) / "integrity.db")
         os.environ["CLEANHOUSE_FILES_OUTBOX_DB"] = str(Path(self.tmp.name) / "outbox.db")
         os.environ["CLEANHOUSE_WATCH_DIR"] = "/scope"
+        os.environ["CLEANHOUSE_WAZUH_AGENT_ID"] = "001"
+        os.environ["CLEANHOUSE_VVAULT_URL"] = "https://vvault.example"
         events._DB_INIT_STATE.clear()
         wazuh_files._STATE.update(
-            {"authenticated": False, "authenticated_event_count": 0, "last_error": "", "last_event_at": ""}
+            {
+                "authenticated": False,
+                "authenticated_event_count": 0,
+                "last_event_at": "",
+                "last_poll_at": "",
+                "last_success_at": "",
+                "last_status_at": "",
+                "last_error": "",
+                "last_error_at": "",
+                "ingestion_latency_ms": None,
+                "agent_id": "",
+                "manager": "",
+                "manager_version": "",
+                "stream_identity": "",
+                "stream_generation": "",
+                "gap_state": "unknown",
+                "monitored_scope": "",
+            }
         )
 
     def tearDown(self):
@@ -70,6 +91,28 @@ class WazuhFilesTests(unittest.TestCase):
                 },
             },
         }
+
+    @staticmethod
+    def _manager_status():
+        return {
+            "schema": "vvault.cleanhouse.wazuh_status.v1",
+            "provider": "wazuh_manager",
+            "evidence_authenticated": True,
+            "manager_active": True,
+            "api_authenticated": True,
+            "alerts_readable": True,
+            "agent_id": "001",
+            "monitored_scope": "/scope",
+        }
+
+    @classmethod
+    def _poll_transport(cls, feed):
+        def transport(request):
+            if "/status" in request.full_url:
+                return cls._manager_status()
+            return feed
+
+        return transport
 
     def test_authenticated_hit_is_normalized_committed_and_deduplicated(self):
         with patch.object(wazuh_files.vvault_sync, "enqueue", return_value={"status": "queued"}):
@@ -166,6 +209,37 @@ class WazuhFilesTests(unittest.TestCase):
         self.assertEqual(events.get_collector_cursor(wazuh_files.COLLECTOR)["cursor"], "")
         self.assertEqual(events.list_events(limit=10, source_surface="wazuh_fim"), [])
 
+    def test_failed_middle_alert_stops_before_advancing_past_it(self):
+        hits = []
+        for index in range(1, 4):
+            hit = self._hit()
+            hit["_id"] = f"alert-{index}"
+            hit["sort"] = ["2026-08-22T00:00:00Z", f"alert-{index}"]
+            hit["_source"]["data"]["syscheck"]["path"] = f"/scope/{index}.txt"
+            hits.append(hit)
+        observe = wazuh_files.file_integrity.observe
+
+        def fail_second(normalized):
+            if normalized["path"] == "/scope/2.txt":
+                raise RuntimeError("projection unavailable")
+            return observe(normalized)
+
+        with patch.object(
+            wazuh_files.file_integrity, "observe", side_effect=fail_second
+        ), patch.object(
+            wazuh_files.vvault_sync, "enqueue", return_value={"status": "queued"}
+        ):
+            result = wazuh_files.ingest_hits(hits)
+
+        rows = events.list_events(limit=10, source_surface="wazuh_fim")
+        self.assertEqual(result["status"], "degraded")
+        self.assertEqual(result["inserted"], 1)
+        self.assertEqual([row["path"] for row in rows], ["/scope/1.txt"])
+        self.assertEqual(
+            events.get_collector_cursor(wazuh_files.COLLECTOR)["cursor"],
+            '["2026-08-22T00:00:00Z","alert-1"]',
+        )
+
     def test_inventory_paginates_manager_results(self):
         os.environ["CLEANHOUSE_WAZUH_INVENTORY_URL"] = "https://vvault.example/api/cleanhouse/files/wazuh/inventory"
         os.environ["CLEANHOUSE_VVAULT_SERVICE_TOKEN"] = "service-token"
@@ -249,15 +323,20 @@ class WazuhFilesTests(unittest.TestCase):
             },
         })
         with patch.object(wazuh_files.vvault_sync, "enqueue", return_value={"status": "queued"}):
-            poll = wazuh_files.poll_once(transport=lambda _request: {
+            poll = wazuh_files.poll_once(transport=self._poll_transport({
                 "schema": "vvault.cleanhouse.wazuh_feed.v1",
                 "provider": "wazuh_manager",
                 "evidence_authenticated": True,
                 "agent_id": "001",
                 "monitored_scope": "/scope",
+                "manager": "cleanhouse-wazuh",
+                "manager_version": "4.14.7",
+                "stream_identity": "alerts-json:1",
+                "stream_generation": "1:1",
+                "gap_state": "none_observed",
                 "cursor": "wazuh-jsonl.v1:1:2:3",
                 "items": [excluded, included],
-            })
+            }))
 
         self.assertEqual([item["path"] for item in inventory], ["/scope/backend/module.py"])
         self.assertEqual(poll["received"], 1)
@@ -273,7 +352,7 @@ class WazuhFilesTests(unittest.TestCase):
 
         with patch.object(wazuh_files.vvault_sync, "enqueue", return_value={"status": "queued"}):
             result = wazuh_files.poll_once(
-                transport=lambda _request: {
+                transport=self._poll_transport({
                     "schema": "vvault.cleanhouse.wazuh_feed.v1",
                     "provider": "wazuh_manager",
                     "evidence_authenticated": True,
@@ -285,7 +364,7 @@ class WazuhFilesTests(unittest.TestCase):
                     "stream_generation": "1048577:1",
                     "gap_state": "none_observed",
                     "items": [hit],
-                }
+                })
             )
 
         self.assertTrue(result["authenticated"])
@@ -299,7 +378,7 @@ class WazuhFilesTests(unittest.TestCase):
         page_cursor = "wazuh-jsonl.v1:1:2:4194304"
 
         result = wazuh_files.poll_once(
-            transport=lambda _request: {
+            transport=self._poll_transport({
                 "schema": "vvault.cleanhouse.wazuh_feed.v1",
                 "provider": "wazuh_manager",
                 "evidence_authenticated": True,
@@ -312,7 +391,7 @@ class WazuhFilesTests(unittest.TestCase):
                 "gap_state": "none_observed",
                 "cursor": page_cursor,
                 "items": [],
-            }
+            })
         )
 
         self.assertTrue(result["authenticated"])
@@ -325,16 +404,97 @@ class WazuhFilesTests(unittest.TestCase):
         os.environ["CLEANHOUSE_VVAULT_USER_EMAIL"] = "devon@example.com"
 
         result = wazuh_files.poll_once(
-            transport=lambda _request: {
+            transport=self._poll_transport({
                 "schema": "vvault.cleanhouse.wazuh_feed.v1",
                 "provider": "wazuh_manager",
                 "evidence_authenticated": False,
                 "items": [],
-            }
+            })
         )
 
         self.assertEqual(result["status"], "degraded")
         self.assertFalse(result["authenticated"])
+
+    def test_poll_rejects_unattested_manager_status_before_reading_feed(self):
+        os.environ["CLEANHOUSE_WAZUH_EVENTS_URL"] = "https://vvault.example/api/cleanhouse/files/wazuh/events"
+        os.environ["CLEANHOUSE_VVAULT_SERVICE_TOKEN"] = "service-token"
+        os.environ["CLEANHOUSE_VVAULT_USER_EMAIL"] = "devon@example.com"
+        requests = []
+
+        def transport(request):
+            requests.append(request.full_url)
+            return {
+                **self._manager_status(),
+                "api_authenticated": False,
+            }
+
+        result = wazuh_files.poll_once(transport=transport)
+
+        self.assertEqual(result["status"], "degraded")
+        self.assertFalse(result["authenticated"])
+        self.assertEqual(len(requests), 1)
+        self.assertIn("/status", requests[0])
+
+    def test_status_expires_authentication_when_worker_or_evidence_is_stale(self):
+        os.environ["CLEANHOUSE_WAZUH_EVENTS_URL"] = "https://vvault.example/api/cleanhouse/files/wazuh/events"
+        os.environ["CLEANHOUSE_VVAULT_SERVICE_TOKEN"] = "service-token"
+        os.environ["CLEANHOUSE_VVAULT_USER_EMAIL"] = "devon@example.com"
+        wazuh_files._STATE.update({
+            "authenticated": True,
+            "last_success_at": "2026-01-01T00:00:00+00:00",
+            "last_status_at": "2026-01-01T00:00:00+00:00",
+        })
+        dead_worker = unittest.mock.Mock()
+        dead_worker.is_alive.return_value = False
+
+        with patch.object(wazuh_files, "_THREAD", dead_worker), patch.object(
+            wazuh_files.wazuh_runtime,
+            "lifecycle_status",
+            return_value={"lifecycle": "enrolled", "connected": False},
+        ):
+            state = wazuh_files.status()
+
+        self.assertFalse(state["authenticated"])
+        self.assertFalse(state["operational"])
+        self.assertFalse(state["evidence_fresh"])
+        self.assertFalse(state["worker_alive"])
+        self.assertEqual(state["health"], "degraded")
+
+    def test_poll_requires_configured_agent_identity(self):
+        os.environ["CLEANHOUSE_WAZUH_EVENTS_URL"] = "https://vvault.example/api/cleanhouse/files/wazuh/events"
+        os.environ["CLEANHOUSE_VVAULT_SERVICE_TOKEN"] = "service-token"
+        os.environ["CLEANHOUSE_VVAULT_USER_EMAIL"] = "devon@example.com"
+        os.environ.pop("CLEANHOUSE_WAZUH_AGENT_ID", None)
+        wazuh_files._STATE["agent_id"] = ""
+
+        result = wazuh_files.poll_once(transport=lambda _request: self.fail("transport must not run"))
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["reason"], "wazuh_agent_identity_missing")
+
+    def test_projection_failure_clears_feed_authentication_claim(self):
+        os.environ["CLEANHOUSE_WAZUH_EVENTS_URL"] = "https://vvault.example/api/cleanhouse/files/wazuh/events"
+        os.environ["CLEANHOUSE_VVAULT_SERVICE_TOKEN"] = "service-token"
+        os.environ["CLEANHOUSE_VVAULT_USER_EMAIL"] = "devon@example.com"
+        with patch.object(wazuh_files.vvault_sync, "enqueue", side_effect=RuntimeError("private outbox detail")):
+            result = wazuh_files.poll_once(transport=self._poll_transport({
+                "schema": "vvault.cleanhouse.wazuh_feed.v1",
+                "provider": "wazuh_manager",
+                "evidence_authenticated": True,
+                "agent_id": "001",
+                "monitored_scope": "/scope",
+                "manager": "cleanhouse-wazuh",
+                "manager_version": "4.14.7",
+                "stream_identity": "alerts-json:1",
+                "stream_generation": "1:1",
+                "gap_state": "none_observed",
+                "items": [self._hit()],
+            }))
+
+        self.assertEqual(result["status"], "degraded")
+        self.assertFalse(result["authenticated"])
+        self.assertEqual(result["reason"], "wazuh_poll_failed")
+        self.assertNotIn("private outbox detail", str(result))
 
     def test_pairing_headers_are_reused_for_enrollment(self):
         os.environ["CLEANHOUSE_WAZUH_ENROLL_URL"] = "https://vvault.example/api/cleanhouse/files/wazuh/enroll"
@@ -381,6 +541,32 @@ class WazuhFilesTests(unittest.TestCase):
         self.assertTrue(state["powered_by_wazuh"])
         self.assertTrue(state["historical_wazuh_proof"])
         self.assertEqual(state["health"], "degraded")
+
+    def test_historical_powered_state_is_durable_in_collector_metadata(self):
+        wazuh_files._STATE.update({
+            "authenticated": False,
+            "authenticated_event_count": 0,
+            "last_error": "",
+            "last_event_at": "",
+        })
+        with patch.object(
+            wazuh_files.events,
+            "get_collector_cursor",
+            return_value={
+                "cursor": "cursor-1",
+                "updated_at": "2026-10-13T00:00:00+00:00",
+                "metadata": {"authenticated_event_committed": True},
+            },
+        ), patch.object(wazuh_files.events, "list_events", return_value=[]), patch.object(
+            wazuh_files.wazuh_runtime,
+            "lifecycle_status",
+            return_value={"lifecycle": "packaged", "connected": False},
+        ):
+            state = wazuh_files.status()
+
+        self.assertTrue(state["historical_wazuh_proof"])
+        self.assertTrue(state["powered_by_wazuh"])
+        self.assertFalse(state["operational"])
 
 
 if __name__ == "__main__":

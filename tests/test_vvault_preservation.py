@@ -262,6 +262,7 @@ class FilesVVaultSyncTests(unittest.TestCase):
             for key in (
                 "CLEANHOUSE_FILES_OUTBOX_DB",
                 "CLEANHOUSE_VVAULT_FILES_EVIDENCE_URL",
+                "CLEANHOUSE_VVAULT_URL",
                 "CLEANHOUSE_VVAULT_SERVICE_TOKEN",
                 "CLEANHOUSE_VVAULT_USER_EMAIL",
                 "CLEANHOUSE_VVAULT_USER_ID",
@@ -270,6 +271,7 @@ class FilesVVaultSyncTests(unittest.TestCase):
         }
         os.environ["CLEANHOUSE_FILES_OUTBOX_DB"] = str(Path(self._tmp.name) / "outbox.db")
         os.environ["CLEANHOUSE_VVAULT_FILES_EVIDENCE_URL"] = "https://vvault.example/files/evidence"
+        os.environ["CLEANHOUSE_VVAULT_URL"] = "https://vvault.example"
         os.environ["CLEANHOUSE_VVAULT_SERVICE_TOKEN"] = "test-token"
         os.environ["CLEANHOUSE_VVAULT_USER_EMAIL"] = "devon@example.com"
         os.environ["CLEANHOUSE_VVAULT_INSTANCE_ID"] = "zen-001"
@@ -372,6 +374,17 @@ class FilesVVaultSyncTests(unittest.TestCase):
         self.assertEqual(result["status"], "degraded")
         self.assertEqual(vvault_sync.status()["pending"], 1)
 
+    def test_files_scoped_worker_never_flushes_network_rows(self):
+        stop = unittest.mock.Mock()
+        stop.is_set.side_effect = [False, True]
+        stop.wait.return_value = True
+        with patch.object(vvault_sync, "_STOP", stop), patch.object(
+            vvault_sync, "flush_once", return_value={"status": "idle"}
+        ) as flush:
+            vvault_sync._worker("files")
+
+        flush.assert_called_once_with(surface="files")
+
     def test_receipts_and_readiness_are_isolated_by_surface(self):
         timestamp = vvault_sync._now()
         with patch.object(vvault_sync, "start_service", return_value={"state": "test"}), patch.object(
@@ -439,7 +452,9 @@ class FilesVVaultSyncTests(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self):
+            headers = {}
+
+            def read(self, _amount=-1):
                 batch_id = hashlib.sha256(body).hexdigest()
                 return json.dumps({
                     "receipt_id": "receipt",
@@ -451,7 +466,7 @@ class FilesVVaultSyncTests(unittest.TestCase):
             captured["headers"] = dict(request.header_items())
             return Response()
 
-        with patch.object(vvault_sync.urllib.request, "urlopen", side_effect=open_request):
+        with patch.object(vvault_sync, "_open_remote", side_effect=open_request):
             vvault_sync._default_transport("https://vvault.example/api/cleanhouse/files/evidence", "test-token", body)
 
         self.assertEqual(captured["headers"]["Authorization"], "Bearer test-token")
@@ -473,7 +488,9 @@ class FilesVVaultSyncTests(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self):
+            headers = {}
+
+            def read(self, _amount=-1):
                 return json.dumps({
                     "receipt_id": "receipt",
                     "batch_id": hashlib.sha256(body).hexdigest(),
@@ -490,7 +507,7 @@ class FilesVVaultSyncTests(unittest.TestCase):
                 "user_id": "",
                 "instance_id": "zen-001",
             }
-        ), patch.object(vvault_sync.urllib.request, "urlopen", side_effect=open_request):
+        ), patch.object(vvault_sync, "_open_remote", side_effect=open_request):
             vvault_sync._default_transport(
                 "https://vvault.example/api/cleanhouse/files/evidence",
                 "chf_v1_dedicated",
@@ -500,6 +517,74 @@ class FilesVVaultSyncTests(unittest.TestCase):
         self.assertEqual(captured["headers"]["X-cleanhouse-key"], "chf_v1_dedicated")
         self.assertNotIn("Authorization", captured["headers"])
         self.assertNotIn("X-chatty-key", captured["headers"])
+
+    def test_remote_response_size_is_bounded(self):
+        body = b'{"events":[]}'
+
+        class Response:
+            status = 200
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, amount=-1):
+                return b"{" + b"x" * amount
+
+        with patch.object(vvault_sync, "_open_remote", return_value=Response()):
+            with self.assertRaisesRegex(RuntimeError, "size limit"):
+                vvault_sync._default_transport(
+                    "https://vvault.example/files/evidence", "test-token", body
+                )
+
+    def test_remote_redirect_is_rejected_without_exposing_location(self):
+        error = __import__("urllib.error").error.HTTPError(
+            "https://vvault.example/files/evidence",
+            302,
+            "redirect",
+            {"Location": "https://attacker.example/secret"},
+            None,
+        )
+        with patch.object(vvault_sync, "_open_remote", side_effect=error):
+            with self.assertRaisesRegex(RuntimeError, "redirect was rejected") as raised:
+                vvault_sync._default_transport(
+                    "https://vvault.example/files/evidence", "test-token", b'{"events":[]}'
+                )
+        self.assertNotIn("attacker.example", str(raised.exception))
+
+    def test_remote_url_fragment_is_not_accepted_as_configuration(self):
+        os.environ["CLEANHOUSE_VVAULT_FILES_EVIDENCE_URL"] = (
+            "https://vvault.example/files/evidence#private-fragment"
+        )
+
+        state = vvault_sync.status()
+
+        self.assertFalse(state["remote_sync_configured"])
+        self.assertEqual(state["sync_state"], "unavailable")
+
+    def test_status_redacts_legacy_private_error_text(self):
+        with patch.object(vvault_sync, "start_service", return_value={"state": "test"}), patch.object(
+            vvault_sync.vvault_preservation, "preserve_json", return_value={"status": "ok"}
+        ):
+            vvault_sync.enqueue("wazuh:event:legacy-error", {"timestamp": vvault_sync._now()})
+        with vvault_sync._managed_connection() as conn:
+            conn.execute(
+                "UPDATE files_outbox SET last_error = ?, last_error_at = ? WHERE evidence_id = ?",
+                (
+                    "https://private.internal/path?token=secret-value",
+                    vvault_sync._now(),
+                    "wazuh:event:legacy-error",
+                ),
+            )
+
+        state = vvault_sync.status("files")
+
+        self.assertEqual(state["last_error"], "ovvaults_sync_failed")
+        self.assertNotIn("private.internal", json.dumps(state))
+        self.assertNotIn("secret-value", json.dumps(state))
 
     def test_configured_but_unverified_endpoint_is_warming_not_live(self):
         state = vvault_sync.status()

@@ -19,6 +19,13 @@ from backend import events, file_integrity, vvault_sync, wazuh_runtime
 
 SOURCE = "wazuh_fim"
 COLLECTOR = "wazuh_fim_vvault"
+REQUEST_TIMEOUT_SECONDS = 10
+STATUS_FRESHNESS_SECONDS = 60
+DEFAULT_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MIN_MAX_RESPONSE_BYTES = 4096
+MAX_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_INVENTORY_PAGES = 200
+INVENTORY_DEADLINE_SECONDS = 30
 EXCLUDED_SCOPE_PARTS = frozenset({
     ".git",
     ".venv",
@@ -43,6 +50,7 @@ _STATE: dict[str, Any] = {
     "last_event_at": "",
     "last_poll_at": "",
     "last_success_at": "",
+    "last_status_at": "",
     "last_error": "",
     "last_error_at": "",
     "ingestion_latency_ms": None,
@@ -77,9 +85,49 @@ def _parse_time(value: Any) -> datetime | None:
 
 def _secure_url(url: str) -> bool:
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme == "https" and parsed.hostname:
+    if parsed.username or parsed.password or parsed.fragment or not parsed.hostname:
+        return False
+    if parsed.scheme == "https":
         return True
     return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+
+
+def _origin(url: str) -> tuple[str, str, int] | None:
+    parsed = urllib.parse.urlparse(url)
+    if not _secure_url(url):
+        return None
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return parsed.scheme.lower(), str(parsed.hostname or "").lower(), port
+
+
+def _credentials_may_target(url: str, credential_origin: str) -> bool:
+    return _origin(url) is not None and _origin(url) == _origin(credential_origin)
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+        return None
+
+
+def _open_response(request: urllib.request.Request):
+    opener = urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        _NoRedirectHandler(),
+    )
+    return opener.open(request, timeout=REQUEST_TIMEOUT_SECONDS)
+
+
+def _max_response_bytes() -> int:
+    try:
+        configured = int(
+            os.getenv("CLEANHOUSE_WAZUH_MAX_RESPONSE_BYTES", str(DEFAULT_MAX_RESPONSE_BYTES))
+        )
+    except ValueError:
+        configured = DEFAULT_MAX_RESPONSE_BYTES
+    return max(MIN_MAX_RESPONSE_BYTES, min(configured, MAX_MAX_RESPONSE_BYTES))
 
 
 def _path_within_scope(path: str, scope: str) -> bool:
@@ -109,6 +157,7 @@ def _config() -> dict[str, Any]:
     vvault_url = vvault_sync.remote_base_url()
     headers = vvault_sync.authenticated_headers()
     return {
+        "credential_origin": vvault_url,
         "events_url": (
             os.getenv("CLEANHOUSE_WAZUH_EVENTS_URL")
             or (f"{vvault_url}/api/cleanhouse/files/wazuh/events" if vvault_url else "")
@@ -184,6 +233,7 @@ def enroll_agent(
             "manager": manager,
             "monitored_scope": monitored_scope,
         },
+        credential_origin=config["credential_origin"],
         transport=transport,
     )
     if (
@@ -216,10 +266,13 @@ def _request_json(
     *,
     headers: dict[str, str],
     body: dict[str, Any] | None = None,
+    credential_origin: str = "",
     transport: Callable[[urllib.request.Request], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not _secure_url(url):
         raise RuntimeError("Wazuh endpoint must use HTTPS, except for localhost development")
+    if headers and (not credential_origin or not _credentials_may_target(url, credential_origin)):
+        raise RuntimeError("Wazuh endpoint must share the authenticated VVAULT origin")
     request = urllib.request.Request(
         url,
         data=(json.dumps(body, separators=(",", ":")).encode("utf-8") if body is not None else None),
@@ -231,8 +284,31 @@ def _request_json(
         if not isinstance(result, dict):
             raise RuntimeError("Wazuh transport returned an invalid payload")
         return result
-    with urllib.request.urlopen(request, timeout=10, context=ssl.create_default_context()) as response:
-        payload = json.loads(response.read().decode("utf-8") or "{}")
+    response_limit = _max_response_bytes()
+    try:
+        with _open_response(request) as response:
+            raw_length = response.headers.get("Content-Length")
+            try:
+                content_length = int(raw_length) if raw_length is not None else None
+            except (TypeError, ValueError):
+                content_length = None
+            if content_length is not None and content_length > response_limit:
+                raise RuntimeError("Wazuh endpoint response exceeded the configured size limit")
+            raw_payload = response.read(response_limit + 1)
+    except urllib.error.HTTPError as exc:
+        if 300 <= int(exc.code) < 400:
+            raise RuntimeError("Wazuh endpoint redirect was rejected") from None
+        raise RuntimeError(f"Wazuh endpoint returned HTTP {exc.code}") from None
+    except urllib.error.URLError:
+        raise RuntimeError("Wazuh endpoint is unreachable") from None
+    except TimeoutError:
+        raise RuntimeError("Wazuh endpoint timed out") from None
+    if len(raw_payload) > response_limit:
+        raise RuntimeError("Wazuh endpoint response exceeded the configured size limit")
+    try:
+        payload = json.loads(raw_payload.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise RuntimeError("Wazuh endpoint returned malformed JSON") from None
     if not isinstance(payload, dict):
         raise RuntimeError("Wazuh endpoint returned a non-object payload")
     return payload
@@ -409,7 +485,11 @@ def ingest_hits(hits: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 evidence_refs=normalized["evidence_refs"],
                 raw_evidence_ref=normalized["raw_evidence_ref"],
                 data={"wazuh": normalized, **normalized},
-                cursor_metadata={"agent_id": normalized["agent_id"], "manager": normalized["manager"]},
+                cursor_metadata={
+                    "agent_id": normalized["agent_id"],
+                    "manager": normalized["manager"],
+                    "authenticated_event_committed": True,
+                },
             )
             if result["inserted"]:
                 inserted += 1
@@ -431,22 +511,53 @@ def ingest_hits(hits: Iterable[dict[str, Any]]) -> dict[str, Any]:
                 )
         except Exception as exc:
             errors.append(str(exc)[:512])
+            # Provider cursors are ordered. Once one observation cannot be
+            # committed, later observations must wait so their cursor cannot
+            # move past the failed evidence and make it unrecoverable.
+            break
     return {"status": "ok" if not errors else "degraded", "inserted": inserted, "duplicates": duplicates, "errors": errors}
 
 
 def poll_once(*, transport: Callable[[urllib.request.Request], dict[str, Any]] | None = None) -> dict[str, Any]:
     config = _config()
-    if not config["events_url"] or not _authorization_headers(config):
+    if not config["events_url"] or not config["status_url"] or not _authorization_headers(config):
         return {"status": "unavailable", "reason": "authenticated_vvault_feed_missing"}
-    cursor = str(events.get_collector_cursor(COLLECTOR).get("cursor") or "")
+    expected_agent_id = str(config.get("agent_id") or _STATE.get("agent_id") or "").strip()
+    if not expected_agent_id:
+        return {"status": "unavailable", "authenticated": False, "reason": "wazuh_agent_identity_missing"}
+    cursor_record = events.get_collector_cursor(COLLECTOR)
+    cursor = str(cursor_record.get("cursor") or "")
     parsed = urllib.parse.urlparse(config["events_url"])
     query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
     query.update({"after": cursor, "limit": "100"})
     url = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query)))
     try:
+        status_payload = _request_json(
+            config["status_url"],
+            headers=_authorization_headers(config),
+            credential_origin=config["credential_origin"],
+            transport=transport,
+        )
+        status_scope = str(status_payload.get("monitored_scope") or "").strip()
+        if (
+            status_payload.get("schema") != "vvault.cleanhouse.wazuh_status.v1"
+            or status_payload.get("provider") != "wazuh_manager"
+            or status_payload.get("evidence_authenticated") is not True
+            or status_payload.get("manager_active") is not True
+            or status_payload.get("api_authenticated") is not True
+            or status_payload.get("alerts_readable") is not True
+            or str(status_payload.get("agent_id") or "").strip() != expected_agent_id
+            or not status_scope
+            or Path(status_scope).expanduser().resolve(strict=False)
+            != Path(config["scope"]).expanduser().resolve(strict=False)
+        ):
+            raise RuntimeError("VVAULT returned an unauthenticated or incompatible Wazuh status")
+        with _LOCK:
+            _STATE["last_status_at"] = _now()
         payload = _request_json(
             url,
             headers=_authorization_headers(config),
+            credential_origin=config["credential_origin"],
             transport=transport,
         )
         if (
@@ -457,12 +568,20 @@ def poll_once(*, transport: Callable[[urllib.request.Request], dict[str, Any]] |
             raise RuntimeError("VVAULT returned an unauthenticated or incompatible Wazuh feed")
         hits = payload.get("items") if isinstance(payload.get("items"), list) else []
         feed_agent_id = str(payload.get("agent_id") or "").strip()
-        expected_agent_id = str(config.get("agent_id") or _STATE.get("agent_id") or "").strip()
-        if expected_agent_id and feed_agent_id and feed_agent_id != expected_agent_id:
+        if not feed_agent_id or feed_agent_id != expected_agent_id:
             raise RuntimeError("VVAULT Wazuh feed agent does not match the enrolled CleanHouse agent")
-        monitored_scope = str(payload.get("monitored_scope") or config["scope"]).strip()
-        if not monitored_scope:
-            raise RuntimeError("VVAULT Wazuh feed omitted the monitored scope")
+        monitored_scope = str(payload.get("monitored_scope") or "").strip()
+        if not monitored_scope or Path(monitored_scope).expanduser().resolve(strict=False) != Path(config["scope"]).expanduser().resolve(strict=False):
+            raise RuntimeError("VVAULT Wazuh feed scope does not match the configured monitored scope")
+        required_attestation = {
+            "manager": str(payload.get("manager") or "").strip(),
+            "manager_version": str(payload.get("manager_version") or "").strip(),
+            "stream_identity": str(payload.get("stream_identity") or "").strip(),
+            "stream_generation": str(payload.get("stream_generation") or "").strip(),
+            "gap_state": str(payload.get("gap_state") or "").strip(),
+        }
+        if not all(required_attestation.values()):
+            raise RuntimeError("VVAULT Wazuh feed omitted authenticated manager or stream attestation")
         accepted_hits = []
         for hit in hits:
             normalized = normalize_hit(hit)
@@ -474,6 +593,8 @@ def poll_once(*, transport: Callable[[urllib.request.Request], dict[str, Any]] |
                 continue
             accepted_hits.append(hit)
         result = ingest_hits(accepted_hits)
+        if result.get("status") != "ok" or result.get("errors"):
+            raise RuntimeError("Wazuh evidence commit failed")
         page_cursor = str(payload.get("cursor") or "").strip()
         if page_cursor and not result.get("errors"):
             events.advance_collector_cursor(
@@ -485,6 +606,10 @@ def poll_once(*, transport: Callable[[urllib.request.Request], dict[str, Any]] |
                     "stream_identity": str(payload.get("stream_identity") or ""),
                     "stream_generation": str(payload.get("stream_generation") or ""),
                     "gap_state": str(payload.get("gap_state") or "none_observed"),
+                    "authenticated_event_committed": bool(
+                        accepted_hits
+                        or (cursor_record.get("metadata") or {}).get("authenticated_event_committed")
+                    ),
                 },
             )
         with _LOCK:
@@ -509,7 +634,7 @@ def poll_once(*, transport: Callable[[urllib.request.Request], dict[str, Any]] |
             "filtered": len(hits) - len(accepted_hits),
         }
     except Exception as exc:
-        message = str(exc)[:1024]
+        message = "wazuh_poll_failed"
         with _LOCK:
             _STATE.update(
                 {
@@ -519,7 +644,7 @@ def poll_once(*, transport: Callable[[urllib.request.Request], dict[str, Any]] |
                     "last_error_at": _now(),
                 }
             )
-        return {"status": "degraded", "authenticated": False, "reason": "wazuh_poll_failed", "error": message}
+        return {"status": "degraded", "authenticated": False, "reason": message, "error": type(exc).__name__}
 
 
 def inventory(*, transport: Callable[[urllib.request.Request], dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -529,6 +654,9 @@ def inventory(*, transport: Callable[[urllib.request.Request], dict[str, Any]] |
     headers = _authorization_headers(config)
     if not headers:
         raise RuntimeError("Authenticated VVAULT owner credentials are not configured")
+    expected_agent_id = str(config.get("agent_id") or _STATE.get("agent_id") or "").strip()
+    if not expected_agent_id:
+        raise RuntimeError("The enrolled Wazuh agent identity is not configured")
     page_size = 500
     try:
         configured_max = int(os.getenv("CLEANHOUSE_WAZUH_INVENTORY_MAX_ENTRIES", "10000"))
@@ -541,12 +669,22 @@ def inventory(*, transport: Callable[[urllib.request.Request], dict[str, Any]] |
     offset = 0
     source_total = 0
     source_complete = False
+    pages = 0
+    deadline = time.monotonic() + INVENTORY_DEADLINE_SECONDS
     while len(rows) < max_entries:
+        pages += 1
+        if pages > MAX_INVENTORY_PAGES or time.monotonic() > deadline:
+            raise RuntimeError("Wazuh inventory exceeded the bounded pagination window")
         parsed = urllib.parse.urlparse(config["inventory_url"])
         query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
         query.update({"offset": str(offset), "limit": str(min(page_size, max_entries - len(rows)))})
         page_url = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query)))
-        payload = _request_json(page_url, headers=headers, transport=transport)
+        payload = _request_json(
+            page_url,
+            headers=headers,
+            credential_origin=config["credential_origin"],
+            transport=transport,
+        )
         if (
             payload.get("schema") != "vvault.cleanhouse.wazuh_inventory.v1"
             or payload.get("provider") != "wazuh_manager"
@@ -554,10 +692,11 @@ def inventory(*, transport: Callable[[urllib.request.Request], dict[str, Any]] |
         ):
             raise RuntimeError("VVAULT returned an unauthenticated or incompatible Wazuh inventory")
         page_agent_id = str(payload.get("agent_id") or "").strip()
-        page_scope = str(payload.get("monitored_scope") or config["scope"]).strip()
-        expected_agent_id = str(config.get("agent_id") or _STATE.get("agent_id") or "").strip()
-        if expected_agent_id and page_agent_id and page_agent_id != expected_agent_id:
+        page_scope = str(payload.get("monitored_scope") or "").strip()
+        if not page_agent_id or page_agent_id != expected_agent_id:
             raise RuntimeError("VVAULT Wazuh inventory agent does not match the enrolled CleanHouse agent")
+        if not page_scope or Path(page_scope).expanduser().resolve(strict=False) != Path(config["scope"]).expanduser().resolve(strict=False):
+            raise RuntimeError("VVAULT Wazuh inventory scope does not match the configured monitored scope")
         if inventory_agent_id and page_agent_id and page_agent_id != inventory_agent_id:
             raise RuntimeError("VVAULT Wazuh inventory changed agents during pagination")
         if inventory_scope and page_scope and page_scope != inventory_scope:
@@ -624,6 +763,7 @@ def inventory(*, transport: Callable[[urllib.request.Request], dict[str, Any]] |
 def status() -> dict[str, Any]:
     config = _config()
     cursor = events.get_collector_cursor(COLLECTOR)
+    cursor_metadata = cursor.get("metadata") if isinstance(cursor.get("metadata"), dict) else {}
     with _LOCK:
         state = dict(_STATE)
     if int(state.get("authenticated_event_count") or 0) == 0:
@@ -637,6 +777,8 @@ def status() -> dict[str, Any]:
             retained_data = retained[0].get("data") if isinstance(retained[0].get("data"), dict) else {}
             retained_wazuh = retained_data.get("wazuh") if isinstance(retained_data.get("wazuh"), dict) else retained_data
             state["ingestion_latency_ms"] = retained_wazuh.get("ingestion_latency_ms")
+        if cursor_metadata.get("authenticated_event_committed"):
+            state["authenticated_event_count"] = max(1, int(state["authenticated_event_count"] or 0))
         if state["authenticated_event_count"]:
             with _LOCK:
                 _STATE["authenticated_event_count"] = state["authenticated_event_count"]
@@ -644,13 +786,27 @@ def status() -> dict[str, Any]:
                     _STATE["last_event_at"] = state["last_event_at"]
                 if state.get("ingestion_latency_ms") is not None:
                     _STATE["ingestion_latency_ms"] = state["ingestion_latency_ms"]
-    configured = bool(config["events_url"] and _authorization_headers(config))
-    runtime = wazuh_runtime.lifecycle_status(ingestion=state)
-    if state["authenticated"] and state["authenticated_event_count"]:
+    configured = bool(config["events_url"] and config["status_url"] and _authorization_headers(config))
+    last_success = _parse_time(state.get("last_success_at"))
+    last_status = _parse_time(state.get("last_status_at"))
+    now = datetime.now(timezone.utc)
+    evidence_fresh = bool(
+        last_success
+        and last_status
+        and (now - last_success).total_seconds() <= STATUS_FRESHNESS_SECONDS
+        and (now - last_status).total_seconds() <= STATUS_FRESHNESS_SECONDS
+    )
+    worker_alive = bool(_THREAD and _THREAD.is_alive())
+    current_authenticated = bool(state.get("authenticated") and evidence_fresh and worker_alive)
+    runtime = wazuh_runtime.lifecycle_status(ingestion={**state, "authenticated": current_authenticated})
+    operational = bool(runtime.get("connected") and evidence_fresh and worker_alive)
+    if operational and state["authenticated_event_count"]:
         health = "live"
-    elif state["authenticated"]:
+    elif operational:
         health = "no_data"
-    elif configured and state["last_error"]:
+    elif configured and (
+        state["last_error"] or (state.get("authenticated") and not current_authenticated)
+    ):
         health = "degraded"
     elif configured:
         health = "warming"
@@ -658,13 +814,17 @@ def status() -> dict[str, Any]:
         health = "unavailable"
     return {
         **state,
+        "authenticated": current_authenticated,
         "configured": configured,
         "health": health,
         "cursor": cursor.get("cursor") or "",
         "cursor_updated_at": cursor.get("updated_at") or "",
         "monitored_scope": state.get("monitored_scope") or config["scope"],
         "transport_provider": "vvault",
-        "evidence_endpoint": config["events_url"],
+        "evidence_endpoint_configured": bool(config["events_url"]),
+        "operational": operational,
+        "worker_alive": worker_alive,
+        "evidence_fresh": evidence_fresh,
         "lifecycle": runtime["lifecycle"],
         "runtime": runtime,
         "historical_wazuh_proof": int(state["authenticated_event_count"] or 0) > 0,
@@ -680,7 +840,12 @@ def _worker() -> None:
 
 def start_service() -> dict[str, Any]:
     global _THREAD
-    if not _config()["events_url"]:
+    config = _config()
+    if (
+        not config["events_url"]
+        or not _authorization_headers(config)
+        or not str(config.get("agent_id") or _STATE.get("agent_id") or "").strip()
+    ):
         return status()
     with _LOCK:
         if _THREAD is None or not _THREAD.is_alive():

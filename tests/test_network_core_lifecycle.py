@@ -84,6 +84,14 @@ class NetworkServerLifecycleTests(unittest.TestCase):
         ), patch.object(
             self.server.cleanhouse_events, "start_watcher", watcher
         ), patch.object(
+            self.server.vvault_sync,
+            "start_service",
+            return_value={"sync_state": "unavailable", "status": "unavailable"},
+        ), patch.object(
+            self.server.wazuh_files,
+            "start_service",
+            return_value={"configured": False, "health": "unavailable", "operational": False},
+        ), patch.object(
             self.server, "start_network_history_service", history
         ), patch.object(
             self.server, "start_network_collector_service", collector
@@ -145,7 +153,11 @@ class NetworkServerLifecycleTests(unittest.TestCase):
             calls.append("collector")
             raise RuntimeError("collector stop failed")
 
-        with patch.object(self.server, "stop_network_collector_service", side_effect=collector_stop), patch.object(
+        with patch.object(self.server.wazuh_files, "stop_service"), patch.object(
+            self.server.vvault_sync, "stop_service"
+        ), patch.object(
+            self.server, "stop_network_collector_service", side_effect=collector_stop
+        ), patch.object(
             self.server, "stop_network_history_service", side_effect=lambda: calls.append("history")
         ), patch.object(
             self.server.cleanhouse_events, "stop_events_services", side_effect=lambda: calls.append("events")

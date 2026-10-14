@@ -381,6 +381,29 @@ SCHEMA_VERSIONS: Dict[str, int] = {
 # Local persistence directory for versioned event/timeline/receipt artifacts
 DATA_DIR: Path = Path.home() / "Documents" / "CleanHouse" / "Data"
 
+
+def vvault_users_root() -> Path:
+    """Return the operator-configured root for user-scoped VVAULT files."""
+    return Path(os.getenv("CLEANHOUSE_VVAULT_ROOT", "/vvault_files/users")).expanduser()
+
+
+def vvault_user_id() -> str:
+    """Return the canonical VVAULT user id; empty disables local mirroring."""
+    return os.getenv("CLEANHOUSE_VVAULT_USER_ID", "").strip()
+
+
+def vvault_user_shard() -> str:
+    """Return the configured VVAULT shard without inferring an owner."""
+    return os.getenv("CLEANHOUSE_VVAULT_SHARD", "shard_0000").strip() or "shard_0000"
+
+
+def cleanhouse_vvault_root() -> Optional[Path]:
+    """Resolve CleanHouse's canonical user-scoped preservation directory."""
+    user_id = vvault_user_id()
+    if not user_id:
+        return None
+    return vvault_users_root() / vvault_user_shard() / user_id / "cleanhouse"
+
 # Artifact subdirectories created lazily on first write
 ARTIFACT_SUBDIRS: Dict[str, str] = {
     "event": "events",
