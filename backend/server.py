@@ -117,6 +117,12 @@ os.environ.setdefault("CLEANHOUSE_ACTIVE_CONTEXT_FOLLOW", "1")
 from backend.api.cleanhouse import bp as cleanhouse_bp
 from backend import events as cleanhouse_events
 from backend import runtime_supervisor
+from backend.network_runtime import (
+    start_network_collector_service,
+    start_network_history_service,
+    stop_network_collector_service,
+    stop_network_history_service,
+)
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = _read_secret_key()
@@ -344,6 +350,8 @@ def _start_events_services():
     warmup_details: dict[str, object] = {
         "events_db": {"status": "pending"},
         "filesystem_watcher": {"status": "pending"},
+        "network_history": {"status": "pending"},
+        "network_collector": {"status": "pending"},
         "heartbeat": {"status": "pending"},
     }
 
@@ -391,6 +399,36 @@ def _start_events_services():
         warmup_details["filesystem_watcher"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
         logging.warning("cleanhouse filesystem watcher not started: %s", exc)
     try:
+        history_status = start_network_history_service()
+        warmup_details["network_history"] = history_status
+        if history_status.get("status") != "running":
+            failure_reasons.append("network_history_unavailable")
+    except Exception as exc:
+        failure_reasons.append("network_history_start_failed")
+        warmup_details["network_history"] = {
+            "status": "failed",
+            "error": str(exc) or exc.__class__.__name__,
+        }
+        logging.warning("cleanhouse network history not started: %s", exc)
+    try:
+        collector_status = start_network_collector_service()
+        warmup_details["network_collector"] = collector_status
+        if collector_status.get("status") != "running":
+            collector_reason = str(collector_status.get("reason_code") or "")
+            if collector_reason == "capture_engine_unavailable":
+                failure_reasons.append("network_capture_engine_unavailable")
+            elif collector_reason == "capture_start_timeout":
+                failure_reasons.append("network_collector_start_timeout")
+            else:
+                failure_reasons.append("network_collector_unavailable")
+    except Exception as exc:
+        failure_reasons.append("network_collector_start_failed")
+        warmup_details["network_collector"] = {
+            "status": "failed",
+            "error": str(exc) or exc.__class__.__name__,
+        }
+        logging.warning("cleanhouse network collector not started: %s", exc)
+    try:
         _start_runtime_heartbeat()
         warmup_details["heartbeat"] = {"status": "ok"}
     except Exception as exc:
@@ -425,6 +463,14 @@ def _start_events_services_background() -> None:
 
 
 def _stop_events_services() -> None:
+    try:
+        stop_network_collector_service(timeout=5.0)
+    except Exception as exc:  # pragma: no cover
+        logging.warning("cleanhouse network collector not stopped cleanly: %s", exc)
+    try:
+        stop_network_history_service()
+    except Exception as exc:  # pragma: no cover
+        logging.warning("cleanhouse network history not stopped cleanly: %s", exc)
     try:
         cleanhouse_events.stop_events_services()
     except Exception as exc:  # pragma: no cover
