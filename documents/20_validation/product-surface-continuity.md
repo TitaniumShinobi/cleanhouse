@@ -27,3 +27,31 @@ They deliberately do not import the production server or start collectors.
 They are not a substitute for live UI, provider connection, or production
 storage acceptance. Existing page feature limitations are preserved rather than
 reinterpreted during source isolation.
+
+## Structural preservation gate
+
+The unchanged `scripts/verify-product-surfaces.py` reads the unchanged
+`.cleanhouse/product-surface-baseline.json` and checks eleven owner-established
+surfaces for file existence, expected text markers, and route declarations.
+It uses Python's standard library. Missing files/markers/routes fail with exit1;
+unreadable or invalid inputs also return a nonzero Python error. It does not
+validate authorization, visual rendering, endpoint execution, or baseline
+provenance. The focused test requires the eleven-surface success receipt.
+
+```sh
+python -B scripts/verify-product-surfaces.py
+python -B -m unittest -v tests.test_product_surface_baseline tests.test_product_surface_dependencies
+```
+
+The existing authentication workflow now runs these commands after the auth
+gate on every push/PR. The tests remove each of eleven files/markers/routes
+in disposable fixtures (33 cases), require failure naming the affected surface,
+and restore the fixture. No repository or live state is mutated by those cases.
+No remote required-check setting is changed here.
+
+Security boundary: the existing server middleware exempts `/cleanhouse/` API
+paths. The preserved Allowed Threats, Zaelith, and report-detail handlers do not
+add independent session checks. This is existing source behavior, not protected
+API admission evidence. Review and authorization acceptance remain required
+before treating these endpoints as production/security accepted; this isolation
+does not deploy them or redesign their access policy.
