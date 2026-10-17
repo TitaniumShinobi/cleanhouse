@@ -151,6 +151,7 @@ def _bounded_oauth_states(value: Any, *, now: Optional[int] = None) -> Dict[str,
                 'provider': provider,
                 'code_verifier': code_verifier,
                 'created_at': created_at,
+                'signup_proof': payload.get('signup_proof') if _signup_proof_current(payload.get('signup_proof')) else None,
             }))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return {state: payload for _, _, state, payload in candidates[:_MAX_PENDING_OAUTH_STATES]}
@@ -221,6 +222,37 @@ def _missing_required_consent(consent: Dict[str, Any]) -> Optional[Dict[str, Any
         if consent.get(doc['key']) is not True:
             return doc
     return None
+
+
+
+def _validate_signup_intent(data):
+    """Authorize signup only after current policy is accepted and verified."""
+    if not isinstance(data, dict) or data.get('intent') != 'signup':
+        return None, _public_error('SIGNUP_INTENT_REQUIRED', 'Explicit signup is required.', 400)
+    consent = data.get('consent')
+    versions = data.get('consentVersions')
+    if not isinstance(consent, dict) or not isinstance(versions, dict):
+        return None, _public_error('CONSENT_REQUIRED', 'Accept current signup documents.', 400)
+    if _missing_required_consent(consent) or versions != {doc['key']: doc['version'] for doc in _cleanhouse_auth_docs() if doc['required']}:
+        return None, _public_error('CONSENT_REQUIRED', 'Accept current signup documents.', 400)
+    turnstile = _turnstile_config()
+    verified = False
+    if turnstile['required']:
+        if not turnstile['enabled']:
+            return None, _public_error('VERIFICATION_UNAVAILABLE', 'Signup verification is unavailable.', 503)
+        token = data.get('turnstileToken')
+        if not isinstance(token, str) or not token.strip() or not _verify_turnstile_token(token, _client_ip()):
+            return None, _public_error('VERIFICATION_REQUIRED', 'Complete signup verification.', 400)
+        verified = True
+    return {'intent': 'signup', 'consent_versions': versions, 'turnstile_verified': verified}, None
+
+
+def _signup_proof_current(proof):
+    if not isinstance(proof, dict) or proof.get('intent') != 'signup':
+        return False
+    versions = {doc['key']: doc['version'] for doc in _cleanhouse_auth_docs() if doc['required']}
+    return (proof.get('consent_versions') == versions
+            and (not _turnstile_config()['required'] or proof.get('turnstile_verified') is True))
 
 
 def _verify_turnstile_token(token: str, remote_ip: str = '') -> bool:
@@ -634,6 +666,8 @@ def oauth(provider):
 
         canonical_start = _canonical_oauth_start(provider)
         if canonical_start:
+            if request.method == 'POST':
+                return _public_error('CANONICAL_ORIGIN_REQUIRED', 'Open signup on the configured callback origin.', 409)
             return redirect(canonical_start)
 
         provider_runtime = auth_runtime_config.provider_config(provider)
@@ -641,6 +675,14 @@ def oauth(provider):
             return redirect(
                 '/login?error=provider_unavailable&provider=' + urllib.parse.quote(provider)
             )
+
+        signup_proof = None
+        if request.method == 'POST':
+            if request.headers.get('Origin') != request.host_url.rstrip('/'):
+                return _public_error('REQUEST_ORIGIN_REJECTED', 'Same-origin signup is required.', 403)
+            signup_proof, signup_error = _validate_signup_intent(request.get_json(silent=True))
+            if signup_error:
+                return signup_error
 
         # Generate PKCE codes
         code_verifier, code_challenge = generate_pkce()
@@ -653,6 +695,7 @@ def oauth(provider):
             'provider': provider,
             'code_verifier': code_verifier,
             'created_at': int(datetime.now(timezone.utc).timestamp()),
+            'signup_proof': signup_proof,
         }
         oauth_states = _bounded_oauth_states(oauth_states)
         session['oauth_states'] = oauth_states
@@ -723,7 +766,9 @@ def oauth(provider):
         logging.info(f"[OAUTH] Redirecting to {provider} OAuth")
         logging.info(f"[OAUTH] Redirect URI: {redirect_uri}")
 
-        # Redirect to OAuth provider
+        # Signup POST is fetched; browser navigation follows the returned provider URL.
+        if request.method == 'POST':
+            return jsonify({'success': True, 'authorizationUrl': oauth_url})
         return redirect(oauth_url)
 
     except Exception as e:
@@ -818,7 +863,9 @@ def oauth_callback():
             elif getattr(existing_user, 'id', None) and hasattr(user_service, '_update_last_login_legacy'):
                 user_service._update_last_login_legacy(existing_user.id)
         else:
-            # Create new user
+            if not _signup_proof_current(oauth_data.get('signup_proof')):
+                return redirect('/signup?error=signup_required')
+            # Create new user only for the verified signup transaction.
             import secrets
             random_password = secrets.token_urlsafe(32)
             new_user = user_service.create_user(
