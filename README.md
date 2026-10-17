@@ -369,7 +369,7 @@ See `LICENSE` file for details.
 ### Required source build check
 
 Run `python scripts/build-check.py` before packaging. Install Flask==3.1.3,
-requests==2.32.5 and Flask-Cors==6.0.1; Node.js 22 is used in CI.
+requests==2.32.5, Flask-Cors==6.0.1 and bcrypt==5.0.0; Node.js 22 is used in CI.
 The same gate runs in Authentication regression CI and Verified release candidate.
 The latter emits a commit-bound source archive after successful checks; it neither
 deploys nor publishes a release. See the authentication acceptance contract for

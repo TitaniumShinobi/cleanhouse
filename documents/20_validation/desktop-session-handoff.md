@@ -9,3 +9,11 @@ Transactions expire after five minutes, are bounded to 128 live entries, and are
 Provider denial validates/consumes its OAuth state before marking the matching handoff denied. Transport/provider failure returns a bounded terminal state or timeout. Returned verifier is no-store, memory-only, absent from URLs and logs. Ordinary browser OAuth still uses its original session path.
 
 Run `python -m unittest -v tests.test_desktop_auth_handoff` with the configured isolated test Python. Tests use separate Flask cookie jars and mocks for provider transport and user storage, not live credentials. OS foreground behavior needs separate user-authorized desktop acceptance; window-show calls are not evidence the OS granted focus.
+
+The frontend serializes sign-in attempts until completion/failure. A failed OS
+foreground request does not discard a successfully redeemed session: navigation
+continues in the existing view. Tests execute provider handlers named by the
+actual login/signup HTML, including GitHub, and prove duplicate clicks do not
+prepare competing transactions. A password reset between browser completion and
+redemption invalidates the captured generation. Unknown desktop Sign In identities
+receive signup-required without creation and terminate the waiting transaction.

@@ -232,3 +232,18 @@ source workflow files alone do not establish remote enforcement. Administrators
 can change repository rules; these controls do not protect against a malicious
 repository administrator. Release tag creation remains blocked until a reviewed
 release publisher identity can enforce the same candidate-bound gate.
+
+## Four prerequisite repairs enforced by the shared gate
+
+The shared auth runner also runs staged-account dependency/LaunchAgent tests,
+OAuth signup admission, recovery credential generation, and desktop handoff tests.
+Pinned CI dependencies include bcrypt==5.0.0 for real disposable account creation.
+No test needs provider credentials, launchd, a browser, or the serving runtime.
+
+The resulting contracts are [staged account dependency](staged-account-dependency.md),
+[OAuth signup admission](oauth-signup-admission.md),
+[desktop session handoff](desktop-session-handoff.md), and
+[recovery credential generation](recovery-credential-generation.md).
+Disposable removal of each boundary must fail `python scripts/build-check.py`.
+These prove source behavior only. System-browser foreground acceptance and actual
+provider signup remain separately authorized live acceptance, not CI claims.

@@ -354,6 +354,7 @@
 	                }
 
                 let desktopHandoff = null;
+                let oauthInProgress = false;
                 async function waitForDesktopOAuth(handoff) {
                     try {
                         for (let attempt = 0; attempt < 150 && desktopHandoff === handoff; attempt += 1) {
@@ -366,7 +367,8 @@
                             const result = await response.json();
                             if (!response.ok || !result.success) throw new Error(result.code || 'Sign-in could not complete.');
                             desktopHandoff = null;
-                            await window.pywebview.api.activateExistingWindow();
+                            try { await window.pywebview.api.activateExistingWindow(); }
+                            catch (_) { /* Session is valid even if the OS refuses foreground activation. */ }
                             completeAuth(result);
                             return;
                         }
@@ -420,6 +422,8 @@
 	                }
 
                 async function openOAuthProvider(provider) {
+                    if (oauthInProgress) return;
+                    oauthInProgress = true;
                     showOAuthLoading(true);
                     try {
                         const signup = !!document.getElementById('signupForm');
@@ -440,7 +444,7 @@
                             const opened = await window.pywebview.api.openOAuthUrl(result.transactionId, provider);
                             if (!opened || !opened.success) throw new Error('System browser could not be opened.');
                             showSuccess('Complete sign-in in your system browser.');
-                            waitForDesktopOAuth(desktopHandoff);
+                            await waitForDesktopOAuth(desktopHandoff);
                             return;
                         }
                         if (signup) {
@@ -458,7 +462,7 @@
                             desktopHandoff = null;
                             await fetch(`${AUTH_BASE_PATH}/desktop/cancel`, {method:'POST', credentials:'include'}).catch(() => {});
                         }
-                    } finally { showOAuthLoading(false); }
+                    } finally { oauthInProgress = false; showOAuthLoading(false); }
                 }
 
 	                // Password toggle functionality
@@ -586,7 +590,7 @@
                 // Every desktop provider uses the same initiator-bound completion path.
                 function signInWithGoogle() { return openOAuthProvider('google'); }
                 function signInWithApple() { return openOAuthProvider('apple'); }
-                function signInWithGitHub() { return openOAuthProvider('github'); }
+                function signInWithGithub() { return openOAuthProvider('github'); }
                 function signInWithMicrosoft() { return openOAuthProvider('microsoft'); }
 
                 function showSignup(event) {
