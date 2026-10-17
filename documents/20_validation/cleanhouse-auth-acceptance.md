@@ -210,3 +210,25 @@ and existing JWT implementations with a synthetic user registry. They verify
 handler non-execution on denial, cross-origin rejection, exact readiness bounds,
 legacy auth toggles, stricter bearer endpoints, and independent sessions.
 This is source-only acceptance, not live provider or deployment verification.
+
+## Shared build and release gate
+
+`python scripts/build-check.py` is the canonical source build/check command.
+It runs the auth suites (including the real imported Flask server and blueprint
+registration), protected surfaces and their dependency tests, then parses the
+three auth/server modules. Any failed suite, missing dependency, timeout or
+syntax error exits nonzero. It uses a temporary HOME and does not start a listener.
+This is a source check, not a native application compiler or deployment command.
+The full-server suite isolates user storage, reporting and collector startup;
+it does not replace Flask routing, authentication handlers or admission hooks.
+
+The authentication-regression CI job invokes this same command on all pushes,
+PRs and merge groups. The manually dispatched release-check workflow is limited
+to master and packages the exact committed source only after the gate passes.
+It emits the commit and archive SHA-256; it does not deploy or publish a release.
+CODEOWNERS requires owner review of gate changes when remote protection is active.
+Remote required checks and tag restrictions are separately installed and read back;
+source workflow files alone do not establish remote enforcement. Administrators
+can change repository rules; these controls do not protect against a malicious
+repository administrator. Release tag creation remains blocked until a reviewed
+release publisher identity can enforce the same candidate-bound gate.

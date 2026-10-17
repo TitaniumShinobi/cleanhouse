@@ -1,0 +1,7 @@
+# Owner review is required for authentication enforcement changes.
+/.github/ @TitaniumShinobi
+/scripts/build-check.py @TitaniumShinobi
+/scripts/run-auth-regression.py @TitaniumShinobi
+/tests/test*auth* @TitaniumShinobi
+/tests/test*admission* @TitaniumShinobi
+/backend/api_admission.py @TitaniumShinobi

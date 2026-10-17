@@ -11,10 +11,10 @@ import tempfile
 
 def main():
     root = Path(__file__).resolve().parents[1]
-    missing = [name for name in ("flask", "requests") if importlib.util.find_spec(name) is None]
+    missing = [name for name in ("flask", "flask_cors", "requests") if importlib.util.find_spec(name) is None]
     node = shutil.which("node")
     if missing or node is None:
-        print("AUTH_REGRESSION_PREREQUISITE: install Flask==3.1.3 and requests==2.32.5 "
+        print("AUTH_REGRESSION_PREREQUISITE: install Flask==3.1.3 and requests==2.32.5 Flask-Cors==6.0.1 "
               "in this Python environment and Node.js 22 on PATH. Missing: "
               + ", ".join(missing + ([] if node else ["node"])), file=sys.stderr)
         return 2
@@ -32,7 +32,7 @@ def main():
         env.update(HOME=home, USERPROFILE=home, PYTHONDONTWRITEBYTECODE="1",
                    JWT_SECRET_KEY="synthetic-auth-regression-only")
         print("AUTH regression: isolated backend, logout UI, and API admission tests", flush=True)
-        for suite in ("tests.test_auth_api_validation", "tests.test_api_admission"):
+        for suite in ("tests.test_auth_api_validation", "tests.test_api_admission", "tests.test_server_api_admission"):
             command = [sys.executable, "-B", "-m", "unittest", "-v", suite]
             try:
                 result = subprocess.run(command, cwd=root, env=env, timeout=90)
