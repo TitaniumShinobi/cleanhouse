@@ -38,6 +38,7 @@ _user_service = None
 
 _ALLOWED_OAUTH_PROVIDERS = {"google", "microsoft", "github", "apple"}
 _OAUTH_STATE_TTL_SECONDS = 600
+_MAX_PENDING_OAUTH_STATES = 4
 
 
 def _bad_request(reason: str):
@@ -110,6 +111,60 @@ def _oauth_redirect_uri(provider: str) -> str:
         if value:
             return value
     return f"{_cleanhouse_public_origin().rstrip('/')}/api/auth/oauth/callback"
+
+
+def _canonical_oauth_start(provider: str) -> Optional[str]:
+    """Keep the OAuth state cookie on the same host used by the callback.
+
+    CleanHouse can be reached through both ``localhost`` and ``127.0.0.1``.
+    Browser cookies are host-bound, so starting on one name and returning to
+    the other loses the session-bound OAuth state and makes every valid
+    callback fail closed as ``invalid_state``.
+    """
+    callback = urllib.parse.urlsplit(_oauth_redirect_uri(provider))
+    canonical_origin = f"{callback.scheme}://{callback.netloc}" if callback.scheme and callback.netloc else ''
+    request_origin = str(getattr(request, 'host_url', '') or '').rstrip('/')
+    if canonical_origin and request_origin and request_origin != canonical_origin:
+        return f"{canonical_origin}/api/auth/oauth/{urllib.parse.quote(provider)}"
+    return None
+
+
+def _bounded_oauth_states(value: Any, *, now: Optional[int] = None) -> Dict[str, Dict[str, Any]]:
+    """Return only fresh, well-formed OAuth transactions within the cookie budget."""
+    current_time = int(now if now is not None else datetime.now(timezone.utc).timestamp())
+    candidates = []
+    if isinstance(value, dict):
+        for position, (state, payload) in enumerate(value.items()):
+            if not isinstance(state, str) or not state or not isinstance(payload, dict):
+                continue
+            try:
+                created_at = int(payload.get('created_at') or 0)
+            except (TypeError, ValueError):
+                continue
+            if created_at <= 0 or current_time - created_at > _OAUTH_STATE_TTL_SECONDS:
+                continue
+            provider = payload.get('provider')
+            code_verifier = payload.get('code_verifier')
+            if provider not in _ALLOWED_OAUTH_PROVIDERS or not isinstance(code_verifier, str) or not code_verifier:
+                continue
+            candidates.append((created_at, position, state, {
+                'provider': provider,
+                'code_verifier': code_verifier,
+                'created_at': created_at,
+            }))
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return {state: payload for _, _, state, payload in candidates[:_MAX_PENDING_OAUTH_STATES]}
+
+
+def _login_report_reference(value: Any) -> Optional[Dict[str, str]]:
+    """Keep only the durable report identifier in the browser session cookie."""
+    if not isinstance(value, dict):
+        return None
+    for key in ('id', 'report_id', 'job_id'):
+        report_id = value.get(key)
+        if isinstance(report_id, str) and report_id.strip():
+            return {'id': report_id.strip()}
+    return None
 
 
 def _env_flag(name: str, default: str = '1') -> bool:
@@ -577,6 +632,10 @@ def oauth(provider):
                 'message': f'Unknown OAuth provider: {provider}'
             }), 400
 
+        canonical_start = _canonical_oauth_start(provider)
+        if canonical_start:
+            return redirect(canonical_start)
+
         provider_runtime = auth_runtime_config.provider_config(provider)
         if not provider_runtime.get('enabled') or not provider_runtime.get('available'):
             return redirect(
@@ -589,12 +648,13 @@ def oauth(provider):
         # Generate state for CSRF protection
         state = secrets.token_urlsafe(32)
 
-        oauth_states = dict(session.get('oauth_states') or {})
+        oauth_states = _bounded_oauth_states(session.get('oauth_states'))
         oauth_states[state] = {
             'provider': provider,
             'code_verifier': code_verifier,
             'created_at': int(datetime.now(timezone.utc).timestamp()),
         }
+        oauth_states = _bounded_oauth_states(oauth_states)
         session['oauth_states'] = oauth_states
         session.modified = True
 
@@ -708,8 +768,10 @@ def oauth_callback():
             return redirect('/login?error=invalid_callback')
 
         # Verify state
-        oauth_states = dict(session.get('oauth_states') or {})
-        oauth_data = oauth_states.pop(state, None)
+        raw_oauth_states = session.get('oauth_states')
+        raw_oauth_states = dict(raw_oauth_states) if isinstance(raw_oauth_states, dict) else {}
+        oauth_data = raw_oauth_states.pop(state, None)
+        oauth_states = _bounded_oauth_states(raw_oauth_states)
         session['oauth_states'] = oauth_states
         session.modified = True
         if not oauth_data:
@@ -787,7 +849,11 @@ def oauth_callback():
             'role': user_data['role']
         }
         session['oauth_success'] = True
-        session['oauth_login_report'] = login_report
+        login_report_reference = _login_report_reference(login_report)
+        if login_report_reference:
+            session['oauth_login_report'] = login_report_reference
+        else:
+            session.pop('oauth_login_report', None)
 
         # Redirect to login page with success indicator
         return redirect('/login?oauth_success=1')
@@ -969,17 +1035,10 @@ def reset_password():
 
 @bp.route('/auth/logout', methods=['POST'])
 def logout():
-    """Logout user and clear session"""
+    """Clear only the requesting browser session; preserve other clients."""
     try:
         # Clear session
         session.clear()
-        for local_name in ('.auth_token', '.auth_user.json'):
-            try:
-                (Path.home() / '.cleanhouse' / local_name).unlink()
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                logging.warning('Unable to remove saved local auth state %s: %s', local_name, exc)
 
         return jsonify({
             'success': True,

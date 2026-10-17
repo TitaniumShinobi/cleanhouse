@@ -88,15 +88,13 @@ class AuthState {
      * Logout user
      */
     async logout() {
-        try {
-            await fetch('/api/auth/logout', {
-                method: 'POST',
-                credentials: 'include'
-            });
-        } catch (error) {
-            console.error('[AUTH] Logout error:', error);
-        }
-        
+        const response = await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'include'
+        });
+        if (!response.ok) throw new Error('Sign out failed. Try again.');
+        const result = await response.json();
+        if (result.success !== true) throw new Error('Sign out failed. Try again.');
         this.clear();
     }
 }

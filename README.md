@@ -254,11 +254,11 @@ pytest tests/
 
 ### Manual Testing Checklist
 
-- [x] OAuth buttons open in system browser (no popup errors)
-- [x] Signup form creates account via unified registry
-- [x] Signup auto-logs in after account creation
-- [x] Login authenticates via unified registry
-- [x] Fallback to local DB when Chatty unavailable
+- [ ] Complete live Google provider acceptance with owner-controlled credentials
+- [x] Signup establishes a CleanHouse server session
+- [x] Signin authenticates through the product-native registry
+- [x] Logout clears the server session and obsolete saved desktop state
+- [x] Recovery tokens are hashed, expiring, and single-use
 - [x] Navigation links work without scrolling
 - [x] Form validation works (email format, password strength)
 - [x] Error messages display correctly
