@@ -3,13 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CleanHouse Local Monitor</title>
+<title>CleanHouse Advanced Monitor</title>
 <link rel="stylesheet" href="/css/dashboard.css?v=1">
 </head>
 <body>
 <header>
     <span class="logo-icon">CH</span>
-    <h1>CleanHouse Local Monitor</h1>
+    <h1>CleanHouse Advanced Monitor</h1>
     <div class="controls">
         <select id="session-select" onchange="onSessionChange()">
             <option value="">— Select session —</option>
@@ -19,7 +19,7 @@
             <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
             Auto-refresh
         </label>
-        <a class="control-link" href="/investigations" title="Open investigation-first operator surface">Investigations</a>
+        <a class="control-link" href="/overview" title="Open CleanHouse overview">Overview</a>
         <a class="control-link" href="/account/delete" title="Manage local account deletion">Account</a>
         <button id="report-btn" onclick="openReportPanel()" title="Generate report for current session">⚑ Report</button>
         <button onclick="openSettingsPanel()" title="Configure runtime settings">⚙ Settings</button>

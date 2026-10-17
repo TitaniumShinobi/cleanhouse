@@ -3786,3 +3786,195 @@ def get_receipts_list():
     if schema_error:
         return schema_error
     return jsonify(rows)
+
+
+def _allowed_threats_path() -> Path:
+    return Path(
+        os.getenv(
+            "CLEANHOUSE_ALLOWED_THREATS_PATH",
+            Path.home() / "Documents" / "CleanHouse" / "Data" / "allowed_threats" / "allowed_threats.json",
+        )
+    )
+
+def _read_allowed_threats_state() -> dict[str, Any]:
+    path = _allowed_threats_path()
+    try:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                items = payload.get("allowed_threats", [])
+                payload["allowed_threats"] = items if isinstance(items, list) else []
+                return payload
+            if isinstance(payload, list):
+                return {"allowed_threats": payload}
+    except Exception:
+        return {"allowed_threats": []}
+    return {"allowed_threats": []}
+
+def _write_allowed_threats_state(payload: dict[str, Any]) -> None:
+    path = _allowed_threats_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
+
+def _allowed_threat_string(payload: dict[str, Any], key: str, *, default: str = "Unavailable", max_len: int = 4096) -> str:
+    value = payload.get(key)
+    if value is None:
+        return default
+    value = str(value).strip()
+    if not value:
+        return default
+    return value[:max_len]
+
+def _allowed_threat_evidence_refs(payload: dict[str, Any]) -> list[str]:
+    refs = payload.get("evidence_refs", [])
+    if not isinstance(refs, list):
+        return []
+    normalized = []
+    for ref in refs[:20]:
+        value = str(ref).strip()
+        if value:
+            normalized.append(value[:1024])
+    return normalized
+
+def _allowed_threat_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    now = _now_iso()
+    seed = json.dumps(payload, sort_keys=True, default=str)
+    allowed_id = "allowed-threat-" + _artifact_id(now, seed)
+    return {
+        "id": allowed_id,
+        "created_at": now,
+        "updated_at": now,
+        "threat_name": _allowed_threat_string(payload, "threat_name"),
+        "severity": _allowed_threat_string(payload, "severity"),
+        "target_type": _allowed_threat_string(payload, "target_type"),
+        "target_name": _allowed_threat_string(payload, "target_name"),
+        "target_path": _allowed_threat_string(payload, "target_path"),
+        "source": _allowed_threat_string(payload, "source"),
+        "reason": _allowed_threat_string(payload, "reason"),
+        "evidence_refs": _allowed_threat_evidence_refs(payload),
+        "receipt_ref": _allowed_threat_string(payload, "receipt_ref", default=""),
+        "status": "allowed",
+    }
+
+@bp.route("/cleanhouse/allowed-threats", methods=["GET"])
+def allowed_threats_list():
+    state = _read_allowed_threats_state()
+    items = state.get("allowed_threats", [])
+    if not isinstance(items, list):
+        items = []
+    return jsonify({
+        "status": "ok",
+        "allowed_threats": items,
+        "count": len(items),
+    })
+
+@bp.route("/cleanhouse/allowed-threats", methods=["POST"])
+def allowed_threats_create():
+    payload, error = _parse_json_payload()
+    if error:
+        return error
+    state = _read_allowed_threats_state()
+    items = state.get("allowed_threats", [])
+    if not isinstance(items, list):
+        items = []
+    item = _allowed_threat_from_payload(payload)
+    items.insert(0, item)
+    state["allowed_threats"] = items
+    state["updated_at"] = item["updated_at"]
+    _write_allowed_threats_state(state)
+    return jsonify({
+        "status": "ok",
+        "allowed_threat": item,
+        "count": len(items),
+    })
+
+@bp.route("/cleanhouse/allowed-threats/<allowed_id>", methods=["DELETE"])
+def allowed_threats_delete(allowed_id: str):
+    state = _read_allowed_threats_state()
+    items = state.get("allowed_threats", [])
+    if not isinstance(items, list):
+        items = []
+    remaining = [item for item in items if not isinstance(item, dict) or str(item.get("id", "")) != allowed_id]
+    if len(remaining) == len(items):
+        return jsonify({"status": "error", "message": "Allowed threat not found"}), 404
+    state["allowed_threats"] = remaining
+    state["updated_at"] = _now_iso()
+    _write_allowed_threats_state(state)
+    return jsonify({
+        "status": "ok",
+        "allowed_threats": remaining,
+        "count": len(remaining),
+    })
+
+@bp.route("/cleanhouse/zaelith/analyze", methods=["POST"])
+def zaelith_analyze_text():
+    data, error = _parse_json_payload()
+    if error:
+        return error
+    text, error = _require_string(data.get("text"), "text", max_len=200000)
+    if error:
+        return error
+    prompt, error = _require_string(
+        data.get("prompt"),
+        "prompt",
+        required=False,
+        allow_empty=True,
+        max_len=4096,
+    )
+    if error:
+        return error
+    source, error = _require_string(
+        data.get("source"),
+        "source",
+        required=False,
+        allow_empty=True,
+        max_len=128,
+    )
+    if error:
+        return error
+    try:
+        from corefiles.zaelith_service import get_zaelith_service
+        service = get_zaelith_service()
+        result = service.analyze_text_interaction(
+            prompt or "Manual Zaelith conversation audit",
+            text,
+            source=source or "zaelith-page",
+            save_to_history=True,
+        )
+    except Exception as exc:
+        return jsonify({
+            "status": "error",
+            "message": f"Zaelith analysis failed: {exc}",
+        }), 500
+    status = "ok" if result.get("success") else "error"
+    report = None
+    if status == "ok":
+        report = get_cleanhouse_monitoring_adapter().build_zaelith_report(
+            analysis=result,
+            prompt=prompt or "Manual Zaelith conversation audit",
+            response=text,
+            source=source or "zaelith-page",
+        )
+    return jsonify({
+        "status": status,
+        "analysis": result,
+        "report": report,
+        "boundaries": {
+            "observed": "Pattern matches and evidence snippets from the submitted text.",
+            "inferred": "Risk labels and confidence are heuristic summaries.",
+            "unknown": "Speaker identity, hidden motive, and objective truth are not asserted.",
+        },
+    })
+
+@bp.route("/cleanhouse/reports/<path:report_id>", methods=["GET"])
+def get_report(report_id):
+    report_id, error = _require_string(report_id, "report_id", max_len=256)
+    if error:
+        return error
+    if "/" in report_id or "\\" in report_id:
+        return _error_response("report_id format is invalid")
+    payload = get_cleanhouse_monitoring_adapter().get_report(report_id)
+    status = 404 if payload.get("status") == "not_found" else 200
+    return jsonify(payload), status

@@ -233,15 +233,50 @@ def legal_eeccd():
     return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/markdown; charset=utf-8"}
 
 @app.route('/dashboard')
-def dashboard():
-    """Serve monitoring dashboard"""
+def dashboard_redirect():
+    """Legacy dashboard URL; keep compatibility while routing to Advanced."""
+    return redirect('/advanced', code=302)
+
+@app.route('/advanced')
+def advanced():
+    """Serve the internal advanced monitor."""
     return send_from_directory(str(FRONTEND_DIR), 'dashboard.html')
 
 @app.route('/overview')
 @app.route('/investigations')
 def investigations():
-    """Serve investigation-first operator surface"""
+    """Serve the operator-facing security overview."""
     return send_from_directory(str(FRONTEND_DIR), 'investigations.html')
+
+@app.route('/zaelith')
+def zaelith():
+    """Serve the Zaelith conversation audit surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'zaelith.html')
+
+@app.route('/zaelith/connect')
+def zaelith_connect():
+    """Serve the temporary Zaelith provider connection surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'zaelith-connect.html')
+
+@app.route('/identity')
+def identity():
+    """Serve the identity monitoring surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'identity.html')
+
+@app.route('/reports')
+def reports():
+    """Serve the report history surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'reports.html')
+
+@app.route('/allowed-threats')
+def allowed_threats():
+    """Serve the allowed threats surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'allowed-threats.html')
+
+@app.route('/help')
+def help_page():
+    """Serve the troubleshooting and support surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'help.html')
 
 @app.route('/applications')
 @app.route('/applications/<path:_app_id>')

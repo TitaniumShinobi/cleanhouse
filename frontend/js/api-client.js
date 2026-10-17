@@ -27,7 +27,76 @@ console.log('[API] Environment detected:', IS_PYWEBVIEW ? 'pywebview (desktop)' 
 /**
  * API Client - routes calls to pywebview or HTTP fetch
  */
+const CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS = 1800;
+const CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS = 3500;
+async function fetchJson(url, options = {}, timeoutMs = CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS) {
+    const decode = async response => {
+        const payload = await response.json();
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+            payload.__http_status = response.status;
+        }
+        return payload;
+    };
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || typeof AbortController === 'undefined') {
+        const response = await fetch(url, options);
+        return await decode(response);
+    }
+    if (options.signal) {
+        const response = await fetch(url, options);
+        return await decode(response);
+    }
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        return await decode(response);
+    } finally {
+        window.clearTimeout(timeout);
+    }
+}
+
 const API = {
+    async deleteAllowedThreat(allowedId) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/allowed-threats/${encodeURIComponent(allowedId)}`, {
+            method: 'DELETE'
+        });
+        return await response.json();
+    },
+    async getAllowedThreats() {
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/allowed-threats`,
+            {},
+            CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS
+        );
+    },
+    async startAccountConnect(provider, connectionMethod, consentVersion = 'v1') {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/accounts/connect/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                provider,
+                connection_method: connectionMethod,
+                consent_version: consentVersion,
+            })
+        });
+        return await response.json();
+    },
+    async listConnectedAccounts() {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/accounts`);
+        return await response.json();
+    },
+    async analyzeZaelithText(text, prompt = '', source = 'zaelith-page') {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/zaelith/analyze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, prompt, source })
+        });
+        return await response.json();
+    },
+    async getReport(reportId) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/reports/${encodeURIComponent(reportId)}`);
+        return await response.json();
+    },
     /**
      * Create account
      */
