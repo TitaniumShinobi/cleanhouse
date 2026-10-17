@@ -49,9 +49,8 @@ in disposable fixtures (33 cases), require failure naming the affected surface,
 and restore the fixture. No repository or live state is mutated by those cases.
 No remote required-check setting is changed here.
 
-Security boundary: the existing server middleware exempts `/cleanhouse/` API
-paths. The preserved Allowed Threats, Zaelith, and report-detail handlers do not
-add independent session checks. This is existing source behavior, not protected
-API admission evidence. Review and authorization acceptance remain required
-before treating these endpoints as production/security accepted; this isolation
-does not deploy them or redesign their access policy.
+Security boundary: the later source API-admission repair removes the blanket
+`/cleanhouse/` exemption while retaining exact direct-loopback readiness probes
+and existing stricter endpoint policies. See `cleanhouse-auth-acceptance.md` for
+identity validation, origin checks, and tests. Surface tests alone still do not
+establish authorization or live production acceptance.

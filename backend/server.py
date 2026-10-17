@@ -318,9 +318,12 @@ def _require_auth_for_app_pages():
     if request.method == 'OPTIONS':
         return None
 
+    if request.path == '/cleanhouse' or request.path.startswith('/cleanhouse/'):
+        from backend.api_admission import require_cleanhouse_api_admission
+        return require_cleanhouse_api_admission()
+
     public_prefixes = (
         '/api/auth',
-        '/cleanhouse/',
         '/assets/',
         '/css/',
         '/js/',

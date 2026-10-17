@@ -132,8 +132,9 @@ Node.js 22 on PATH (minimum 20). CI provisions Python 3.12 and Node 22 and uses
 this identical command. The runner returns the suite's nonzero exit on failure;
 missing dependencies and execution/90-second timeout failures return 2.
 
-The runner invokes only `tests.test_auth_api_validation`: 22 existing validation
-cases plus three isolated regression wrappers. These wrappers exercise two real
+The runner invokes `tests.test_auth_api_validation` (22 existing validation
+cases plus three isolated regression wrappers), followed in a separate process
+by `tests.test_api_admission` (15 API admission cases). These wrappers exercise two real
 Flask tests and seven distinct Node UI cases (the missing-state case is also
 run alone). They verify independent browser jars for the same and different
 accounts, preserved saved-file sentinels, repeated logout and relogin, and failed
@@ -163,3 +164,49 @@ This gate is focused source proof, not live provider acceptance, stolen-cookie
 revocation proof, a full-product test suite, or proof of a deployed repair. The
 historical evidence above remains tied to its original run. The existing live
 runtime is not restarted or modified by this installation.
+
+## API admission — source repair
+
+The application guard no longer exempts the entire `/cleanhouse/` prefix when
+both `CLEANHOUSE_ENABLE_AUTH` and `CLEANHOUSE_REQUIRE_LOGIN` are enabled. Existing
+page redirects and explicit auth-disable modes remain unchanged. API denial is
+JSON: 401 `AUTHENTICATION_REQUIRED`, 403 `REQUEST_ORIGIN_REJECTED`, or 503
+`AUTHENTICATION_UNAVAILABLE` on identity/store failure. No protected handler runs
+on denial. Existing stricter Files and connected-account guards remain in place.
+
+Browser admission resolves the existing signed session user in the current
+product registry. During the existing OAuth completion transition, a signed
+`oauth_success=true` plus consistent `oauth_user` identity can resolve that same
+registry user without consuming/changing the pending completion. An arbitrary
+pending object or nonexistent user is insufficient. The existing completion
+endpoint still establishes `session.user_id` normally.
+
+Native admission reuses the existing bearer parser and signature verifier and
+requires a nonempty user ID, finite unexpired `exp`, and matching registry user.
+Malformed/invalid bearer headers never fall back to an otherwise valid cookie.
+No new credential format, refresh mechanism, or session storage is introduced.
+Logout remains browser-local; it does not revoke independent existing native
+bearers or other browser sessions.
+
+Cookie-authenticated non-read requests require exact request-origin equality
+and the existing origin allowlist, or `Sec-Fetch-Site: same-origin` when Origin
+is absent. Another localhost port is not the same origin. Missing/cross-origin
+context is denied. Native bearer requests do not require browser-origin headers.
+OPTIONS continues to pass for preflight; existing endpoint methods/policies
+still apply. No origins or provider settings are changed.
+
+Unauthenticated readiness is limited to GET/HEAD `/cleanhouse/status?ready=1`
+(with that sole query parameter) and GET/HEAD `/cleanhouse/runtime` (no query),
+from an actual loopback peer and loopback Host. Browser Origin/Referer, non-none
+fetch-site, and any Authorization header disqualify this exception. Forwarded
+identity headers are not trusted. Existing launcher commands and payloads remain
+unchanged. `/health` keeps its existing public behavior. These local readiness
+responses are an intentional operational exception, not private account access.
+
+Run `python scripts/run-auth-regression.py`: both suites execute separately with
+temporary HOME and synthetic credentials. New tests use actual server admission
+functions, Flask cookie jars, existing login/logout/OAuth completion handlers,
+and existing JWT implementations with a synthetic user registry. They verify
+handler non-execution on denial, cross-origin rejection, exact readiness bounds,
+legacy auth toggles, stricter bearer endpoints, and independent sessions.
+This is source-only acceptance, not live provider or deployment verification.

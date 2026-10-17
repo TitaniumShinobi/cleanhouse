@@ -31,14 +31,17 @@ def main():
         env = {key: os.environ[key] for key in ("PATH", "SYSTEMROOT", "WINDIR") if key in os.environ}
         env.update(HOME=home, USERPROFILE=home, PYTHONDONTWRITEBYTECODE="1",
                    JWT_SECRET_KEY="synthetic-auth-regression-only")
-        command = [sys.executable, "-B", "-m", "unittest", "-v", "tests.test_auth_api_validation"]
-        print("AUTH regression: isolated backend + real Flask logout + Node UI tests", flush=True)
-        try:
-            result = subprocess.run(command, cwd=root, env=env, timeout=90)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            print(f"AUTH_REGRESSION_EXECUTION_FAILED: {error}", file=sys.stderr)
-            return 2
-        return result.returncode if result.returncode >= 0 else 1
+        print("AUTH regression: isolated backend, logout UI, and API admission tests", flush=True)
+        for suite in ("tests.test_auth_api_validation", "tests.test_api_admission"):
+            command = [sys.executable, "-B", "-m", "unittest", "-v", suite]
+            try:
+                result = subprocess.run(command, cwd=root, env=env, timeout=90)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                print(f"AUTH_REGRESSION_EXECUTION_FAILED: {error}", file=sys.stderr)
+                return 2
+            if result.returncode:
+                return result.returncode if result.returncode >= 0 else 1
+        return 0
 
 
 if __name__ == "__main__":
