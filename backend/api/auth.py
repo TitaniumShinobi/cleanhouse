@@ -31,6 +31,8 @@ from backend import auth_runtime_config
 from backend.auth_recovery import issue_recovery, consume_recovery, deliver_recovery
 
 bp = Blueprint('auth', __name__)
+from backend import desktop_handoff
+desktop_handoff.install(bp)
 
 # Initialize database and user service
 _db_manager = None
@@ -152,6 +154,7 @@ def _bounded_oauth_states(value: Any, *, now: Optional[int] = None) -> Dict[str,
                 'code_verifier': code_verifier,
                 'created_at': created_at,
                 'signup_proof': payload.get('signup_proof') if _signup_proof_current(payload.get('signup_proof')) else None,
+                **({'desktop_transaction': payload['desktop_transaction']} if payload.get('desktop_transaction') else {}),
             }))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return {state: payload for _, _, state, payload in candidates[:_MAX_PENDING_OAUTH_STATES]}
@@ -694,12 +697,14 @@ def oauth(provider):
         # Generate state for CSRF protection
         state = secrets.token_urlsafe(32)
 
+        desktop_start = desktop_handoff.take_start(provider)
         oauth_states = _bounded_oauth_states(session.get('oauth_states'))
         oauth_states[state] = {
             'provider': provider,
             'code_verifier': code_verifier,
             'created_at': int(datetime.now(timezone.utc).timestamp()),
             'signup_proof': signup_proof,
+            **(desktop_start or {}),
         }
         oauth_states = _bounded_oauth_states(oauth_states)
         session['oauth_states'] = oauth_states
@@ -798,21 +803,17 @@ def oauth_callback():
             state = request.args.get('state')
             error = request.args.get('error')
 
-        if error:
-            logging.error(f"OAuth error from provider: {error}")
-            return redirect('/login?error=' + urllib.parse.quote(error))
-
-        if not code or not state:
+        if (not code and not error) or not state:
             logging.error("OAuth callback missing code or state")
             return redirect('/login?error=invalid_callback')
 
-        if not isinstance(code, str) or not isinstance(state, str):
+        if (not error and not isinstance(code, str)) or not isinstance(state, str):
             logging.error("OAuth callback has non-string code/state")
             return redirect('/login?error=invalid_callback')
 
-        code = code.strip()
+        code = code.strip() if isinstance(code, str) else None
         state = state.strip()
-        if not code or not state:
+        if (not code and not error) or not state:
             logging.error("OAuth callback has malformed code/state")
             return redirect('/login?error=invalid_callback')
 
@@ -824,11 +825,15 @@ def oauth_callback():
         session['oauth_states'] = oauth_states
         session.modified = True
         if not oauth_data:
-            logging.error(f"OAuth state mismatch: {state}")
+            logging.error("OAuth state mismatch")
             return redirect('/login?error=invalid_state')
         created_at = int(oauth_data.get('created_at') or 0)
         if int(datetime.now(timezone.utc).timestamp()) - created_at > _OAUTH_STATE_TTL_SECONDS:
             return redirect('/login?error=expired_state')
+        if error:
+            if oauth_data.get('desktop_transaction'):
+                desktop_handoff.finish(oauth_data['desktop_transaction'])
+            return redirect('/login?error=oauth_denied')
         provider = oauth_data['provider']
         code_verifier = oauth_data['code_verifier']
         if not isinstance(code_verifier, str) or not code_verifier.strip():
@@ -838,12 +843,16 @@ def oauth_callback():
         # Exchange code for token
         token_data = exchange_oauth_token(provider, code, code_verifier)
         if not token_data:
+            if oauth_data.get('desktop_transaction'):
+                desktop_handoff.finish(oauth_data['desktop_transaction'])
             logging.error("Failed to exchange OAuth token")
             return redirect('/login?error=token_exchange_failed')
 
         # Get user info
         user_info = get_oauth_user_info(provider, token_data.get('access_token'))
         if not user_info or not user_info.get('email'):
+            if oauth_data.get('desktop_transaction'):
+                desktop_handoff.finish(oauth_data['desktop_transaction'])
             logging.error("Failed to get user info from OAuth provider")
             return redirect('/login?error=user_info_failed')
 
@@ -869,6 +878,8 @@ def oauth_callback():
                 user_service._update_last_login_legacy(existing_user.id)
         else:
             if not _signup_proof_current(oauth_data.get('signup_proof')):
+                if oauth_data.get('desktop_transaction'):
+                    desktop_handoff.finish(oauth_data['desktop_transaction'])
                 return redirect('/signup?error=signup_required')
             # Create new user only for the verified signup transaction.
             import secrets
@@ -893,7 +904,7 @@ def oauth_callback():
         )
 
         # Store user data in session
-        session['oauth_user'] = {
+        completed_user = {
             'credential_generation': user_data.get('credential_generation', '0'),
             'id': user_data['user_id'],
             'user_id': user_data['user_id'],
@@ -902,6 +913,10 @@ def oauth_callback():
             'name': user_data['full_name'],
             'role': user_data['role']
         }
+        if oauth_data.get('desktop_transaction'):
+            completed = desktop_handoff.finish(oauth_data['desktop_transaction'], completed_user, _login_report_reference(login_report))
+            return ('Sign-in complete. Return to the existing CleanHouse window.' if completed else 'Sign-in expired or cancelled. Return to CleanHouse and retry.'), (200 if completed else 409), {'Cache-Control': 'no-store', 'Content-Type': 'text/plain; charset=utf-8'}
+        session['oauth_user'] = completed_user
         session['oauth_success'] = True
         login_report_reference = _login_report_reference(login_report)
         if login_report_reference:
@@ -1098,7 +1113,8 @@ def reset_password():
 def logout():
     """Clear only the requesting browser session; preserve other clients."""
     try:
-        # Clear session
+        # Cancel pending desktop completion before invalidating its initiating session.
+        desktop_handoff.cancel_session()
         session.clear()
 
         return jsonify({

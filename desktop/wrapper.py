@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import webbrowser
 from pathlib import Path
@@ -31,16 +32,20 @@ class DesktopAuthApi:
     def __init__(self, host: str, port: int):
         self.origin = f"http://{host}:{port}"
 
-    def openOAuthUrl(self, _unused=None, provider: str = "") -> dict[str, object]:
-        normalized = str(provider or "").strip().lower()
-        if normalized != "google":
-            return {"success": False, "message": "This sign-in provider is unavailable."}
-        opened = webbrowser.open(f"{self.origin}/api/auth/oauth/google")
-        return {
-            "success": bool(opened),
-            "message": "Opening Google authentication in your browser. Please complete sign-in there."
-            if opened else "The system browser could not be opened.",
-        }
+    def openOAuthUrl(self, transaction_id=None, provider: str = "") -> dict[str, object]:
+        # Accept only a transaction identifier, never a caller-supplied URL or token.
+        if not isinstance(transaction_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", transaction_id):
+            return {"success": False, "message": "A prepared sign-in transaction is required."}
+        opened = webbrowser.open(f"{self.origin}/api/auth/desktop/start/{transaction_id}")
+        return {"success": bool(opened)}
+
+    def activateExistingWindow(self) -> dict[str, object]:
+        if WEBVIEW_AVAILABLE and webview.windows:
+            window = webview.windows[0]
+            window.restore()
+            window.show()
+            return {"success": True}
+        return {"success": False}
 
 
 def _resolve_cleanhouse_host() -> str:

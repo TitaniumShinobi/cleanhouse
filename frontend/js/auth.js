@@ -353,27 +353,34 @@
 	                    return '/overview';
 	                }
 
-	                async function waitForDesktopOAuth() {
-	                    for (let attempt = 0; attempt < 150; attempt += 1) {
-	                        await new Promise((resolve) => setTimeout(resolve, 2000));
-	                        try {
-	                            const response = await fetch(`${AUTH_BASE_PATH}/oauth/user`, {
-	                                headers: { 'Accept': 'application/json' },
-	                                credentials: 'include',
-	                            });
-	                            if (!response.ok) continue;
-	                            const result = await response.json();
-	                            if (result.success) {
-	                                completeAuth(result);
-	                                return;
-	                            }
-	                        } catch (_) {
-	                            // The managed runtime can briefly restart; keep the bounded poll active.
-	                        }
-	                    }
-	                    showOAuthLoading(false);
-	                    showError('Google sign-in timed out. Please try again.');
-	                }
+                let desktopHandoff = null;
+                async function waitForDesktopOAuth(handoff) {
+                    try {
+                        for (let attempt = 0; attempt < 150 && desktopHandoff === handoff; attempt += 1) {
+                            await new Promise(resolve => setTimeout(resolve, 2000));
+                            const response = await fetch(`${AUTH_BASE_PATH}/desktop/redeem`, {
+                                method: 'POST', credentials: 'include',
+                                headers: {'Content-Type': 'application/json'}, body: JSON.stringify(handoff),
+                            });
+                            if (response.status === 202) continue;
+                            const result = await response.json();
+                            if (!response.ok || !result.success) throw new Error(result.code || 'Sign-in could not complete.');
+                            desktopHandoff = null;
+                            await window.pywebview.api.activateExistingWindow();
+                            completeAuth(result);
+                            return;
+                        }
+                        throw new Error('Sign-in timed out. Please retry.');
+                    } catch (error) {
+                        showError(error.message);
+                    } finally {
+                        if (desktopHandoff === handoff) {
+                            desktopHandoff = null;
+                            await fetch(`${AUTH_BASE_PATH}/desktop/cancel`, {method:'POST', credentials:'include'}).catch(() => {});
+                        }
+                        showOAuthLoading(false);
+                    }
+                }
 
 	                function completeAuth(result) {
 	                    if (window.authState && result.user) window.authState.setUser(result.user, null);
@@ -412,18 +419,47 @@
 	                    return false;
 	                }
 
-	                function openOAuthProvider(provider) {
-	                    showOAuthLoading(true);
-	                    if (document.getElementById('signupForm') && !validateSignupRequirements()) {
-		                        showOAuthLoading(false);
-		                        return true;
-		                    }
-		                    if (window.pywebview && window.pywebview.api) {
-		                        return null;
-		                    }
-	                    window.location.href = `${AUTH_BASE_PATH}/oauth/${encodeURIComponent(provider)}`;
-	                    return true;
-	                }
+                async function openOAuthProvider(provider) {
+                    showOAuthLoading(true);
+                    try {
+                        const signup = !!document.getElementById('signupForm');
+                        if (signup && !validateSignupRequirements()) return;
+                        const payload = {provider, intent: signup ? 'signup' : 'signin'};
+                        if (signup) Object.assign(payload, {
+                            consent: consentPayload(), turnstileToken,
+                            consentVersions: Object.fromEntries(requiredAuthDocs().map(doc => [doc.key, doc.version])),
+                        });
+                        if (window.pywebview && window.pywebview.api) {
+                            const response = await fetch(`${AUTH_BASE_PATH}/desktop/prepare`, {
+                                method:'POST', credentials:'include', headers:{'Content-Type':'application/json'},
+                                body:JSON.stringify(payload),
+                            });
+                            const result = await response.json();
+                            if (!response.ok || !result.success) throw new Error(result.message || result.code || 'Sign-in unavailable.');
+                            desktopHandoff = {transactionId:result.transactionId, verifier:result.verifier};
+                            const opened = await window.pywebview.api.openOAuthUrl(result.transactionId, provider);
+                            if (!opened || !opened.success) throw new Error('System browser could not be opened.');
+                            showSuccess('Complete sign-in in your system browser.');
+                            waitForDesktopOAuth(desktopHandoff);
+                            return;
+                        }
+                        if (signup) {
+                            const response = await fetch(`${AUTH_BASE_PATH}/oauth/${encodeURIComponent(provider)}`, {
+                                method:'POST', credentials:'include', headers:{'Content-Type':'application/json','Accept':'application/json'},
+                                body:JSON.stringify(payload),
+                            });
+                            const result = await response.json();
+                            if (!response.ok || !result.authorizationUrl) throw new Error(result.message || 'Signup could not start.');
+                            window.location.href = result.authorizationUrl;
+                        } else window.location.href = `${AUTH_BASE_PATH}/oauth/${encodeURIComponent(provider)}`;
+                    } catch(error) {
+                        showError(error.message);
+                        if (desktopHandoff) {
+                            desktopHandoff = null;
+                            await fetch(`${AUTH_BASE_PATH}/desktop/cancel`, {method:'POST', credentials:'include'}).catch(() => {});
+                        }
+                    } finally { showOAuthLoading(false); }
+                }
 
 	                // Password toggle functionality
                 function togglePassword() {
@@ -547,187 +583,11 @@
 		                    });
 		                }
 
-	                // OAuth functions - use system browser with full OAuth flow
-                async function signInWithGoogle() {
-                    if (hasAPI()) {
-                        try {
-                            window.pywebview.api.log_click('button', '"Continue with Google"');
-                        } catch (err) {
-                            if (window.pywebview.api.log) {
-                                window.pywebview.api.log('[CLICK] Google OAuth button clicked');
-                            }
-                        }
-	                    }
-	                    if (openOAuthProvider('google')) return;
-	                    showOAuthLoading(true);
-
-                    if (window.pywebview && window.pywebview.api) {
-                        try {
-                            console.log('[OAUTH] Calling openOAuthUrl for Google...');
-                            const result = await window.pywebview.api.openOAuthUrl(null, 'google');
-                            console.log('[OAUTH] Result received:', result);
-
-                            if (result) {
-                                if (result.success === true) {
-                                    // Success - browser opened
-                                    const message = result.message || 'Opening Google authentication in your browser. Please complete the sign-in there.';
-                                    console.log('[OAUTH] Success:', message);
-                                    showSuccess(message);
-	                                waitForDesktopOAuth();
-
-                                    if (result.user) {
-                                        // Already authenticated (shouldn't happen, but handle it)
-                                        setTimeout(() => {
-                                            window.close();
-                                        }, 1500);
-                                    }
-                                } else {
-                                    // Error returned
-                                    const errorMsg = result.message || 'Failed to open Google authentication.';
-                                    console.error('[OAUTH] Error from API:', errorMsg);
-                                    showError(errorMsg);
-                                    showOAuthLoading(false);
-                                }
-                            } else {
-                                // No result returned (shouldn't happen)
-                                console.error('[OAUTH] No result returned from API');
-                                showError('Failed to open Google authentication. No response from server.');
-                                showOAuthLoading(false);
-                            }
-                        } catch (error) {
-                            console.error('[OAUTH] Exception:', error);
-                            showError('OAuth error: ' + error.message);
-                            showOAuthLoading(false);
-                        }
-                    } else {
-                        console.error('[OAUTH] API not available');
-                        showError('OAuth configuration required. Please contact support.');
-                        showOAuthLoading(false);
-                    }
-                }
-
-                function signInWithApple() {
-                    if (hasAPI()) {
-                        try {
-                            window.pywebview.api.log_click('button', '"Continue with Apple"');
-                        } catch (err) {
-                            if (window.pywebview.api.log) {
-                                window.pywebview.api.log('[CLICK] Apple OAuth button clicked');
-                            }
-                        }
-                    }
-	                    if (openOAuthProvider('apple')) return;
-	                    showOAuthLoading(true);
-
-                    if (window.pywebview && window.pywebview.api) {
-                        try {
-                            const result = window.pywebview.api.openOAuthUrl(null, 'apple');
-                            if (result && result.success) {
-                                if (result.user) {
-                                    showSuccess(result.message || 'Successfully authenticated with Apple!');
-                                    setTimeout(() => {
-                                        window.close();
-                                    }, 1500);
-                                } else if (result.message && result.message.includes('Opening')) {
-                                    showSuccess(result.message || 'Opening Apple authentication in your browser. Please complete the sign-in there.');
-                                } else {
-                                    showSuccess('Opening Apple authentication in your browser. Please complete the sign-in there.');
-                                }
-                            } else {
-                                showError(result?.message || 'Failed to open Apple authentication.');
-                                showOAuthLoading(false);
-                            }
-                        } catch (error) {
-                            showError('OAuth error: ' + error.message);
-                            showOAuthLoading(false);
-                        }
-                    } else {
-                        showError('OAuth configuration required. Please contact support.');
-                        showOAuthLoading(false);
-                    }
-                }
-
-                function signInWithGithub() {
-                    if (hasAPI()) {
-                        try {
-                            window.pywebview.api.log_click('button', '"Continue with GitHub"');
-                        } catch (err) {
-                            if (window.pywebview.api.log) {
-                                window.pywebview.api.log('[CLICK] GitHub OAuth button clicked');
-                            }
-                        }
-                    }
-	                    if (openOAuthProvider('github')) return;
-	                    showOAuthLoading(true);
-
-                    if (window.pywebview && window.pywebview.api) {
-                        try {
-                            const result = window.pywebview.api.openOAuthUrl(null, 'github');
-                            if (result && result.success) {
-                                if (result.user) {
-                                    showSuccess(result.message || 'Successfully authenticated with GitHub!');
-                                    setTimeout(() => {
-                                        window.close();
-                                    }, 1500);
-                                } else if (result.message && result.message.includes('Opening')) {
-                                    showSuccess(result.message || 'Opening GitHub authentication in your browser. Please complete the sign-in there.');
-                                } else {
-                                    showSuccess('Opening GitHub authentication in your browser. Please complete the sign-in there.');
-                                }
-                            } else {
-                                showError(result?.message || 'Failed to open GitHub authentication.');
-                                showOAuthLoading(false);
-                            }
-                        } catch (error) {
-                            showError('OAuth error: ' + error.message);
-                            showOAuthLoading(false);
-                        }
-                    } else {
-                        showError('OAuth configuration required. Please contact support.');
-                        showOAuthLoading(false);
-                    }
-                }
-
-                function signInWithMicrosoft() {
-                    if (hasAPI()) {
-                        try {
-                            window.pywebview.api.log_click('button', '"Continue with Microsoft"');
-                        } catch (err) {
-                            if (window.pywebview.api.log) {
-                                window.pywebview.api.log('[CLICK] Microsoft OAuth button clicked');
-                            }
-                        }
-                    }
-	                    if (openOAuthProvider('microsoft')) return;
-	                    showOAuthLoading(true);
-
-                    if (window.pywebview && window.pywebview.api) {
-                        try {
-                            const result = window.pywebview.api.openOAuthUrl(null, 'microsoft');
-                            if (result && result.success) {
-                                if (result.user) {
-                                    showSuccess(result.message || 'Successfully authenticated with Microsoft!');
-                                    setTimeout(() => {
-                                        window.close();
-                                    }, 1500);
-                                } else if (result.message && result.message.includes('Opening')) {
-                                    showSuccess(result.message || 'Opening Microsoft authentication in your browser. Please complete the sign-in there.');
-                                } else {
-                                    showSuccess('Opening Microsoft authentication in your browser. Please complete the sign-in there.');
-                                }
-                            } else {
-                                showError(result?.message || 'Failed to open Microsoft authentication.');
-                                showOAuthLoading(false);
-                            }
-                        } catch (error) {
-                            showError('OAuth error: ' + error.message);
-                            showOAuthLoading(false);
-                        }
-                    } else {
-                        showError('OAuth configuration required. Please contact support.');
-                        showOAuthLoading(false);
-                    }
-                }
+                // Every desktop provider uses the same initiator-bound completion path.
+                function signInWithGoogle() { return openOAuthProvider('google'); }
+                function signInWithApple() { return openOAuthProvider('apple'); }
+                function signInWithGitHub() { return openOAuthProvider('github'); }
+                function signInWithMicrosoft() { return openOAuthProvider('microsoft'); }
 
                 function showSignup(event) {
                     // Log the click immediately - try multiple methods
