@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from models import UserService, DatabaseManager
-from backend.utils.jwt_utils import generate_jwt_token, verify_jwt_token, get_user_from_token
+from backend.utils.jwt_utils import generate_jwt_token, verify_jwt_token, get_user_from_token, credential_generation_matches
 from backend.utils.csrf import generate_csrf_token, csrf_protect
 from backend import auth_runtime_config
 from backend.auth_recovery import issue_recovery, consume_recovery, deliver_recovery
@@ -544,6 +544,7 @@ def create_account():
 
         # Prepare user data for JWT
         user_data = {
+            'credential_generation': getattr(user, 'credential_generation', '0'),
             'user_id': _model_user_id(user),
             'email': user.email,
             'full_name': user.full_name,
@@ -561,6 +562,7 @@ def create_account():
         # Store in session for OAuth compatibility
         session['user_id'] = user_data['user_id']
         session['email'] = user_data['email']
+        session['credential_generation'] = user_data.get('credential_generation', '0')
 
         return jsonify({
             'success': True,
@@ -609,6 +611,7 @@ def login():
             previous_login_at = _last_login_iso(user)
             # Prepare user data for JWT
             user_data = {
+                'credential_generation': getattr(user, 'credential_generation', '0'),
                 'user_id': _model_user_id(user),
                 'email': user.email,
                 'full_name': user.full_name,
@@ -626,6 +629,7 @@ def login():
             # Store in session for OAuth compatibility
             session['user_id'] = user_data['user_id']
             session['email'] = user_data['email']
+            session['credential_generation'] = user_data.get('credential_generation', '0')
 
             return jsonify({
                 'success': True,
@@ -851,6 +855,7 @@ def oauth_callback():
 
         if existing_user:
             user_data = {
+                'credential_generation': getattr(existing_user, 'credential_generation', '0'),
                 'user_id': _model_user_id(existing_user),
                 'email': existing_user.email,
                 'full_name': existing_user.full_name,
@@ -874,6 +879,7 @@ def oauth_callback():
                 password=random_password
             )
             user_data = {
+                'credential_generation': getattr(new_user, 'credential_generation', '0'),
                 'user_id': _model_user_id(new_user),
                 'email': new_user.email,
                 'full_name': new_user.full_name,
@@ -888,6 +894,7 @@ def oauth_callback():
 
         # Store user data in session
         session['oauth_user'] = {
+            'credential_generation': user_data.get('credential_generation', '0'),
             'id': user_data['user_id'],
             'user_id': user_data['user_id'],
             'email': user_data['email'],
@@ -914,11 +921,18 @@ def oauth_user():
     """Get OAuth user data from session"""
     from flask import session
     if session.get('oauth_success') and session.get('oauth_user'):
-        user_data = session.pop('oauth_user')
+        user_data = session.get('oauth_user')
+        if not isinstance(user_data, dict):
+            return _public_error('AUTHENTICATION_REQUIRED', 'Sign in again.', 401)
+        user = get_user_service().get_user_by_id(user_id=user_data.get('user_id'))
+        if not credential_generation_matches(user, user_data):
+            return _public_error('AUTHENTICATION_REQUIRED', 'Sign in again.', 401)
+        session.pop('oauth_user')
         login_report = session.pop('oauth_login_report', None)
         session.pop('oauth_success', None)
         session['user_id'] = user_data['user_id']
         session['email'] = user_data['email']
+        session['credential_generation'] = user_data.get('credential_generation', '0')
         return jsonify({
             'success': True,
             'user': user_data,
@@ -943,7 +957,7 @@ def get_current_user():
             user_data = get_user_from_token(token)
         elif session.get('user_id'):
             user = get_user_service().get_user_by_id(user_id=str(session['user_id']))
-            if user:
+            if user and credential_generation_matches(user, session):
                 user_data = {'user_id': _model_user_id(user), 'email': user.email, 'full_name': user.full_name, 'role': user.role}
 
         if user_data:
@@ -982,7 +996,7 @@ def delete_account():
             user_data = get_user_from_token(token)
         elif session.get('user_id'):
             user = get_user_service().get_user_by_id(user_id=str(session['user_id']))
-            if user:
+            if user and credential_generation_matches(user, session):
                 user_data = {'user_id': _model_user_id(user), 'email': user.email, 'full_name': user.full_name, 'role': user.role}
         if not user_data:
             return jsonify({
@@ -1217,3 +1231,20 @@ def get_oauth_user_info(provider: str, access_token: str) -> Optional[Dict[str, 
     except Exception as e:
         logging.error(f"Error getting user info: {e}", exc_info=True)
         return None
+
+
+def current_browser_user():
+    """Resolve the current cookie without refreshing a revoked credential."""
+    identity = session
+    user_id = session.get('user_id')
+    if not user_id and session.get('oauth_success') is True:
+        identity = session.get('oauth_user')
+        if not isinstance(identity, dict):
+            return None
+        user_id = identity.get('user_id')
+        if identity.get('id') not in (None, user_id):
+            return None
+    if not user_id:
+        return None
+    user = get_user_service().get_user_by_id(user_id=user_id)
+    return user if credential_generation_matches(user, identity) else None

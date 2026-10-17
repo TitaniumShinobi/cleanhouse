@@ -58,6 +58,7 @@ def generate_jwt_token(user_data: Dict[str, Any]) -> str:
         str: JWT token
     """
     payload = {
+        'credential_generation': user_data.get('credential_generation', '0'),
         'user_id': user_data.get('user_id'),
         'email': user_data.get('email'),
         'full_name': user_data.get('full_name', ''),
@@ -137,6 +138,10 @@ def verify_jwt_token(token: str) -> Optional[Dict[str, Any]]:
             payload = pyjwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         else:
             payload = _fallback_decode(token, JWT_SECRET_KEY)
+        from backend.api.auth import get_user_service
+        user = get_user_service().get_user_by_id(user_id=payload.get('user_id'))
+        if not credential_generation_matches(user, payload):
+            return None
         return payload
     except Exception as exc:
         expired_type = getattr(pyjwt, "ExpiredSignatureError", _ExpiredSignatureError)
@@ -163,6 +168,7 @@ def get_user_from_token(token: str) -> Optional[Dict[str, Any]]:
     payload = verify_jwt_token(token)
     if payload:
         return {
+            'credential_generation': payload.get('credential_generation', '0'),
             'user_id': payload.get('user_id'),
             'email': payload.get('email'),
             'full_name': payload.get('full_name', ''),
@@ -191,6 +197,7 @@ def refresh_jwt_token(token: str) -> Optional[str]:
     if time_until_expiry.total_seconds() < 24 * 3600:  # Less than 24 hours
         # Generate new token with same user data
         user_data = {
+            'credential_generation': payload.get('credential_generation', '0'),
             'user_id': payload.get('user_id'),
             'email': payload.get('email'),
             'full_name': payload.get('full_name', ''),
@@ -199,3 +206,12 @@ def refresh_jwt_token(token: str) -> Optional[str]:
         return generate_jwt_token(user_data)
     
     return token  # Token still valid, return original
+
+
+def credential_generation_matches(user, credential):
+    """Legacy credentials belong only to accounts which have never been reset."""
+    if user is None:
+        return False
+    current = getattr(user, 'credential_generation', '0')
+    supplied = credential.get('credential_generation', '0')
+    return isinstance(current, str) and bool(current) and isinstance(supplied, str) and hmac.compare_digest(current, supplied)

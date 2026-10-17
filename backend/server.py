@@ -174,7 +174,11 @@ def _requires_login():
 
 
 def _has_cleanhouse_session():
-    return bool(session.get('user_id') or session.get('oauth_user'))
+    try:
+        from backend.api.auth import current_browser_user
+        return current_browser_user() is not None
+    except Exception:
+        return False
 
 
 if _auth_enabled():

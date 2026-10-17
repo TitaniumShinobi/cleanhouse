@@ -75,7 +75,8 @@ def require_cleanhouse_api_admission():
         if not isinstance(user_id, str) or not user_id.strip():
             return _error('AUTHENTICATION_REQUIRED', 401)
         user = auth.get_user_service().get_user_by_id(user_id=user_id)
-        if user is None or auth._model_user_id(user) != user_id:
+        credential = claims if bearer else (session if session.get('user_id') else session.get('oauth_user', {}))
+        if user is None or auth._model_user_id(user) != user_id or not auth.credential_generation_matches(user, credential):
             return _error('AUTHENTICATION_REQUIRED', 401)
     except Exception:
         # Store/validator failures must not run the protected handler.

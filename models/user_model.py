@@ -13,6 +13,9 @@ except ImportError:
     bcrypt = None
 import json
 import logging
+import secrets
+import tempfile
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -30,6 +33,7 @@ class User:
     user_id: Optional[str] = None  # New: sharded user ID (format: {normalized_email}_{timestamp})
     full_name: str = ""
     email: str = ""
+    credential_generation: str = "0"
     password_hash: str = ""
     role: str = "user"  # User role (default: "user")
     created_at: Optional[datetime] = None
@@ -296,13 +300,22 @@ class UserService:
         # Load auth.json for password hash
         auth_path = user_path / "identity" / "auth.json"
         password_hash = ""
+        credential_generation = "0"
         if auth_path.exists():
             try:
                 with open(auth_path, 'r', encoding='utf-8') as f:
                     auth = json.load(f)
+                    if not isinstance(auth, dict):
+                        return None
                     password_hash = auth.get("password_hash", "")
+                    credential_generation = auth.get("credential_generation", "0")
+                    if not isinstance(credential_generation, str) or not credential_generation:
+                        return None
             except (json.JSONDecodeError, IOError) as e:
                 logging.warning(f"Failed to load auth for user_id {user_id}: {e}")
+                return None
+        else:
+            return None
         
         # Parse timestamps
         created_at = None
@@ -331,6 +344,7 @@ class UserService:
             full_name=profile.get("full_name", ""),
             email=profile.get("email", ""),
             password_hash=password_hash,
+            credential_generation=credential_generation,
             role=profile.get("role", "user"),
             created_at=created_at,
             updated_at=updated_at,
@@ -432,6 +446,7 @@ class UserService:
                     with open(auth_path, 'r', encoding='utf-8') as f:
                         auth = json.load(f)
                         stored_hash = auth.get("password_hash", "")
+                        user.credential_generation = auth.get("credential_generation", "0")
                 except (json.JSONDecodeError, IOError) as e:
                     logging.error(f"Failed to load auth file for user {user.user_id}: {e}")
                     return None
@@ -551,11 +566,22 @@ class UserService:
             return False
         try:
             auth = json.loads(auth_path.read_text(encoding="utf-8"))
+            if not isinstance(auth, dict):
+                return False
             auth["password_hash"] = self._hash_password(password)
             auth["password_updated_at"] = datetime.now().isoformat()
-            temp_path = auth_path.with_suffix(".json.tmp")
-            temp_path.write_text(json.dumps(auth, indent=2), encoding="utf-8")
-            temp_path.replace(auth_path)
+            auth["credential_generation"] = secrets.token_hex(32)
+            # Password and revocation epoch become visible in one atomic replacement.
+            fd, name = tempfile.mkstemp(prefix=".auth-reset-", dir=auth_path.parent)
+            temp_path = Path(name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as output:
+                    json.dump(auth, output, indent=2)
+                    output.flush()
+                    os.fsync(output.fileno())
+                temp_path.replace(auth_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
             return True
         except (OSError, json.JSONDecodeError, RuntimeError):
             logging.exception("Failed to update password for %s", user_id)
