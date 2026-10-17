@@ -245,6 +245,23 @@ DATABASE_URL=sqlite:///user_auth.db
 
 ## 🧪 Testing
 
+### Authentication regression gate
+
+```bash
+python -m pip install Flask==3.1.3 requests==2.32.5
+# Node.js 22 must be on PATH (minimum supported: 20).
+python scripts/run-auth-regression.py
+```
+
+This product-owned command runs the focused backend, real Flask logout-isolation,
+and Node UI failure/retry tests with a temporary HOME and synthetic secret. It
+requires no AUTH wizard, live server, provider credentials, or browser session.
+The `Authentication regression` workflow runs the same command on every push and
+pull request, without path filters. It becomes active after these files are
+committed and pushed; required-status protection is configured separately.
+See [the acceptance contract](documents/20_validation/cleanhouse-auth-acceptance.md)
+for evidence boundaries and regression coverage.
+
 ### Run Tests
 
 ```bash
@@ -257,7 +274,7 @@ pytest tests/
 - [ ] Complete live Google provider acceptance with owner-controlled credentials
 - [x] Signup establishes a CleanHouse server session
 - [x] Signin authenticates through the product-native registry
-- [x] Logout clears the server session and obsolete saved desktop state
+- [x] Logout clears only the current browser session; other browser sessions and shared saved state remain intact
 - [x] Recovery tokens are hashed, expiring, and single-use
 - [x] Navigation links work without scrolling
 - [x] Form validation works (email format, password strength)

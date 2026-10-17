@@ -34,8 +34,10 @@ control plane.
   use.
 - OAuth state is session-bound, expiring, and consumed once. PKCE material is
   bound to the same server-side record.
-- Logout clears Flask session identity and removes obsolete saved desktop OAuth
-  state so it cannot silently restore a logged-out browser.
+- Logout clears the current browser Flask session only. It does not delete shared
+  saved desktop files or invalidate another browser session. The UI clears local
+  identity and redirects only after an HTTP success with JSON `success: true`;
+  failure retains identity and enables a visible retry.
 - Recovery tokens are random, SHA-256 hashed at rest, expiring, and single-use.
   Issuing a new token invalidates the prior unused token for that user.
 - Recovery requests return an enumeration-resistant public response. Resend is
@@ -121,3 +123,43 @@ process image as final-source acceptance.
 
 These are deployment/provider proofs, not permission to install an auth runtime
 or to introduce AUTO, MCP, or drbt into this path.
+
+## Product-owned automatic regression gate — 2026-10-17
+
+Run `python scripts/run-auth-regression.py` from the product checkout. Install
+`Flask==3.1.3` and `requests==2.32.5` into that Python environment and provide
+Node.js 22 on PATH (minimum 20). CI provisions Python 3.12 and Node 22 and uses
+this identical command. The runner returns the suite's nonzero exit on failure;
+missing dependencies and execution/90-second timeout failures return 2.
+
+The runner invokes only `tests.test_auth_api_validation`: 22 existing validation
+cases plus three isolated regression wrappers. These wrappers exercise two real
+Flask tests and seven distinct Node UI cases (the missing-state case is also
+run alone). They verify independent browser jars for the same and different
+accounts, preserved saved-file sentinels, repeated logout and relogin, and failed
+logout requests retaining identity with retry instead of false success.
+
+Tests use a temporary HOME, synthetic signing secret, mocked user/report
+services, and in-process Flask clients. No live provider, browser, service port,
+user database, AUTH daemon, or wizard network request participates. Python
+bytecode writes are disabled. The runner does not preserve inherited provider
+credentials or Python import overrides in the test subprocess. No application
+runtime behavior is changed by installing the gate.
+
+`.github/workflows/authentication-regression.yml` runs on every push and pull
+request, plus manual dispatch, with no path filters. Actions are commit-pinned,
+permissions are read-only, checkout credential persistence is disabled, and the
+job is time-bounded. This source installation does not execute remote CI or set
+branch protection. A repository writer can omit/replace a local gate; an external
+required status check is necessary to prevent merging without its result.
+
+Source regression acceptance requires the clean suite to pass and disposable
+restoration of each old backend/shared-file deletion, frontend premature clear,
+and frontend false-success behavior to fail through this exact runner. Unrelated
+file changes must leave the gate passing. Missing Flask/requests or Node must
+fail explicitly. No product baseline is advanced by these tests.
+
+This gate is focused source proof, not live provider acceptance, stolen-cookie
+revocation proof, a full-product test suite, or proof of a deployed repair. The
+historical evidence above remains tied to its original run. The existing live
+runtime is not restarted or modified by this installation.
