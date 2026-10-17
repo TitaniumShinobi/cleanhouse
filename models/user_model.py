@@ -16,6 +16,7 @@ import logging
 import secrets
 import tempfile
 import os
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -23,6 +24,30 @@ from dataclasses import dataclass
 from .database import DatabaseManager
 from .user_registry import UserRegistry, generate_user_id
 from .shard_manager import ShardManager
+
+@contextmanager
+def _auth_record_lock(auth_path):
+    """Serialize account auth writers across processes; lock survives atomic replace."""
+    with open(auth_path.with_suffix('.lock'), 'a+b') as lock:
+        if os.name == 'nt':
+            import msvcrt
+            if lock.tell() == 0:
+                lock.write(b'0'); lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
 
 @dataclass
 class User:
@@ -407,7 +432,7 @@ class UserService:
                     cursor = conn.cursor()
                     cursor.execute("SELECT * FROM users WHERE id = ?", (legacy_id,))
                     row = cursor.fetchone()
-                    
+
                     if row:
                         return User.from_dict(dict(row))
                     return None
@@ -548,7 +573,7 @@ class UserService:
                         SET {set_clause}
                         WHERE id = ?
                     """, values)
-                    
+
                     conn.commit()
                     return cursor.rowcount > 0
             except Exception as e:
@@ -565,23 +590,24 @@ class UserService:
         if not auth_path.exists():
             return False
         try:
-            auth = json.loads(auth_path.read_text(encoding="utf-8"))
-            if not isinstance(auth, dict):
-                return False
-            auth["password_hash"] = self._hash_password(password)
-            auth["password_updated_at"] = datetime.now().isoformat()
-            auth["credential_generation"] = secrets.token_hex(32)
-            # Password and revocation epoch become visible in one atomic replacement.
-            fd, name = tempfile.mkstemp(prefix=".auth-reset-", dir=auth_path.parent)
-            temp_path = Path(name)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as output:
-                    json.dump(auth, output, indent=2)
-                    output.flush()
-                    os.fsync(output.fileno())
-                temp_path.replace(auth_path)
-            finally:
-                temp_path.unlink(missing_ok=True)
+            with _auth_record_lock(auth_path):
+                auth = json.loads(auth_path.read_text(encoding="utf-8"))
+                if not isinstance(auth, dict):
+                    return False
+                auth["password_hash"] = self._hash_password(password)
+                auth["password_updated_at"] = datetime.now().isoformat()
+                auth["credential_generation"] = secrets.token_hex(32)
+                # Password and revocation epoch become visible in one atomic replacement.
+                fd, name = tempfile.mkstemp(prefix=".auth-reset-", dir=auth_path.parent)
+                temp_path = Path(name)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as output:
+                        json.dump(auth, output, indent=2)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    temp_path.replace(auth_path)
+                finally:
+                    temp_path.unlink(missing_ok=True)
             return True
         except (OSError, json.JSONDecodeError, RuntimeError):
             logging.exception("Failed to update password for %s", user_id)
@@ -628,7 +654,7 @@ class UserService:
                     cursor = conn.cursor()
                     cursor.execute("DELETE FROM users WHERE id = ?", (legacy_id,))
                     conn.commit()
-                    
+
                     if cursor.rowcount > 0:
                         logging.info(f"User deleted: {legacy_id}")
                         return True
@@ -701,16 +727,17 @@ class UserService:
         
         if auth_path.exists():
             try:
-                with open(auth_path, 'r', encoding='utf-8') as f:
-                    auth = json.load(f)
-                
-                auth["last_login"] = datetime.now().isoformat()
-                
-                # Atomic write: write to temp file, then rename
-                temp_path = auth_path.with_suffix('.json.tmp')
-                with open(temp_path, 'w', encoding='utf-8') as f:
-                    json.dump(auth, f, indent=2)
-                temp_path.replace(auth_path)
+                with _auth_record_lock(auth_path):
+                    with open(auth_path, 'r', encoding='utf-8') as f:
+                        auth = json.load(f)
+
+                    auth["last_login"] = datetime.now().isoformat()
+
+                    # Atomic write: write to temp file, then rename
+                    temp_path = auth_path.with_suffix('.json.tmp')
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        json.dump(auth, f, indent=2)
+                    temp_path.replace(auth_path)
             except (json.JSONDecodeError, IOError) as e:
                 logging.error(f"Failed to update last_login in auth.json for user {user_id}: {e}")
         

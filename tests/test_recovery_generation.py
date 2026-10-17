@@ -95,6 +95,29 @@ class RecoveryGenerationTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/auth/me').status_code,401)
         self.assertIsNone(self.jwt.verify_jwt_token(token))
 
+    def test_login_metadata_writer_cannot_restore_pre_reset_generation(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        path=self.service.shard_manager.get_user_path(self.a.user_id)/'identity/auth.json'
+        entered, release = Event(), Event()
+        original_hash=self.service._hash_password
+        def delayed_hash(password):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return original_hash(password)
+        with patch.object(self.service, '_hash_password', side_effect=delayed_hash):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                reset=pool.submit(self.service.set_password,self.a.user_id,'new-password')
+                self.assertTrue(entered.wait(5))
+                update=pool.submit(self.service._update_last_login,self.a.user_id)
+                self.assertFalse(update.done())
+                release.set()
+                self.assertTrue(reset.result(5));update.result(5)
+        current=json.loads(path.read_text())
+        self.assertNotEqual(current['credential_generation'],'0')
+        self.assertTrue(self.service._verify_password('new-password',current['password_hash']))
+        self.assertIsNotNone(current.get('last_login'))
+
     def test_logout_remains_browser_local(self):
         other=self.app.test_client(); token=self.login(self.client);self.login(other)
         self.assertEqual(self.client.post('/api/auth/logout').status_code,200)
