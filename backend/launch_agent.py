@@ -28,7 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 3333
 STAGED_RUNTIME_NAME = "launchagent-runtime"
-RUNTIME_DIRECTORIES = ("backend", "corefiles", "frontend", "models", "assets")
+RUNTIME_DIRECTORIES = ("backend", "corefiles", "frontend", "models", "access_control", "assets")
 RUNTIME_FILES: tuple[str, ...] = ()
 
 
@@ -90,7 +90,7 @@ def stage_runtime(interpreter: str, *, repo_root: Path = REPO_ROOT) -> dict[str,
     try:
         for name in RUNTIME_DIRECTORIES:
             source = source_repo / name
-            if name in {"backend", "corefiles", "frontend", "models"} and not source.is_dir():
+            if name in {"backend", "corefiles", "frontend", "models", "access_control"} and not source.is_dir():
                 raise FileNotFoundError(source)
             if source.is_dir():
                 _copy_runtime_tree(source, app_root / name)

@@ -67,7 +67,7 @@ class LaunchAgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "source"
-            for name in ("backend", "corefiles", "frontend", "models"):
+            for name in ("backend", "corefiles", "frontend", "models", "access_control"):
                 directory = repo / name
                 directory.mkdir(parents=True)
                 (directory / "sentinel.py").write_text(name, encoding="utf-8")
@@ -131,7 +131,7 @@ class LaunchAgentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             repo = root / "source"
-            for name in ("backend", "corefiles", "frontend", "models"):
+            for name in ("backend", "corefiles", "frontend", "models", "access_control"):
                 directory = repo / name
                 directory.mkdir(parents=True)
                 (directory / "sentinel.py").write_text(name, encoding="utf-8")
