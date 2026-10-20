@@ -3,18 +3,15 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import secrets
-import smtplib
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from pathlib import Path
 from urllib.parse import quote
 
-import requests
+from backend.auth_email import deliver_auth_email
 
 
 def _database_path() -> Path:
@@ -75,30 +72,8 @@ def consume_recovery(raw: str) -> dict[str, str] | None:
 
 def deliver_recovery(email: str, token: str, public_origin: str) -> None:
     link = f"{public_origin.rstrip('/')}/password-reset?token={quote(token)}"
-    sender = os.getenv("FROM_EMAIL", "").strip()
-    service = os.getenv("EMAIL_SERVICE", "resend").strip().lower()
-    if service == "resend":
-        api_key = os.getenv("RESEND_API_KEY", "").strip()
-        if not api_key or not sender:
-            raise RuntimeError("recovery delivery is not configured")
-        response = requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            data=json.dumps({"from": sender, "to": [email], "subject": "Reset your CleanHouse password", "text": f"Reset your CleanHouse password: {link}\nThis link expires in 30 minutes."}),
-            timeout=10,
-        )
-        response.raise_for_status()
-        return
-    host = os.getenv("EMAIL_HOST", "").strip()
-    if not host or not sender:
-        raise RuntimeError("recovery delivery is not configured")
-    message = EmailMessage()
-    message["From"], message["To"], message["Subject"] = sender, email, "Reset your CleanHouse password"
-    message.set_content(f"Reset your CleanHouse password: {link}\nThis link expires in 30 minutes.")
-    port = int(os.getenv("EMAIL_PORT", "587"))
-    with smtplib.SMTP(host, port, timeout=10) as client:
-        client.starttls()
-        user, password = os.getenv("EMAIL_USER", ""), os.getenv("EMAIL_PASS", "")
-        if user:
-            client.login(user, password)
-        client.send_message(message)
+    deliver_auth_email(
+        email,
+        subject="Reset your CleanHouse password",
+        text=f"Reset your CleanHouse password: {link}\nThis link expires in 30 minutes.",
+    )

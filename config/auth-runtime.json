@@ -17,6 +17,17 @@
         "service": "org.cleanhouse.auth.google",
         "account": "client-secret-v2"
       }
+    },
+    "github": {
+      "enabled": true,
+      "label": "Continue with GitHub",
+      "callbackPath": "/api/auth/github/callback",
+      "clientIdEnvironment": "CLEANHOUSE_GITHUB_CLIENT_ID",
+      "clientSecretEnvironment": "CLEANHOUSE_GITHUB_CLIENT_SECRET",
+      "clientSecretKeychain": {
+        "service": "org.cleanhouse.auth.github",
+        "account": "client-secret-v1"
+      }
     }
   }
 }

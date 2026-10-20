@@ -29,11 +29,12 @@ function showView(view) {
     document.querySelectorAll('.nav-link').forEach(link => {
         link.classList.toggle('active', link.dataset.view === view);
     });
-    if (view === 'applications') history.replaceState(null, '', '/applications');
-    if (view === 'network') history.replaceState(null, '', '/network');
-    if (view === 'files') history.replaceState(null, '', '/files');
-    if (view === 'custom') history.replaceState(null, '', '/custom-scan');
-    if (view === 'home') history.replaceState(null, '', '/investigations');
+    const preserveCurrentRoute = route => window.location.pathname === route ? route + window.location.search + window.location.hash : route;
+    if (view === 'applications') history.replaceState(null, '', preserveCurrentRoute('/applications'));
+    if (view === 'network') history.replaceState(null, '', preserveCurrentRoute('/network'));
+    if (view === 'files') history.replaceState(null, '', preserveCurrentRoute('/files'));
+    if (view === 'custom') history.replaceState(null, '', preserveCurrentRoute('/custom-scan'));
+    if (view === 'home' && window.location.pathname !== '/settings') history.replaceState(null, '', '/investigations');
 }
 
 function normalizedText(value) {

@@ -97,37 +97,57 @@ class AuthApiValidationTests(unittest.TestCase):
     def setUp(self):
         self._original_request = auth_api.request
         self._original_session = auth_api.session
+        self._original_context_request = auth_api.auth_context.request
+        self._original_context_session = auth_api.auth_context.session
+        self._original_context_g = auth_api.auth_context.g
         class _Session(dict):
             modified = False
 
         self.session = _Session()
         auth_api.session = self.session
-        auth_api.request = types.SimpleNamespace(
+        request = types.SimpleNamespace(
             get_json=lambda silent=True: None,
             headers={},
+            cookies={},
             form={},
             method="GET",
+            remote_addr="127.0.0.1",
         )
+        auth_api.request = request
+        auth_api.auth_context.request = request
+        auth_api.auth_context.session = self.session
+        auth_api.auth_context.g = types.SimpleNamespace()
 
     def tearDown(self):
         auth_api.request = self._original_request
         auth_api.session = self._original_session
+        auth_api.auth_context.request = self._original_context_request
+        auth_api.auth_context.session = self._original_context_session
+        auth_api.auth_context.g = self._original_context_g
 
     def _set_request_json(self, payload):
-        auth_api.request = types.SimpleNamespace(
+        request = types.SimpleNamespace(
             get_json=lambda silent=True: payload,
             headers={},
+            cookies={},
             form={},
             method="POST",
+            remote_addr="127.0.0.1",
         )
+        auth_api.request = request
+        auth_api.auth_context.request = request
 
     def _set_request_headers(self, headers):
-        auth_api.request = types.SimpleNamespace(
+        request = types.SimpleNamespace(
             get_json=lambda silent=True: None,
             headers=headers,
+            cookies={},
             form={},
             method="GET",
+            remote_addr="127.0.0.1",
         )
+        auth_api.request = request
+        auth_api.auth_context.request = request
 
     def _cleanhouse_consent(self):
         return {
@@ -176,13 +196,90 @@ class AuthApiValidationTests(unittest.TestCase):
         self.assertFalse(response["data"]["providers"][0]["available"])
 
     def test_unconfigured_google_redirects_to_intentional_login_error(self):
-        auth_api.request = types.SimpleNamespace(method="GET", args={}, form={}, headers={})
-        with patch.object(auth_api.auth_runtime_config, "provider_config", return_value={
-            "enabled": True,
-            "available": False,
-        }):
+        auth_api.request = types.SimpleNamespace(
+            method="GET", args={}, form={}, headers={}, host_url="http://localhost:3333/"
+        )
+        with patch.object(auth_api, "_oauth_redirect_uri", return_value="http://localhost:3333/api/auth/google/callback"), patch.object(
+            auth_api.auth_runtime_config,
+            "provider_config",
+            return_value={"enabled": True, "available": False},
+        ):
             response = auth_api.oauth("google")
         self.assertEqual(response, "/login?error=provider_unavailable&provider=google")
+
+    def test_oauth_start_redirects_to_callback_origin_before_creating_state(self):
+        auth_api.request = types.SimpleNamespace(
+            method="GET", args={}, form={}, headers={}, host_url="http://127.0.0.1:3333/"
+        )
+        with patch.object(auth_api, "_oauth_redirect_uri", return_value="http://localhost:3333/api/auth/google/callback"):
+            response = auth_api.oauth("google")
+
+        self.assertEqual(response, "http://localhost:3333/api/auth/oauth/google")
+        self.assertNotIn("oauth_states", self.session)
+
+    def test_oauth_start_bounds_pending_cookie_state(self):
+        auth_api.request = types.SimpleNamespace(
+            method="GET", args={}, form={}, headers={}, host_url="http://localhost:3333/"
+        )
+        states = [f"state-{index}" for index in range(8)]
+        with patch.object(
+            auth_api.auth_runtime_config,
+            "provider_config",
+            return_value={
+                "enabled": True,
+                "available": True,
+                "client_id": "client-id",
+                "callback_url": "http://localhost:3333/api/auth/google/callback",
+            },
+        ), patch.object(
+            auth_api, "generate_pkce", return_value=("verifier", "challenge")
+        ), patch.object(auth_api.secrets, "token_urlsafe", side_effect=states):
+            for _ in states:
+                auth_api.oauth("google")
+
+        self.assertEqual(list(self.session["oauth_states"]), states[-4:][::-1])
+        self.assertLess(len(json.dumps(self.session)), 4093)
+
+    def test_oauth_callback_keeps_only_compact_login_report_reference(self):
+        class _User:
+            id = "user-1"
+            user_id = "user-1"
+            email = "user@example.com"
+            full_name = "Clean User"
+            role = "user"
+            last_login = None
+
+        self.session["oauth_states"] = {
+            "valid": {
+                "provider": "google",
+                "code_verifier": "verifier",
+                "created_at": 9_999_999_999,
+            }
+        }
+        auth_api.request = types.SimpleNamespace(
+            method="GET", args={"code": "code", "state": "valid"}, form={}, headers={}
+        )
+        service = type("S", (), {
+            "get_user_by_email": lambda self, email: _User(),
+            "_update_last_login": lambda self, user_id: None,
+            "user_registry": None,
+        })()
+        report = {"id": "report:oauth", "evidence_refs": ["x" * 256] * 40}
+
+        with patch.object(auth_api, "exchange_oauth_token", return_value={"access_token": "provider-token"}), patch.object(
+            auth_api, "get_oauth_user_info", return_value={"id": "provider-fixture", "email": "user@example.com", "name": "Clean User"}
+        ), patch.object(auth_api, "get_user_service", return_value=service), patch.object(
+            auth_api, "_build_login_report_payload", return_value=report
+        ):
+            store = types.SimpleNamespace(external_identity=lambda *a: None, bind_external_identity=lambda *a, **kw: None,
+                                          issue_session=lambda *a, **kw: types.SimpleNamespace(secret="synthetic-session"))
+            with patch.object(auth_api, "get_store", return_value=store):
+                response = auth_api.oauth_callback()
+
+        self.assertEqual(response, "/overview")
+        self.assertNotIn("oauth_login_report", self.session)
+        self.assertNotIn("evidence_refs", json.dumps(self.session))
+        self.assertLess(len(json.dumps(self.session)), 4093)
 
     def test_obsolete_desktop_token_endpoint_is_removed(self):
         self.assertFalse(hasattr(auth_api, "launch_desktop"))
@@ -220,7 +317,7 @@ class AuthApiValidationTests(unittest.TestCase):
         self.assertIsInstance(response, tuple)
         body, status = response
         self.assertEqual(status, 401)
-        self.assertIn("Bearer <token>", body.get("message", ""))
+        self.assertIn("Invalid or expired", body.get("message", ""))
 
     def test_login_accepts_valid_payload(self):
         class _User:
@@ -234,7 +331,11 @@ class AuthApiValidationTests(unittest.TestCase):
         self._set_request_json({"email": "user@example.com", "password": "pass", "fullName": "Clean User"})
 
         with patch.object(auth_api, "get_user_service") as get_user_service, patch.object(
-            auth_api, "generate_jwt_token", return_value="jwt-token"
+            auth_api, "_require_cookie_mutation", return_value=None
+        ), patch.object(
+            auth_api, "_issue_session_response", side_effect=lambda user, payload, **kwargs: payload
+        ), patch.object(
+            auth_api, "_consent_payload_for", return_value={"current": False, "missing": []}
         ), patch.object(auth_api, "_build_login_report_payload", return_value={"status": "ok", "id": "report:login"}):
             get_user_service.return_value = type("S", (), {"authenticate_user": lambda self, email, password: _User()})()
             response = auth_api.login()
@@ -247,11 +348,21 @@ class AuthApiValidationTests(unittest.TestCase):
             response_body = response
         self.assertTrue(response_body.get("success"))
         self.assertEqual(response_body.get("login_report", {}).get("id"), "report:login")
-        self.assertEqual(self.session.get("user_id"), "user-1")
+        self.assertNotIn("token", response_body)
+        self.assertNotIn("user_id", self.session)
 
     def test_logout_clears_session(self):
+        class _Response(dict):
+            def __init__(self, payload):
+                super().__init__(payload)
+                self.headers = {}
+
         self.session.update({"user_id": "user-1", "email": "user@example.com"})
-        with tempfile.TemporaryDirectory() as root, patch.object(auth_api.Path, "home", return_value=Path(root)):
+        with tempfile.TemporaryDirectory() as root, patch.object(auth_api.Path, "home", return_value=Path(root)), patch.object(
+            auth_api, "_require_cookie_mutation", return_value=None
+        ), patch.object(auth_api, "_current_identity", return_value=None), patch.object(
+            auth_api, "jsonify", side_effect=lambda payload: _Response(payload)
+        ):
             response = auth_api.logout()
         self.assertTrue(response.get("success"))
         self.assertEqual(self.session, {})
@@ -259,13 +370,17 @@ class AuthApiValidationTests(unittest.TestCase):
     def test_recovery_request_is_enumeration_resistant(self):
         self._set_request_json({"email": "missing@example.com"})
         service = type("S", (), {"get_user_by_email": lambda self, email: None})()
-        with patch.object(auth_api, "get_user_service", return_value=service):
+        with patch.object(auth_api, "get_user_service", return_value=service), patch.object(
+            auth_api, "_require_cookie_mutation", return_value=None
+        ):
             response = auth_api.request_recovery()
         self.assertTrue(response.get("success"))
 
     def test_reset_requires_valid_single_use_token(self):
         self._set_request_json({"token": "expired", "password": "new-password"})
-        with patch.object(auth_api, "consume_recovery", return_value=None):
+        with patch.object(auth_api, "consume_recovery", return_value=None), patch.object(
+            auth_api, "_require_cookie_mutation", return_value=None
+        ):
             body, status = auth_api.reset_password()
         self.assertEqual(status, 400)
         self.assertEqual(body.get("code"), "INVALID_RECOVERY_TOKEN")
@@ -288,7 +403,9 @@ class AuthApiValidationTests(unittest.TestCase):
         with patch.dict(auth_api.os.environ, {"CLEANHOUSE_TURNSTILE_REQUIRED": "0"}, clear=False), patch.object(
             auth_api, "get_user_service"
         ) as get_user_service, patch.object(
-            auth_api, "generate_jwt_token", return_value="jwt-token"
+            auth_api, "_require_cookie_mutation", return_value=None
+        ), patch.object(auth_api, "_record_current_consent", return_value=None), patch.object(
+            auth_api, "_issue_session_response", side_effect=lambda user, payload, **kwargs: payload
         ), patch.object(
             auth_api, "_build_login_report_payload", return_value={"status": "ok", "id": "report:create"}
         ):
@@ -377,7 +494,9 @@ class AuthApiValidationTests(unittest.TestCase):
         ), patch.object(auth_api, "_verify_turnstile_token", return_value=True), patch.object(
             auth_api, "get_user_service"
         ) as get_user_service, patch.object(
-            auth_api, "generate_jwt_token", return_value="jwt-token"
+            auth_api, "_require_cookie_mutation", return_value=None
+        ), patch.object(auth_api, "_record_current_consent", return_value=None), patch.object(
+            auth_api, "_issue_session_response", side_effect=lambda user, payload, **kwargs: payload
         ), patch.object(
             auth_api, "_build_login_report_payload", return_value={"status": "ok", "id": "report:create"}
         ):
@@ -427,7 +546,8 @@ class AuthApiValidationTests(unittest.TestCase):
 
             auth_api.request = types.SimpleNamespace(
                 get_json=lambda silent=True: {"confirmation": "user@example.com"},
-                headers={"Authorization": "Bearer token"},
+                headers={},
+                cookies={},
                 form={},
                 method="DELETE",
             )
@@ -442,14 +562,27 @@ class AuthApiValidationTests(unittest.TestCase):
 
             service = _Service()
 
-            with patch.dict(auth_api.os.environ, {"CLEANHOUSE_VVAULT_ROOT": str(vvault_root)}, clear=False), patch.object(
-                auth_api, "get_user_from_token", return_value={
+            identity = types.SimpleNamespace(
+                user_id="cleanhouse-local-user",
+                credential_id="session-1",
+                kind="session",
+                consent_current=True,
+                user={
                     "user_id": "cleanhouse-local-user",
                     "email": "user@example.com",
                     "full_name": "Clean User",
                     "role": "user",
-                }
-            ), patch.object(auth_api, "get_user_service", return_value=service), patch.object(
+                },
+            )
+            store = types.SimpleNamespace(revoke_all_sessions=lambda *args, **kwargs: 1)
+
+            with patch.dict(auth_api.os.environ, {"CLEANHOUSE_VVAULT_ROOT": str(vvault_root)}, clear=False), patch.object(
+                auth_api, "_require_cookie_mutation", return_value=None
+            ), patch.object(auth_api, "_current_identity", return_value=identity), patch.object(
+                auth_api, "_require_sensitive", return_value=None
+            ), patch.object(auth_api, "get_store", return_value=store), patch.object(
+                auth_api, "get_user_service", return_value=service
+            ), patch.object(
                 auth_api, "_write_account_deletion_marker", return_value="/tmp/account-delete-marker.json"
             ):
                 response = auth_api.delete_account()
@@ -500,3 +633,181 @@ class AuthApiValidationTests(unittest.TestCase):
         self.assertEqual(result["status"], "accepted")
         self.assertEqual(result["job"]["state"], "queued")
         self.assertEqual(calls[0]["wait_timeout_seconds"], 2.0)
+
+
+# Separate processes keep the legacy module's Flask stubs out of real-cookie tests.
+class LogoutIsolationRegressionTests(unittest.TestCase):
+    def _run_isolated(self, argv):
+        import os
+        import subprocess
+        with tempfile.TemporaryDirectory(prefix="cleanhouse-logout-test-") as home:
+            root = Path(__file__).resolve().parents[1]
+            env = {"PATH": os.environ.get("PATH", ""), "HOME": home,
+                   "PYTHONDONTWRITEBYTECODE": "1", "JWT_SECRET_KEY": "synthetic-test-secret",
+                   "CLEANHOUSE_LOGOUT_TEST_ROOT": str(root)}
+            result = subprocess.run(argv, cwd=root, env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_real_flask_logout_isolation(self):
+        self._run_isolated([sys.executable, "-c", _REAL_FLASK_LOGOUT_TESTS])
+
+    def test_logout_ui_failure_and_retry(self):
+        self._run_isolated(["node", "--input-type=module", "-e", _LOGOUT_UI_TESTS])
+
+    def test_logout_ui_requires_auth_state(self):
+        self._run_isolated(["node", "--test-name-pattern=missing auth-state", "--input-type=module", "-e", _LOGOUT_UI_TESTS])
+
+
+_REAL_FLASK_LOGOUT_TESTS = r'''"""Real Flask cookie-jar logout isolation; no live accounts or storage."""
+import importlib.util
+import os
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+from flask import Flask
+
+ROOT = Path(os.environ['CLEANHOUSE_LOGOUT_TEST_ROOT']) if os.environ.get('CLEANHOUSE_LOGOUT_TEST_ROOT') else Path(__file__).resolve().parents[1]
+
+
+class LogoutIsolationTests(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.TemporaryDirectory(prefix='cleanhouse-logout-home-')
+        self.addCleanup(self.home.cleanup)
+        self.env = patch.dict(os.environ, {'HOME': self.home.name, 'JWT_SECRET_KEY': 'synthetic-test-secret-not-production', 'CLEANHOUSE_AUTH_DB': str(Path(self.home.name) / 'auth.sqlite3')})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        sys.path.insert(0, str(ROOT))
+        self.addCleanup(lambda: sys.path.remove(str(ROOT)))
+        spec = importlib.util.spec_from_file_location('logout_isolation_actual_auth', ROOT / 'backend/api/auth.py')
+        self.auth = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.auth)
+        self.users = {key: SimpleNamespace(user_id=key, email=f'{key}@example.test', full_name=key, role='user') for key in ('owner-a', 'owner-b')}
+        service = SimpleNamespace(
+            get_user_by_id=lambda user_id: self.users.get(user_id),
+            authenticate_user=lambda email, password: next((u for u in self.users.values() if u.email == email and password == 'fixture-password'), None),
+        )
+        for name, value in [('get_user_service', lambda: service), ('_build_login_report_payload', lambda *a, **kw: {'id': 'synthetic-report'})]:
+            p = patch.object(self.auth, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.app = Flask(__name__)
+        self.app.config.update(TESTING=True, SECRET_KEY='synthetic-cookie-key')
+        self.app.register_blueprint(self.auth.bp, url_prefix='/api')
+        self.app.after_request(self.auth.auth_context.finalize_response)
+        self.auth.auth_context.reset_store_cache()
+        self.addCleanup(self.auth.auth_context.reset_store_cache)
+        saved = Path(self.home.name) / '.cleanhouse'
+        saved.mkdir()
+        self.sentinels = {saved / '.auth_token': b'fixture-native-token', saved / '.auth_user.json': b'{"id":"fixture-native-owner"}'}
+        for path, data in self.sentinels.items():
+            path.write_bytes(data)
+
+    def post(self, client, path, **kwargs):
+        csrf = client.get('/api/auth/csrf', base_url='http://localhost:3333').get_json()['csrfToken']
+        return client.post(path, base_url='http://localhost:3333', headers={'Origin': 'http://localhost:3333', 'X-CSRF-Token': csrf}, **kwargs)
+
+    def login(self, client, owner):
+        response = self.post(client, '/api/auth/login', json={'email': self.users[owner].email, 'password': 'fixture-password'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()['user']['id'], owner)
+
+    def exercise_isolation(self, other_owner):
+        a, b = self.app.test_client(), self.app.test_client()
+        self.login(a, 'owner-a')
+        self.login(b, other_owner)
+        self.assertEqual(a.get('/api/auth/me', base_url='http://localhost:3333').status_code, 200)
+        response = self.post(a, '/api/auth/logout')
+        self.assertEqual(response.status_code, 200)
+        self.assertIs(response.get_json()['success'], True)
+        self.assertEqual(a.get('/api/auth/me', base_url='http://localhost:3333').status_code, 401)
+        self.assertEqual(b.get('/api/auth/me', base_url='http://localhost:3333').get_json()['user']['id'], other_owner)
+        for path, data in self.sentinels.items():
+            self.assertEqual(path.read_bytes(), data)
+        self.assertEqual(self.post(a, '/api/auth/logout').status_code, 200)
+        self.assertEqual(a.get('/api/auth/me', base_url='http://localhost:3333').status_code, 401)
+        self.login(a, 'owner-a')
+        self.assertEqual(a.get('/api/auth/me', base_url='http://localhost:3333').get_json()['user']['id'], 'owner-a')
+        self.assertEqual(b.get('/api/auth/me', base_url='http://localhost:3333').status_code, 200)
+
+    def test_same_account_independent_cookie_jars(self):
+        self.exercise_isolation('owner-a')
+
+    def test_different_accounts_independent_cookie_jars(self):
+        self.exercise_isolation('owner-b')
+
+
+if __name__ == '__main__':
+    unittest.main()
+'''
+
+_LOGOUT_UI_TESTS = r'''import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
+import { test } from 'node:test';
+
+const root = process.env.CLEANHOUSE_LOGOUT_TEST_ROOT || process.cwd();
+const stateSource = fs.readFileSync(path.join(root, 'frontend/js/auth-state.js'), 'utf8');
+const controlsSource = fs.readFileSync(path.join(root, 'frontend/js/session-controls.js'), 'utf8');
+function host() {
+  const listeners = new Map();
+  const button = { disabled: false, addEventListener: (name, fn) => listeners.set(name, fn) };
+  const errors = [];
+  const redirects = [];
+  const elements = new Map([['cleanhouse-logout', button]]);
+  const document = {
+    readyState: 'loading', addEventListener() {},
+    getElementById: id => elements.get(id) || null,
+    createElement: () => ({ setAttribute() {}, textContent: '' }),
+    body: { appendChild(element) { elements.set(element.id, element); } },
+  };
+  button.insertAdjacentElement = (_where, element) => elements.set(element.id, element);
+  button.parentNode = { appendChild(element) { elements.set(element.id, element); } };
+  const window = { location: { assign: value => redirects.push(value) }, alert: value => errors.push(value) };
+  const context = vm.createContext({ window, document, alert: window.alert, console: { error() {} }, fetch: async () => ({ ok: true, json: async () => ({ success: true }) }) });
+  vm.runInContext(stateSource, context);
+  vm.runInContext(controlsSource, context);
+  window.authState.setUser({ id: 'fixture-user' });
+  return { context, window, button, errors, redirects, elements, click: () => listeners.get('click')() };
+}
+for (const [name, fetch] of [
+  ['HTTP failure', async () => ({ ok: false, status: 500, json: async () => ({ success: false }) })],
+  ['network failure', async () => { throw Error('synthetic outage'); }],
+  ['malformed response', async () => ({ ok: true, json: async () => { throw Error('synthetic bad JSON'); } })],
+  ['negative success response', async () => ({ ok: true, json: async () => ({ success: false }) })],
+  ['missing success response', async () => ({ ok: true, json: async () => ({}) })],
+  ['nonboolean success response', async () => ({ ok: true, json: async () => ({ success: 'true' }) })],
+]) {
+  test(`${name} preserves client state, stays on page and permits successful retry`, async () => {
+    const h = host();
+    h.context.fetch = fetch;
+    await h.click();
+    assert.equal(h.window.authState.getUser().id, 'fixture-user');
+    assert.deepEqual(h.redirects, []);
+    assert.equal(h.button.disabled, false);
+    assert.ok(h.errors.length || [...h.elements.values()].some(e => e.textContent), 'failure must be visible');
+    h.context.fetch = async (url, options) => {
+      if (url === '/api/auth/csrf') return { ok: true, json: async () => ({ csrfToken: 'synthetic-csrf' }) };
+      assert.equal(options.headers['X-CSRF-Token'], 'synthetic-csrf');
+      assert.equal(url, '/api/auth/logout');
+      assert.equal(options.method, 'POST');
+      assert.equal(options.credentials, 'include');
+      return { ok: true, json: async () => ({ success: true }) };
+    };
+    await h.click();
+    assert.equal(h.window.authState.getUser(), null);
+    assert.deepEqual(h.redirects, ['/login']);
+  });
+}
+test('missing auth-state cannot masquerade as successful logout', async () => {
+  const h = host();
+  h.window.authState = undefined;
+  await h.click();
+  assert.deepEqual(h.redirects, []);
+  assert.equal(h.button.disabled, false);
+});
+'''

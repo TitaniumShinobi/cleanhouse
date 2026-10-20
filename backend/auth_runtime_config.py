@@ -159,13 +159,19 @@ def initialize_auth_runtime(env: dict[str, str] | None = None) -> dict[str, Any]
     global _runtime
     target = env if env is not None else os.environ
     _runtime = resolve_runtime_config(target)
-    google = _runtime.get("providers", {}).get("google", {})
-    if google.get("client_id"):
-        target.setdefault("CLEANHOUSE_GOOGLE_CLIENT_ID", google["client_id"])
-        target.setdefault("GOOGLE_CLIENT_ID", google["client_id"])
-    if google.get("callback_url"):
-        target.setdefault("CLEANHOUSE_GOOGLE_CALLBACK_URL", google["callback_url"])
-        target.setdefault("GOOGLE_CALLBACK_URL", google["callback_url"])
+    for provider, declaration in _runtime.get("providers", {}).items():
+        provider_key = str(provider).upper()
+        if declaration.get("client_id"):
+            target.setdefault(f"CLEANHOUSE_{provider_key}_CLIENT_ID", declaration["client_id"])
+        if declaration.get("callback_url"):
+            target.setdefault(f"CLEANHOUSE_{provider_key}_CALLBACK_URL", declaration["callback_url"])
+        # Only Google retains the historical aliases. Provider secrets are
+        # never copied into the environment.
+        if provider == "google":
+            if declaration.get("client_id"):
+                target.setdefault("GOOGLE_CLIENT_ID", declaration["client_id"])
+            if declaration.get("callback_url"):
+                target.setdefault("GOOGLE_CALLBACK_URL", declaration["callback_url"])
     return _runtime
 
 

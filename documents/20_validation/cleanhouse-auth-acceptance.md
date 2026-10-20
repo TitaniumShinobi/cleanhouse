@@ -34,8 +34,10 @@ control plane.
   use.
 - OAuth state is session-bound, expiring, and consumed once. PKCE material is
   bound to the same server-side record.
-- Logout clears Flask session identity and removes obsolete saved desktop OAuth
-  state so it cannot silently restore a logged-out browser.
+- Logout clears the current browser Flask session only. It does not delete shared
+  saved desktop files or invalidate another browser session. The UI clears local
+  identity and redirects only after an HTTP success with JSON `success: true`;
+  failure retains identity and enables a visible retry.
 - Recovery tokens are random, SHA-256 hashed at rest, expiring, and single-use.
   Issuing a new token invalidates the prior unused token for that user.
 - Recovery requests return an enumeration-resistant public response. Resend is
@@ -121,3 +123,158 @@ process image as final-source acceptance.
 
 These are deployment/provider proofs, not permission to install an auth runtime
 or to introduce AUTO, MCP, or drbt into this path.
+
+## Product-owned automatic regression gate — 2026-10-17
+
+Run `python scripts/run-auth-regression.py` from the product checkout. Install
+`Flask==3.1.3` and `requests==2.32.5` into that Python environment and provide
+Node.js 22 on PATH (minimum 20). CI provisions Python 3.12 and Node 22 and uses
+this identical command. The runner returns the suite's nonzero exit on failure;
+missing dependencies and execution/90-second timeout failures return 2.
+
+The runner invokes only `tests.test_auth_api_validation`: 22 existing validation
+cases plus three isolated regression wrappers. These wrappers exercise two real
+Flask tests and seven distinct Node UI cases (the missing-state case is also
+run alone). They verify independent browser jars for the same and different
+accounts, preserved saved-file sentinels, repeated logout and relogin, and failed
+logout requests retaining identity with retry instead of false success.
+
+Tests use a temporary HOME, synthetic signing secret, mocked user/report
+services, and in-process Flask clients. No live provider, browser, service port,
+user database, AUTH daemon, or wizard network request participates. Python
+bytecode writes are disabled. The runner does not preserve inherited provider
+credentials or Python import overrides in the test subprocess. No application
+runtime behavior is changed by installing the gate.
+
+`.github/workflows/authentication-regression.yml` runs on every push and pull
+request, plus manual dispatch, with no path filters. Actions are commit-pinned,
+permissions are read-only, checkout credential persistence is disabled, and the
+job is time-bounded. This source installation does not execute remote CI or set
+branch protection. A repository writer can omit/replace a local gate; an external
+required status check is necessary to prevent merging without its result.
+
+Source regression acceptance requires the clean suite to pass and disposable
+restoration of each old backend/shared-file deletion, frontend premature clear,
+and frontend false-success behavior to fail through this exact runner. Unrelated
+file changes must leave the gate passing. Missing Flask/requests or Node must
+fail explicitly. No product baseline is advanced by these tests.
+
+This gate is focused source proof, not live provider acceptance, stolen-cookie
+revocation proof, a full-product test suite, or proof of a deployed repair. The
+historical evidence above remains tied to its original run. The existing live
+runtime is not restarted or modified by this installation.
+
+
+## Active-source completion — 2026-10-20
+
+This section supersedes the older implementation description, not its historical
+acceptance receipts. Source completion is not runtime activation. No runtime
+restart, provider provisioning, browser session, or release approval is included.
+
+The product-owned SQLite AuthStore supplies opaque digest-only device sessions,
+rotation, expiry, revocation, purpose-bound single-use magic challenges, provider
+subject bindings, append-only document-version receipts, and personal API tokens.
+Existing signed browser identities are validated against the user service before
+a device session is issued; user records and other browser sessions are preserved.
+New authentication still requires current consent before protected product access.
+The signed Flask cookie retains only short-lived OAuth/CSRF state. Four pending
+OAuth transactions retain their intent, owner linkage and consent and are consumed
+once. Denial callbacks also validate/consume state. Unknown OAuth login identities
+receive an explicit signup/link disposition; GitHub requires verified primary email
+and stable provider subject. Provider configuration only exposes availability.
+
+Magic-email GET displays confirmation; only the protected POST consumes the
+challenge. Signin/signup intent, expiry/replay, failed delivery revocation and
+rate limits are enforced. Actual delivery requires configured Resend/SMTP.
+Session logout revokes only the requesting device credential and clears its
+cookie; shared saved files and other clients remain intact. The UI obtains CSRF
+and clears identity only after successful logout; failures remain visible/retryable.
+
+Settings supplies Providers/API/Security/Account controls through the existing
+product UI. API tokens are shown once, stored as digests, revocable/expiring, and
+cannot perform sensitive browser-auth administration. Sensitive changes require
+recent session-bound reauthentication. Other Settings tabs report unavailability
+explicitly. Existing Help and Advanced navigation remain present.
+
+Normal local/CI command: `python -B scripts/build-check.py`. On this Mac select
+`~/.cleanhouse/runtime/python/bin/python3`; no automatic iCloud interpreter.
+The gate runs isolated auth/logout and store/provider/magic/Settings tests,
+protected surfaces, dependency checks, and gate controls with a temporary HOME.
+The generated wrapper emits an optional M4 witness after success, strips witness
+authority from children, and needs no running auth wizard. External M4 receipts
+remain outside the product. Full-server and live-provider acceptance are separate
+from this source gate; no remote protection or baseline is advanced.
+
+## Run 2 authentication acceptance — 2026-10-20
+
+- Product gate: PASS, 85 focused tests plus the 11-of-11 protected-surface
+  verifier.
+- CSRF: password signin fetches the auth CSRF token and sends it in
+  `X-CSRF-Token`; missing and forged values return 403/`CSRF_FAILED`.
+- Session lifecycle: isolated browser proof covered creation, reload
+  persistence, authenticated Settings state, independent logout/revocation, and
+  protected-route redirect after logout. Store tests cover rotation, expiry,
+  revocation, and multiple devices.
+- Magic and providers: focused tests cover intent, expiry, replay, delivery
+  failure revocation, GitHub PKCE/state, verified-primary-email enforcement,
+  and stable provider binding. No live email or GitHub transaction was claimed.
+- Settings boundaries: focused tests cover recent reauthentication, personal
+  token one-time display/digest storage/revocation/expiry, and rejection of API
+  tokens for sensitive browser-auth administration.
+- External evidence: canonical AUTH commit
+  `56c701ed3fc5af3c5215d11a603bb4dc76767645` returned VERIFIED in all seven
+  lanes. Altered input evidence, invalid binding, and missing spec are rejected.
+- Mutation sensitivity: removing the frontend CSRF header caused the ordinary
+  product gate to fail; restoration returned it to PASS. AUTH was not rerun for
+  that injected regression.
+- Runtime scope: disposable loopback server and hidden browser only. `/health`
+  passed; readiness truthfully remained false without Start supervision. Port
+  3333, staged files, existing databases, and existing sessions were untouched.
+
+Result: authentication source is locally complete and regression-sensitive.
+Safe controlled live activation is **NO** until the staged runtime is rebuilt,
+Start-supervised readiness is proven, and real email/GitHub provider acceptance
+is completed.
+
+## Disposable activation-package and recovery proof — 2026-10-20
+
+The bounded activation delta contains 24 runtime paths: the accepted Settings
+shell/assets plus the existing authentication backend, browser, recovery, and
+account surfaces. Canonical `launch_agent.stage_runtime` supplied the unchanged
+dependency closure (`access_control`, `models`, legal documents, and the
+owner-only Keychain helper). Advanced Monitor remained `/advanced` backed by
+`frontend/dashboard.html`; it was neither substituted for Settings nor included
+as a Settings implementation.
+
+Twenty-three activation paths were byte-identical from source to the disposable
+stage. `config/auth-runtime.json` was the only intentional transformation: its
+public/allowed origin was changed from canonical port 3333 to isolated loopback
+port 43345. The manifest SHA-256 was
+`4512207b1bfb78192d00381b4cb86f8af0680e11b3d8a26659ad7b4b67e7140e`.
+
+The staged app ran under `backend.runtime_supervisor supervise` with isolated
+HOME, runtime, data, auth database, origin, and port. `/health` and
+`/cleanhouse/status?ready=1` passed with operator readiness. Hidden-browser
+acceptance proved password/CSRF login, canonical protected product identity,
+Settings account/consent state, reload persistence, independent device logout,
+reauthenticated Settings API boundaries, and no console warnings or errors.
+Service restart returned to readiness while preserving the browser session,
+auth database, and a data sentinel. Atomic staged rollback restored the exact
+preimage sentinel while leaving runtime data intact.
+
+The ordinary 85-test build passed before and after the proving run. Canonical
+AUTH commit `56c701ed3fc5af3c5215d11a603bb4dc76767645` returned VERIFIED for all
+seven lanes with a bound candidate revision receipt. AUTH was not rerun to
+evaluate either injected mutation; it was rerun only after
+restoration and the permanent ordinary-gate repair. Removing the frontend CSRF header
+failed the ordinary gate. A first Settings-route substitution exposed a missing
+route-content assertion; the focused product-surface test was repaired, and the
+same substitution then failed the ordinary gate. Restoration returned the gate
+to PASS.
+
+The restricted Codex host could not let `runtime_supervisor stop` authenticate
+the disposable supervisor through `ps`, so the stop receipt retained
+`supervisor_pid_not_owned`; exact disposable PIDs were terminated separately.
+This is a sandbox observation, not live Start/launchd proof. Live port 3333,
+staged runtime, databases, sessions, browser windows, and provider configuration
+were untouched. Real email delivery and live GitHub acceptance remain external.

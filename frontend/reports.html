@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Reports - CleanHouse</title>
+<link rel="stylesheet" href="/css/product-pages.css?v=2">
+</head>
+<body>
+<div class="app-shell">
+    <aside class="liquid-sidebar" aria-label="CleanHouse navigation">
+        <a class="sidebar-brand-link" href="/overview" aria-label="Overview">
+            <img class="sidebar-brand" src="/assets/fourstars.svg" alt="">
+        </a>
+        <nav class="sidebar-nav" aria-label="Primary">
+            <a class="nav-link" href="/applications" aria-label="Applications" data-label="Applications">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h5v5H5z"/><path d="M14 5h5v5h-5z"/><path d="M5 14h5v5H5z"/><path d="M14 14h5v5h-5z"/></svg>
+            </a>
+            <a class="nav-link" href="/network" aria-label="Network" data-label="Network">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 18.75a6.75 6.75 0 1 0 0-13.5 6.75 6.75 0 0 0 0 13.5Z"/><path d="M5.75 9.5h12.5"/><path d="M5.75 14.5h12.5"/><path d="M12 5.25c1.75 1.7 2.55 3.95 2.55 6.75s-.8 5.05-2.55 6.75C10.25 17.05 9.45 14.8 9.45 12S10.25 6.95 12 5.25Z"/></svg>
+            </a>
+            <a class="nav-link" href="/files" aria-label="Files" data-label="Files">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.75 7.25h5.5l1.55 2h7.45v8.5h-14.5z"/><path d="M4.75 7.25v10.5"/></svg>
+            </a>
+            <a class="nav-link" href="/zaelith" aria-label="Zaelith" data-label="Zaelith">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.25 6.75h13.5v10.5H5.25z"/><path d="M8.25 10.25h7.5"/><path d="M8.25 13.25h4.5"/><path d="M7.25 19.25 9.5 17.25"/><path d="M16.75 19.25 14.5 17.25"/></svg>
+            </a>
+            <a class="nav-link" href="/identity" aria-label="Identity" data-label="Identity">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.75 18.25 7v4.6c0 3.8-2.55 6.15-6.25 7.65-3.7-1.5-6.25-3.85-6.25-7.65V7z"/><path d="M12 9.25a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z"/><path d="M8.75 16.25c.65-1.25 1.75-1.9 3.25-1.9s2.6.65 3.25 1.9"/></svg>
+            </a>
+            <a class="nav-link active" href="/reports" aria-label="Reports" data-label="Reports">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.25 4.75h7l2.5 2.5v12H7.25z"/><path d="M14.25 4.75v3h3"/><path d="M9.75 11.25h4.5"/><path d="M9.75 14.25h6"/><path d="M9.75 17.25h3.5"/></svg>
+            </a>
+        </nav>
+        <div class="sidebar-utility" aria-label="Utility">
+            <a class="advanced-entry" href="/help" aria-label="Help" data-label="Help">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.25"/><path d="M9.55 9.25a2.55 2.55 0 1 1 4.15 1.98c-.92.68-1.7 1.2-1.7 2.52"/><path d="M12 16.75h.01"/></svg>
+            </a>
+            <a class="advanced-entry" href="/advanced" aria-label="Advanced" data-label="Advanced">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.75A3.25 3.25 0 1 0 12 15.25 3.25 3.25 0 0 0 12 8.75Z"/><path d="M19.25 12a7.2 7.2 0 0 0-.1-1.2l2.1-1.55-2-3.45-2.45 1a7.65 7.65 0 0 0-2.05-1.2L14.45 3h-4.9l-.3 2.6A7.65 7.65 0 0 0 7.2 6.8l-2.45-1-2 3.45 2.1 1.55a7.2 7.2 0 0 0 0 2.4l-2.1 1.55 2 3.45 2.45-1a7.65 7.65 0 0 0 2.05 1.2l.3 2.6h4.9l.3-2.6a7.65 7.65 0 0 0 2.05-1.2l2.45 1 2-3.45-2.1-1.55c.07-.4.1-.8.1-1.2Z"/></svg>
+            </a>
+        </div>
+    </aside>
+
+    <main class="page-canvas">
+        <header class="page-head">
+            <h1>Reports</h1>
+            <button id="refresh-reports-btn" class="secondary-action" type="button">Refresh</button>
+        </header>
+
+        <section class="panel" aria-label="Report history workspace">
+            <div class="panel-head">
+                <div>
+                    <p class="section-kicker">History</p>
+                    <h2>Stored Reports</h2>
+                </div>
+                <select id="report-filter" aria-label="Report type filter">
+                    <option value="">All types</option>
+                    <option value="zaelith_audit">Zaelith audit</option>
+                    <option value="incident">Incident</option>
+                    <option value="login_summary">Login summary</option>
+                </select>
+            </div>
+            <div id="reports-list" class="report-grid">
+                <div class="empty-state">Loading reports...</div>
+            </div>
+        </section>
+    </main>
+</div>
+<script src="/js/click-trace.js?v=1"></script>
+<script src="/js/auth-state.js"></script>
+<script src="/js/protected-routes.js"></script>
+<script src="/js/api-client.js"></script>
+<script src="/js/reports.js?v=1"></script>
+</body>
+</html>

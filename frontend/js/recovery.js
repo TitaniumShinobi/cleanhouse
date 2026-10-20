@@ -2,8 +2,18 @@
   const error = document.getElementById('error-message');
   const success = document.getElementById('success-message');
   const show = (node, message) => { node.textContent = message; node.style.display = message ? 'block' : 'none'; };
+  let csrfToken = '';
+  const csrf = async () => {
+    if (csrfToken) return csrfToken;
+    const response = await fetch('/api/auth/csrf', { credentials: 'include', headers: { Accept: 'application/json' } });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.csrfToken) throw new Error(payload.message || 'Unable to initialize a protected request.');
+    csrfToken = payload.csrfToken;
+    return csrfToken;
+  };
   const post = async (path, body) => {
-    const response = await fetch(path, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, body: JSON.stringify(body) });
+    const token = await csrf();
+    const response = await fetch(path, { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'X-CSRF-Token': token }, body: JSON.stringify(body) });
     const payload = await response.json().catch(() => ({ success: false, message: 'Authentication response was not valid JSON.' }));
     if (!response.ok) throw new Error(payload.message || 'Request failed.');
     return payload;

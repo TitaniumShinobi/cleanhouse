@@ -2,7 +2,7 @@
   "schema": "cleanhouse.documents.file_index.v2",
   "generated_at": "2026-05-30T11:58:56Z",
   "hash_scope": "all files under documents/ excluding FILE_INDEX.json and FILE_INDEX.json.sha256",
-  "file_count": 286,
+  "file_count": 288,
   "files": [
     {
       "path": "00_start-here/INDEX.md",
@@ -11,18 +11,23 @@
     },
     {
       "path": "00_start-here/QUICK_START.md",
-      "bytes": 2282,
-      "sha256": "7dfbb266778b174ef5680cac090ec6ff86bed259aa7244e1cac3b7e8ed1da847"
+      "bytes": 2932,
+      "sha256": "517a6369660df7c730f3ccdfd5ee6457f5090375d0cc2faca5483eb1c17a072f"
     },
     {
       "path": "00_start-here/README.md",
-      "bytes": 11001,
-      "sha256": "b9c0f405eecd3c9acb8ae0d8f55ae01a2212c55fef4ddf315bdd1d982d9ea221"
+      "bytes": 11585,
+      "sha256": "886d55036d3e1d06ebecc612543fec780df9306f73610869680bbf7879b88ab2"
     },
     {
       "path": "00_start-here/canon-runtime-spine.md",
-      "bytes": 1765,
-      "sha256": "f50c552bd3ee46bdcacc8c30a2ee9bf854a54ba432976b361302fe1908e21211"
+      "bytes": 2700,
+      "sha256": "047c62a710dd2d2844314a8df95fd528cb60fd1615fc725ab6565bf64aaf3ffb"
+    },
+    {
+      "path": "00_start-here/cleanhouse-auth-continuity.md",
+      "bytes": 6458,
+      "sha256": "4b41274ea5f85545cb9adb83c3d28d58f6027cd6bbef47fb37e95d16d9e32ed7"
     },
     {
       "path": "00_start-here/product-board.md",
@@ -123,6 +128,11 @@
       "path": "20_validation/README.md",
       "bytes": 295,
       "sha256": "3b7c90d0e1697e4565fec1d6b4357a2a4c007a0a356d371cbda8875f1602e1e3"
+    },
+    {
+      "path": "20_validation/cleanhouse-auth-acceptance.md",
+      "bytes": 16180,
+      "sha256": "4c7c7fff00c96838a5cb0564b647666e6dafb6a0856f1ff7c3e98677583d781a"
     },
     {
       "path": "20_validation/avatar-regression/README.md",
@@ -736,23 +746,23 @@
     },
     {
       "path": "95_source-mirror/docs/auth/AUTHENTICATION_QUICK_REFERENCE.md",
-      "bytes": 6155,
-      "sha256": "5c651ae80bb780f5494cd7cfd538bb071fcc946a6bad5998c2ff809ab9c319d9"
+      "bytes": 6326,
+      "sha256": "159ee98cae3fc765f2ab63285bbed22cbdf171fb0763ea5c3280f40ae63fc1aa"
     },
     {
       "path": "95_source-mirror/docs/auth/AUTHENTICATION_SETUP_GUIDE.md",
-      "bytes": 35745,
-      "sha256": "4565620d55b3d9e7dfbad4bbb6ab97860035c4f12e73433d0f902b58349b0a0a"
+      "bytes": 35916,
+      "sha256": "d585e0dd948656ccf1d1875fb98953b093d3a5ffa5e4f88d53a29e91269d307d"
     },
     {
       "path": "95_source-mirror/docs/auth/AUTHENTICATION_SYSTEM.md",
-      "bytes": 4245,
-      "sha256": "f9663508c0951c487a2d7d07c5203deb7aa88520a3c4771b051a2b75e318a510"
+      "bytes": 1985,
+      "sha256": "c39840d3d23eb51198904238dda4b4124f9a0e433580d66663381ecaa153e448"
     },
     {
       "path": "95_source-mirror/docs/auth/AUTH_SETUP_PROMPT.md",
-      "bytes": 3006,
-      "sha256": "f66d1c9824cc009ac0aa73212396ca3f91e61a026a9c21fd70415e05d9be60d4"
+      "bytes": 3199,
+      "sha256": "8b10f071337f4c1ba89d025cff413252ece969b1acde1ee5d77876efa46c1976"
     },
     {
       "path": "95_source-mirror/docs/auth/EMAIL_VERIFICATION_SETUP.md",
@@ -1276,13 +1286,13 @@
     },
     {
       "path": "95_source-mirror/root/QUICK_START.md",
-      "bytes": 2282,
-      "sha256": "7dfbb266778b174ef5680cac090ec6ff86bed259aa7244e1cac3b7e8ed1da847"
+      "bytes": 3109,
+      "sha256": "2372e15b4e65822dd5ad871a4087f90b0b1655f7ecacdc71d39c32e6e8b5791e"
     },
     {
       "path": "95_source-mirror/root/README.md",
-      "bytes": 11001,
-      "sha256": "b9c0f405eecd3c9acb8ae0d8f55ae01a2212c55fef4ddf315bdd1d982d9ea221"
+      "bytes": 12176,
+      "sha256": "7da83db22df23c817f6070303bd8d6a565b7c9f6115a73d71247a15509bd8d90"
     },
     {
       "path": "95_source-mirror/root/RULES.md",

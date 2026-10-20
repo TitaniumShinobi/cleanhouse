@@ -36,6 +36,12 @@
                     >
                 </div>
 
+                <div class="form-group">
+                    <label for="delete-password">Current password</label>
+                    <input type="password" id="delete-password" autocomplete="current-password">
+                    <button type="button" class="oauth-btn" id="delete-email-reauth">Confirm by email instead</button>
+                </div>
+
                 <button type="submit" class="delete-account-button" id="delete-account-button">
                     Delete Account
                 </button>
@@ -46,7 +52,6 @@
         </section>
     </main>
 
-    <script src="/js/click-trace.js?v=1"></script>
     <script src="/js/auth-state.js?v=2"></script>
     <script src="/js/account-delete.js"></script>
 </body>

@@ -3,26 +3,27 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>CleanHouse Local Monitor</title>
+<title>CleanHouse Advanced Monitor</title>
 <link rel="stylesheet" href="/css/dashboard.css?v=1">
+<link rel="stylesheet" href="/css/settings.css?v=1">
 </head>
 <body>
 <header>
     <span class="logo-icon">CH</span>
-    <h1>CleanHouse Local Monitor</h1>
+    <h1>CleanHouse Advanced Monitor</h1>
     <div class="controls">
         <select id="session-select" onchange="onSessionChange()">
             <option value="">— Select session —</option>
         </select>
         <button onclick="refreshAll()">⟳ Refresh</button>
         <label>
-            <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+            <input type="checkbox" id="auto-refresh" onchange="toggleAutoRefresh()">
             Auto-refresh
         </label>
-        <a class="control-link" href="/investigations" title="Open investigation-first operator surface">Investigations</a>
+        <a class="control-link" href="/overview" title="Open CleanHouse overview">Overview</a>
         <a class="control-link" href="/account/delete" title="Manage local account deletion">Account</a>
         <button id="report-btn" onclick="openReportPanel()" title="Generate report for current session">⚑ Report</button>
-        <button onclick="openSettingsPanel()" title="Configure runtime settings">⚙ Settings</button>
+        <button id="settings-open-button" onclick="openSettingsPanel()" title="Open CleanHouse settings" aria-haspopup="dialog" aria-controls="settings-modal">⚙ Settings</button>
     </div>
 </header>
 
@@ -224,20 +225,28 @@
     </div>
 </div>
 
-<div id="settings-modal" class="modal-overlay" style="display:none">
-    <div class="modal-card modal-card-wide">
+<div id="settings-modal" class="modal-overlay settings-overlay" hidden>
+    <div class="modal-card modal-card-wide settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-describedby="settings-description">
         <div class="modal-header">
-            <span>⚙ Runtime Settings</span>
-            <button class="modal-close" onclick="closeSettingsPanel()">✕</button>
+            <div>
+                <span id="settings-title">⚙ CleanHouse Settings</span>
+                <p id="settings-description" class="settings-description">Manage this Mac's antivirus access and local controls.</p>
+            </div>
+            <button class="modal-close" type="button" onclick="closeSettingsPanel()" aria-label="Close settings">✕</button>
         </div>
-        <div class="modal-body" id="settings-body">
-            <p class="loading">Loading settings...</p>
+        <div class="settings-layout">
+            <nav id="settings-tabs" class="settings-tabs" role="tablist" aria-label="Settings sections"></nav>
+            <div class="modal-body settings-panel" id="settings-body" role="tabpanel" tabindex="0" aria-live="polite">
+                <p class="loading">Loading settings...</p>
+            </div>
         </div>
         <div class="modal-footer" id="settings-footer"></div>
     </div>
 </div>
 
+<script src="/js/click-trace.js?v=1"></script>
 <script src="/js/api-client.js?v=1"></script>
 <script src="/js/dashboard.js?v=1"></script>
+<script src="/js/settings.js?v=1"></script>
 </body>
 </html>

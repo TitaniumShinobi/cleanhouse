@@ -14,6 +14,7 @@ import os
 import secrets
 import logging
 import threading
+from urllib.parse import quote
 
 def _read_secret_key() -> str:
     """Load or create a local secret key for Flask session signing."""
@@ -40,20 +41,24 @@ def _read_secret_key() -> str:
 
 
 def _allowed_cors_origins():
-    local_patterns = [
-        r"^https?://localhost(:\d+)?$",
-        r"^https?://127\.0\.0\.1(:\d+)?$",
-        r"^https?://\[\:\:1\](:\d+)?$",
-    ]
+    # Cookies are same-site across loopback ports. Reflecting arbitrary local
+    # origins would let an unrelated local web service read antivirus data.
+    origins = {
+        "http://localhost:3333",
+        "http://127.0.0.1:3333",
+    }
+    configured = os.getenv("CLEANHOUSE_PUBLIC_ORIGIN", "").strip().rstrip("/")
+    if configured:
+        origins.add(configured)
 
     for env_name in ("CLEANHOUSE_ALLOWED_ORIGINS", "CLEANHOUSE_ALLOW_REMOTE_ORIGINS"):
         extra = os.getenv(env_name, "").strip()
         if extra:
-            local_patterns.extend(
+            origins.update(
                 value.strip() for value in extra.split(",") if value.strip()
             )
 
-    return local_patterns
+    return sorted(origins)
 
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 3333
@@ -68,6 +73,8 @@ class _QuietReadinessAccessFilter(logging.Filter):
         "HEAD /health",
         "GET /cleanhouse/status?ready=1",
         "HEAD /cleanhouse/status?ready=1",
+        "GET /cleanhouse/network?refresh=1",
+        "HEAD /cleanhouse/network?refresh=1",
     )
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -114,16 +121,17 @@ os.environ.setdefault("CLEANHOUSE_NATIVE_REMINDERS", "0")
 os.environ.setdefault("CLEANHOUSE_ACTIVE_CONTEXT_RESPONSE_NOTIFICATIONS", "1")
 os.environ.setdefault("CLEANHOUSE_ACTIVE_CONTEXT_FOLLOW", "1")
 
-from backend.api.cleanhouse import bp as cleanhouse_bp
-from backend import events as cleanhouse_events
-from backend import runtime_supervisor
-from backend import vvault_sync, wazuh_files
-from backend.network_runtime import (
+from backend.api.cleanhouse import (
+    bp as cleanhouse_bp,
     start_network_collector_service,
     start_network_history_service,
     stop_network_collector_service,
     stop_network_history_service,
 )
+from backend import events as cleanhouse_events
+from backend import runtime_supervisor
+from backend import wazuh_files
+from backend import vvault_sync
 
 app = Flask(__name__, static_folder=None)
 app.secret_key = _read_secret_key()
@@ -138,13 +146,14 @@ app.config['SESSION_COOKIE_NAME'] = "cleanhouse_session"
 app.config['SESSION_COOKIE_SECURE'] = os.getenv("CLEANHOUSE_SESSION_COOKIE_SECURE", "").lower() in {"1", "true", "yes", "on"}
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['MAX_CONTENT_LENGTH'] = 1024 * 1024
 
 CORS(
     app,
     resources={r"/*": {
         "origins": _allowed_cors_origins(),
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
+        "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-CSRF-Token", "X-CleanHouse-Reauth"],
     }},
 )
 
@@ -174,7 +183,19 @@ def _requires_login():
 
 
 def _has_cleanhouse_session():
-    return bool(session.get('user_id') or session.get('oauth_user'))
+    if not _auth_enabled():
+        return True
+    try:
+        from backend.api import auth as auth_api
+        from backend.auth_context import resolve_identity
+
+        return resolve_identity(
+            lambda user_id: auth_api.get_user_service().get_user_by_id(user_id=str(user_id)),
+            auth_api.user_has_current_consent,
+        )
+    except Exception:
+        logging.exception("CleanHouse request identity could not be resolved")
+        return None
 
 
 if _auth_enabled():
@@ -209,6 +230,12 @@ def account_recovery():
 def password_reset():
     return send_from_directory(str(FRONTEND_DIR), 'password-reset.html')
 
+
+@app.route('/magic')
+def magic_confirmation():
+    """Render the explicit POST confirmation for a magic-email challenge."""
+    return send_from_directory(str(FRONTEND_DIR), 'magic.html')
+
 @app.route('/account/delete')
 def account_delete():
     """Serve official account deletion page."""
@@ -233,15 +260,56 @@ def legal_eeccd():
     return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/markdown; charset=utf-8"}
 
 @app.route('/dashboard')
-def dashboard():
-    """Serve monitoring dashboard"""
+def dashboard_redirect():
+    """Legacy dashboard URL; keep compatibility while routing to Advanced."""
+    return redirect('/advanced', code=302)
+
+@app.route('/advanced')
+def advanced():
+    """Serve the internal advanced monitor."""
     return send_from_directory(str(FRONTEND_DIR), 'dashboard.html')
+
+
+@app.route('/settings')
+def settings():
+    """Deep-link to the single local Settings modal."""
+    return send_from_directory(str(FRONTEND_DIR), 'investigations.html')
 
 @app.route('/overview')
 @app.route('/investigations')
 def investigations():
-    """Serve investigation-first operator surface"""
+    """Serve the operator-facing security overview."""
     return send_from_directory(str(FRONTEND_DIR), 'investigations.html')
+
+@app.route('/zaelith')
+def zaelith():
+    """Serve the Zaelith conversation audit surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'zaelith.html')
+
+@app.route('/zaelith/connect')
+def zaelith_connect():
+    """Serve the temporary Zaelith provider connection surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'zaelith-connect.html')
+
+@app.route('/identity')
+def identity():
+    """Serve the identity monitoring surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'identity.html')
+
+@app.route('/reports')
+def reports():
+    """Serve the report history surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'reports.html')
+
+@app.route('/allowed-threats')
+def allowed_threats():
+    """Serve the allowed threats surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'allowed-threats.html')
+
+@app.route('/help')
+def help_page():
+    """Serve the troubleshooting and support surface."""
+    return send_from_directory(str(FRONTEND_DIR), 'help.html')
 
 @app.route('/applications')
 @app.route('/applications/<path:_app_id>')
@@ -285,7 +353,6 @@ def _require_auth_for_app_pages():
 
     public_prefixes = (
         '/api/auth',
-        '/cleanhouse/',
         '/assets/',
         '/css/',
         '/js/',
@@ -297,14 +364,60 @@ def _require_auth_for_app_pages():
         '/signup',
         '/account-recovery',
         '/password-reset',
+        '/magic',
         '/health',
         '/favicon.ico',
     }
+    if request.path == '/cleanhouse/status' and request.args.get('ready') == '1':
+        return None
     if request.path in public_paths or any(request.path.startswith(prefix) for prefix in public_prefixes):
         return None
-    if _has_cleanhouse_session():
+    identity = _has_cleanhouse_session()
+    if identity:
+        if request.path == '/settings':
+            return None
+        if not identity.consent_current:
+            if request.path.startswith('/cleanhouse/') or request.path.startswith('/api/') or request.path.startswith('/events'):
+                return jsonify({
+                    'success': False,
+                    'code': 'consent_required',
+                    'message': 'Current legal consent is required before antivirus access.',
+                }), 428
+            requested_path = request.full_path[:-1] if request.full_path.endswith('?') else request.full_path
+            return redirect(
+                '/settings?tab=account&consent=required&return_to=' + quote(requested_path, safe=''),
+                code=302,
+            )
+        if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'} and identity.kind == 'session':
+            from backend.auth_context import cookie_mutation_allowed
+
+            if not cookie_mutation_allowed():
+                return jsonify({
+                    'success': False,
+                    'code': 'csrf_failed',
+                    'message': 'Exact local origin and CSRF verification are required.',
+                }), 403
         return None
+    if request.path.startswith('/cleanhouse/') or request.path.startswith('/api/') or request.path.startswith('/events'):
+        return jsonify({
+            'success': False,
+            'code': 'authentication_required',
+            'message': 'Authentication is required.',
+        }), 401
     return redirect('/login', code=302)
+
+
+@app.after_request
+def _finalize_auth_response(response):
+    if not _auth_enabled():
+        return response
+    try:
+        from backend.auth_context import finalize_response
+
+        return finalize_response(response)
+    except Exception:
+        logging.exception("CleanHouse session response finalization failed")
+        return response
 
 
 _EVENTS_SERVICES_STARTED = False
@@ -340,6 +453,44 @@ def _wait_for_listener_ready(host: str, port: int, timeout_seconds: float) -> bo
     return False
 
 
+def _bounded_warmup_step(name, callback, timeout_seconds: float = 15.0):
+    """Run an optional integration without letting it hold startup forever."""
+    result = {}
+    finished = threading.Event()
+
+    def run():
+        try:
+            result["value"] = callback()
+        except BaseException as exc:
+            result["error"] = exc
+        finally:
+            finished.set()
+
+    threading.Thread(
+        target=run,
+        name=f"cleanhouse-warmup-{name}",
+        daemon=True,
+    ).start()
+    if not finished.wait(max(0.1, float(timeout_seconds))):
+        raise TimeoutError(f"{name} startup exceeded {timeout_seconds:g} seconds")
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+def _network_collector_autostart_enabled() -> bool:
+    """Keep high-volume packet capture opt-in during application startup."""
+    return os.getenv("CLEANHOUSE_NETWORK_COLLECTOR_AUTOSTART", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _network_history_autostart_enabled() -> bool:
+    return os.getenv("CLEANHOUSE_NETWORK_HISTORY_ENABLED", "0").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
 def _start_events_services():
     global _EVENTS_SERVICES_STARTED
     if _EVENTS_SERVICES_STARTED:
@@ -350,11 +501,12 @@ def _start_events_services():
     failure_reasons: list[str] = []
     warmup_details: dict[str, object] = {
         "events_db": {"status": "pending"},
+        "event_writer": {"status": "pending"},
         "filesystem_watcher": {"status": "pending"},
-        "files_preservation": {"status": "pending"},
         "wazuh_files": {"status": "pending"},
-        "network_history": {"status": "pending"},
+        "files_preservation": {"status": "pending"},
         "network_collector": {"status": "pending"},
+        "network_history": {"status": "pending"},
         "heartbeat": {"status": "pending"},
     }
 
@@ -393,6 +545,14 @@ def _start_events_services():
         warmup_details["events_db"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
         logging.warning("cleanhouse events db not initialized: %s", exc)
     try:
+        writer_status = cleanhouse_events.start_event_writer()
+        warmup_details["event_writer"] = writer_status
+        if writer_status.get("status") != "running":
+            logging.warning("cleanhouse event writer did not enter running state")
+    except Exception as exc:
+        warmup_details["event_writer"] = {"status": "failed", "error": exc.__class__.__name__}
+        logging.warning("cleanhouse event writer not started: %s", exc.__class__.__name__)
+    try:
         watcher_status = cleanhouse_events.start_watcher()
         warmup_details["filesystem_watcher"] = watcher_status
         if watcher_status.get("status") != "running":
@@ -402,19 +562,8 @@ def _start_events_services():
         warmup_details["filesystem_watcher"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
         logging.warning("cleanhouse filesystem watcher not started: %s", exc)
     try:
-        warmup_details["files_preservation"] = vvault_sync.start_service(surface="files")
+        warmup_details["wazuh_files"] = _bounded_warmup_step("wazuh-files", wazuh_files.start_service)
     except Exception as exc:
-        warmup_details["files_preservation"] = {
-            "status": "degraded",
-            "reason_code": "files_preservation_start_failed",
-            "error": exc.__class__.__name__,
-        }
-        logging.warning("cleanhouse Files preservation not started: %s", exc.__class__.__name__)
-    try:
-        warmup_details["wazuh_files"] = wazuh_files.start_service()
-    except Exception as exc:
-        # Wazuh is an optional external evidence provider. Its failure must be
-        # visible without blocking the local CleanHouse runtime from warming.
         warmup_details["wazuh_files"] = {
             "status": "degraded",
             "reason_code": "wazuh_files_start_failed",
@@ -422,35 +571,52 @@ def _start_events_services():
         }
         logging.warning("cleanhouse Wazuh Files collector not started: %s", exc.__class__.__name__)
     try:
-        history_status = start_network_history_service()
-        warmup_details["network_history"] = history_status
-        if history_status.get("status") != "running":
-            failure_reasons.append("network_history_unavailable")
+        warmup_details["files_preservation"] = _bounded_warmup_step(
+            "files-preservation",
+            lambda: vvault_sync.start_service(surface="files"),
+        )
     except Exception as exc:
-        failure_reasons.append("network_history_start_failed")
-        warmup_details["network_history"] = {
-            "status": "failed",
-            "error": str(exc) or exc.__class__.__name__,
+        warmup_details["files_preservation"] = {
+            "status": "degraded",
+            "reason_code": "files_preservation_start_failed",
+            "error": exc.__class__.__name__,
         }
-        logging.warning("cleanhouse network history not started: %s", exc)
-    try:
-        collector_status = start_network_collector_service()
-        warmup_details["network_collector"] = collector_status
-        if collector_status.get("status") != "running":
-            collector_reason = str(collector_status.get("reason_code") or "")
-            if collector_reason == "capture_engine_unavailable":
-                failure_reasons.append("network_capture_engine_unavailable")
-            elif collector_reason == "capture_start_timeout":
-                failure_reasons.append("network_collector_start_timeout")
-            else:
-                failure_reasons.append("network_collector_unavailable")
-    except Exception as exc:
-        failure_reasons.append("network_collector_start_failed")
+        logging.warning("cleanhouse Files OVVAULTS sync not started: %s", exc.__class__.__name__)
+    if not _network_collector_autostart_enabled():
         warmup_details["network_collector"] = {
-            "status": "failed",
-            "error": str(exc) or exc.__class__.__name__,
+            "status": "deferred",
+            "reason_code": "startup_capture_deferred",
+            "runtime_impact": "none",
         }
-        logging.warning("cleanhouse network collector not started: %s", exc)
+    else:
+        try:
+            collector_status = _bounded_warmup_step("network-collector", start_network_collector_service)
+            if collector_status.get("status") != "running":
+                collector_status = {
+                    **collector_status,
+                    "runtime_impact": "subsystem_degraded",
+                }
+            warmup_details["network_collector"] = collector_status
+        except Exception as exc:
+            failure_reasons.append("network_collector_start_failed")
+            warmup_details["network_collector"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
+            logging.warning("cleanhouse network collector not started: %s", exc)
+    if not _network_history_autostart_enabled():
+        warmup_details["network_history"] = {
+            "status": "deferred",
+            "reason_code": "startup_history_deferred",
+            "runtime_impact": "none",
+        }
+    else:
+        try:
+            warmup_details["network_history"] = _bounded_warmup_step(
+                "network-history",
+                start_network_history_service,
+            ) or {"status": "ok"}
+        except Exception as exc:
+            failure_reasons.append("network_history_start_failed")
+            warmup_details["network_history"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
+            logging.warning("cleanhouse network history not started: %s", exc)
     try:
         _start_runtime_heartbeat()
         warmup_details["heartbeat"] = {"status": "ok"}
@@ -501,7 +667,7 @@ def _stop_events_services() -> None:
     try:
         stop_network_history_service()
     except Exception as exc:  # pragma: no cover
-        logging.warning("cleanhouse network history not stopped cleanly: %s", exc)
+        logging.warning("cleanhouse network history service not stopped cleanly: %s", exc)
     try:
         cleanhouse_events.stop_events_services()
     except Exception as exc:  # pragma: no cover
@@ -531,4 +697,9 @@ if __name__ == '__main__':
         port=_cleanhouse_port(),
         debug=False,
         threaded=True,
+        # Runtime configuration is loaded through the bounded CleanHouse
+        # loader above. Flask's implicit dotenv pass can reach back into the
+        # iCloud source checkout from the staged LaunchAgent runtime and must
+        # not make an otherwise healthy backend crash-loop.
+        load_dotenv=False,
     )

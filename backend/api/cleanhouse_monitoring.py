@@ -1030,6 +1030,7 @@ class SessionReport:
     context: str
     receipt: Dict[str, Any]
     evidence_links: tuple[str, ...]
+    concern_letter: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -1043,6 +1044,7 @@ class SessionReport:
             "context": self.context,
             "receipt": self.receipt,
             "evidence_links": list(self.evidence_links),
+            "concern_letter": self.concern_letter,
             "metadata": self.metadata,
         }
 
@@ -14468,6 +14470,25 @@ class CleanHouseMonitoringAdapter:
                     records.setdefault(report_id, payload)
         return sorted(records.values(), key=lambda r: r.get("timestamp", ""), reverse=True)
 
+    def get_report(self, report_id: str) -> Dict[str, Any]:
+        stable_report_id = str(report_id or "").strip()
+        if not stable_report_id:
+            return {"status": "error", "message": "report_id required"}
+        if "/" in stable_report_id or "\\" in stable_report_id:
+            return {"status": "error", "message": "report_id format is invalid"}
+        with self._lock:
+            report = self._reports.get(stable_report_id)
+        if report is not None:
+            return {"status": "ok", **report.to_dict()}
+        if self.persistence_enabled:
+            artifact = PersistenceBackend.read("report", stable_report_id)
+            payload = artifact.get("data", {}) if isinstance(artifact, dict) else {}
+            if isinstance(payload, dict) and payload.get("id") == stable_report_id:
+                payload = copy.deepcopy(payload)
+                payload.setdefault("status", "ok")
+                return payload
+        return {"status": "not_found", "message": f"report not found: {stable_report_id}"}
+
     def _login_report_event_window(
         self,
         *,
@@ -14764,6 +14785,93 @@ class CleanHouseMonitoringAdapter:
             "receipt": receipt_result,
             "evidence_links": list(evidence_links),
             "integrity": receipt_result.get("integrity", {}),
+        }
+        if self.persistence_enabled:
+            pr = PersistenceBackend.persist("report", report.id, result)
+            if pr["status"] != "ok":
+                result["persistence_warning"] = pr["message"]
+        return result
+
+    def build_zaelith_report(
+        self,
+        *,
+        analysis: Dict[str, Any],
+        prompt: str = "",
+        response: str = "",
+        source: str = "zaelith-page",
+    ) -> Dict[str, Any]:
+        summary = analysis.get("summary") if isinstance(analysis.get("summary"), dict) else {}
+        raw_report = analysis.get("zaelith_report") if isinstance(analysis.get("zaelith_report"), dict) else {}
+        risk_level = str(analysis.get("risk_level") or "unknown")
+        confidence = str(summary.get("analysis_confidence") or "unknown")
+        grade = str(summary.get("grade") or "unknown")
+        triggered = int(summary.get("triggered_indicators") or 0)
+        total = int(summary.get("total_indicators") or 0)
+        now = _now_iso()
+        report_id = f"report:{_fingerprint('zaelith_audit', source, risk_level, confidence, grade, now)}"
+        report_session_id = f"zaelith:{_fingerprint(report_id, source)}"
+        triggered_names = [
+            str(name)
+            for name, details in raw_report.items()
+            if isinstance(details, dict) and details.get("triggered")
+        ]
+        evidence_links = tuple(
+            f"local://cleanhouse/zaelith/{report_id}/indicator/{_fingerprint(name)}"
+            for name in triggered_names[:10]
+        )
+        summary_text = (
+            f"Zaelith audit completed: {risk_level} risk, {triggered} of {total} indicator(s), "
+            f"{confidence} confidence."
+        )
+        receipt_result = {
+            "id": f"receipt:{_fingerprint(report_id, 'zaelith')}",
+            "session_id": report_session_id,
+            "timestamp": now,
+            "summary": {
+                "text": summary_text,
+                "risk_level": risk_level,
+                "confidence": confidence,
+                "grade": grade,
+                "triggered_indicators": triggered,
+                "total_indicators": total,
+            },
+            "metadata": {
+                "source": source,
+                "report_family": "zaelith_audit",
+                "prompt_preview": prompt[:240],
+                "response_preview": response[:240],
+                "full_text_retained": False,
+            },
+            "gaps": [],
+            "integrity": {
+                "receipt_hash": _fingerprint(report_id, risk_level, confidence, grade, str(triggered)),
+            },
+        }
+        metadata = {
+            "template": "zaelith_audit_report_v1",
+            "synthesis_role": "conversation_audit",
+            "evidence_boundary": "Full submitted text is analyzed in request scope but not retained in the report record.",
+            "triggered_indicators": triggered_names[:20],
+        }
+        report = SessionReport(
+            id=report_id,
+            session_id=report_session_id,
+            timestamp=now,
+            report_type="zaelith_audit",
+            contact="",
+            target="Zaelith",
+            context=summary_text,
+            receipt=receipt_result,
+            evidence_links=evidence_links,
+            concern_letter={},
+            metadata=metadata,
+        )
+        with self._lock:
+            self._reports[report.id] = report
+        result = {
+            "status": "ok",
+            **report.to_dict(),
+            "integrity": receipt_result["integrity"],
         }
         if self.persistence_enabled:
             pr = PersistenceBackend.persist("report", report.id, result)

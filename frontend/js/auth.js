@@ -171,13 +171,27 @@
 		                let turnstileToken = '';
 		                let turnstileWidgetId = null;
 		                let turnstileScriptLoading = false;
+		                let authCsrfToken = '';
+
+		                async function ensureAuthCsrf() {
+		                    if (authCsrfToken) return authCsrfToken;
+		                    const response = await fetch(`${AUTH_BASE_PATH}/csrf`, {
+		                        credentials: 'include', headers: { 'Accept': 'application/json' },
+		                    });
+		                    const payload = await response.json();
+		                    authCsrfToken = payload.csrfToken || '';
+		                    if (!response.ok || !authCsrfToken) throw new Error('Local CSRF initialization failed.');
+		                    return authCsrfToken;
+		                }
 
 		                async function postAuth(path, payload) {
+	                    const csrf = await ensureAuthCsrf();
 	                    const response = await fetch(`${AUTH_BASE_PATH}${path}`, {
 	                        method: 'POST',
 	                        headers: {
 	                            'Content-Type': 'application/json',
 	                            'Accept': 'application/json',
+	                            'X-CSRF-Token': csrf,
 	                        },
 	                        credentials: 'include',
 	                        body: JSON.stringify(payload),
@@ -418,6 +432,22 @@
 		                        showOAuthLoading(false);
 		                        return true;
 		                    }
+		                    if (document.getElementById('signupForm')) {
+		                        void postAuth(`/oauth/${encodeURIComponent(provider)}?intent=signup`, {
+		                            consent: consentPayload(),
+		                            turnstileToken,
+		                        }).then((result) => {
+		                            const target = result.authorization_url;
+		                            if (!target || !/^https:\/\/(github\.com|accounts\.google\.com)\//.test(target)) {
+		                                throw new Error(result.message || 'Provider signup could not be started.');
+		                            }
+		                            window.location.assign(target);
+		                        }).catch((error) => {
+		                            showOAuthLoading(false);
+		                            showError(error.message || 'Provider signup could not be started.');
+		                        });
+		                        return true;
+		                    }
 		                    if (window.pywebview && window.pywebview.api) {
 		                        return null;
 		                    }
@@ -492,6 +522,32 @@
 	                        showLoading(false);
 	                    }
 		                });
+		                }
+
+		                const magicButton = document.getElementById('magic-email-btn');
+		                if (magicButton) {
+		                    magicButton.addEventListener('click', async () => {
+		                        const signup = Boolean(document.getElementById('signupForm'));
+		                        const email = document.getElementById('email')?.value.trim() || '';
+		                        if (!email) return showError('Enter your email address first.');
+		                        if (signup && !validateSignupRequirements()) return;
+		                        showLoading(true);
+		                        try {
+		                            const result = await postAuth('/magic/request', {
+		                                email,
+		                                intent: signup ? 'signup' : 'signin',
+		                                fullName: document.getElementById('fullName')?.value.trim() || '',
+		                                consent: signup ? consentPayload() : undefined,
+		                                turnstileToken: signup ? turnstileToken : undefined,
+		                            });
+		                            if (!result.success) throw new Error(result.message || 'Magic email could not be requested.');
+		                            showSuccess(result.message);
+		                        } catch (error) {
+		                            showError(error.message || 'Magic email could not be requested.');
+		                        } finally {
+		                            showLoading(false);
+		                        }
+		                    });
 		                }
 
 		                const signupForm = document.getElementById('signupForm');

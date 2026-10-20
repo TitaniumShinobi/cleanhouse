@@ -1,12 +1,11 @@
 /**
  * Authentication State Management
- * Handles user authentication state, token management, and protected route access
+ * Handles opaque device-session state and protected route access.
  */
 
 class AuthState {
     constructor() {
         this.user = null;
-        this.token = null;
         this.initialized = false;
         this.ready = null;
     }
@@ -16,15 +15,15 @@ class AuthState {
      */
     init() {
         if (this.ready) return this.ready;
-        this.ready = this.verifyToken();
+        this.ready = this.verifySession();
         this.initialized = true;
         return this.ready;
     }
     
     /**
-     * Verify JWT token is still valid
+     * Verify the HttpOnly device session through the canonical identity route.
      */
-    async verifyToken() {
+    async verifySession() {
         try {
             const response = await fetch('/api/auth/me', {
                 credentials: 'include',
@@ -39,10 +38,10 @@ class AuthState {
                 }
             }
         } catch (error) {
-            console.error('[AUTH] Token verification failed:', error);
+            console.error('[AUTH] Session verification failed:', error);
         }
         
-        // Token invalid or expired
+        // Session invalid or expired.
         this.clear();
         return false;
     }
@@ -62,18 +61,10 @@ class AuthState {
     }
     
     /**
-     * Get auth token
+     * Update the in-memory user projection after a server-authenticated flow.
      */
-    getToken() {
-        return this.token;
-    }
-    
-    /**
-     * Set authenticated user
-     */
-    setUser(user, token) {
+    setUser(user) {
         this.user = user;
-        this.token = null;
     }
     
     /**
@@ -81,22 +72,25 @@ class AuthState {
      */
     clear() {
         this.user = null;
-        this.token = null;
     }
     
     /**
      * Logout user
      */
     async logout() {
-        try {
-            await fetch('/api/auth/logout', {
-                method: 'POST',
-                credentials: 'include'
-            });
-        } catch (error) {
-            console.error('[AUTH] Logout error:', error);
-        }
-        
+        const csrfResponse = await fetch('/api/auth/csrf', {
+            credentials: 'include', headers: { 'Accept': 'application/json' }
+        });
+        if (!csrfResponse.ok) throw new Error('Sign out failed. Try again.');
+        const csrfPayload = await csrfResponse.json();
+        const response = await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'X-CSRF-Token': csrfPayload.csrfToken || '' }
+        });
+        if (!response.ok) throw new Error('Sign out failed. Try again.');
+        const result = await response.json();
+        if (result.success !== true) throw new Error('Sign out failed. Try again.');
         this.clear();
     }
 }

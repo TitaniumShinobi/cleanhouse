@@ -21,8 +21,69 @@ function cleanHouseHttpOrigin() {
 
 const CLEANHOUSE_HTTP_ORIGIN = cleanHouseHttpOrigin();
 const API_BASE_URL = IS_PYWEBVIEW ? null : `${CLEANHOUSE_HTTP_ORIGIN}/api`;
+const LOW_PROCESSING_RECEIPT_LIMIT = 5;
+const CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS = 1800;
+const CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS = 3500;
+
+// All cookie-authenticated antivirus mutations share one CSRF path. Keeping
+// this at the HTTP boundary prevents individual product surfaces from silently
+// omitting protection as new controls are added.
+if (typeof window !== 'undefined' && typeof window.fetch === 'function') {
+    const nativeFetch = window.fetch.bind(window);
+    let csrfPromise = null;
+    async function productCsrfToken() {
+        if (!csrfPromise) {
+            csrfPromise = nativeFetch(`${CLEANHOUSE_HTTP_ORIGIN}/api/auth/csrf`, {
+                credentials: 'include', headers: { Accept: 'application/json' },
+            }).then(async response => {
+                const payload = await response.json();
+                if (!response.ok || !payload.csrfToken) throw new Error('CleanHouse CSRF initialization failed');
+                return payload.csrfToken;
+            }).catch(error => { csrfPromise = null; throw error; });
+        }
+        return csrfPromise;
+    }
+    window.fetch = async function cleanHouseProtectedFetch(input, options) {
+        const init = Object.assign({}, options || {});
+        const target = new URL(typeof input === 'string' ? input : input.url, window.location.href);
+        const method = String(init.method || 'GET').toUpperCase();
+        if (target.origin === window.location.origin) {
+            init.credentials = init.credentials || 'include';
+            if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && target.pathname.startsWith('/cleanhouse/')) {
+                init.headers = Object.assign({}, init.headers || {}, { 'X-CSRF-Token': await productCsrfToken() });
+            }
+        }
+        return nativeFetch(input, init);
+    };
+}
 
 console.log('[API] Environment detected:', IS_PYWEBVIEW ? 'pywebview (desktop)' : 'browser (web)');
+
+async function fetchJson(url, options = {}, timeoutMs = CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS) {
+    const decode = async response => {
+        const payload = await response.json();
+        if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+            payload.__http_status = response.status;
+        }
+        return payload;
+    };
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || typeof AbortController === 'undefined') {
+        const response = await fetch(url, options);
+        return await decode(response);
+    }
+    if (options.signal) {
+        const response = await fetch(url, options);
+        return await decode(response);
+    }
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        return await decode(response);
+    } finally {
+        window.clearTimeout(timeout);
+    }
+}
 
 /**
  * API Client - routes calls to pywebview or HTTP fetch
@@ -195,6 +256,38 @@ const API = {
         }
     },
 
+    async getReport(reportId) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/reports/${encodeURIComponent(reportId)}`);
+        return await response.json();
+    },
+
+    async analyzeZaelithText(text, prompt = '', source = 'zaelith-page') {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/zaelith/analyze`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, prompt, source })
+        });
+        return await response.json();
+    },
+
+    async listConnectedAccounts() {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/accounts`);
+        return await response.json();
+    },
+
+    async startAccountConnect(provider, connectionMethod, consentVersion = 'v1') {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/accounts/connect/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                provider,
+                connection_method: connectionMethod,
+                consent_version: consentVersion,
+            })
+        });
+        return await response.json();
+    },
+
     async buildLoginReport(userId = '', email = '', previousLoginAt = null, currentLoginAt = null, trigger = 'dashboard') {
         const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/login-report`, {
             method: 'POST',
@@ -239,8 +332,52 @@ const API = {
      * Get latest filesystem events
      */
     async getEvents(limit = 100) {
-        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/events?limit=${encodeURIComponent(limit)}`);
-        return await response.json();
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/events?limit=${encodeURIComponent(limit)}`,
+            {},
+            CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS
+        );
+    },
+
+    async getFilesSnapshot(limit = 200) {
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/files/snapshot?limit=${encodeURIComponent(limit)}`,
+            {},
+            CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS
+        );
+    },
+
+    getFilesLiveUrl(after = '') {
+        const query = after ? `?after=${encodeURIComponent(after)}` : '';
+        return `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/files/live${query}`;
+    },
+
+    async reconcileFiles() {
+        return await fetchJson(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/files/reconcile`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+        }, CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS);
+    },
+
+    async queueFileMediation(payload) {
+        return await fetchJson(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/files/mediations`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {}),
+        }, CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS);
+    },
+
+    async transitionFileMediation(mediationId, status) {
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/files/mediations/${encodeURIComponent(mediationId)}/transition`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status }),
+            },
+            CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS
+        );
     },
 
     /**
@@ -248,13 +385,19 @@ const API = {
      */
     async getStatus(refresh = false) {
         const suffix = refresh ? '?refresh=1' : '';
-        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/status${suffix}`);
-        return await response.json();
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/status${suffix}`,
+            {},
+            refresh ? CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS : CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS
+        );
     },
 
     async getRuntime() {
-        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/runtime`);
-        return await response.json();
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/runtime`,
+            {},
+            CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS
+        );
     },
 
     async getTaskManager(refresh = false) {
@@ -330,6 +473,94 @@ const API = {
         return await response.json();
     },
 
+    async getEvidenceContext({ surface = null, entityId = null, sourceView = null, ref = null } = {}) {
+        const params = new URLSearchParams();
+        if (ref) {
+            params.set('ref', String(ref));
+        } else {
+            if (surface) params.set('surface', surface);
+            if (entityId) params.set('entity_id', String(entityId));
+        }
+        if (sourceView) params.set('source_view', sourceView);
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/evidence/context${suffix}`);
+        return await response.json();
+    },
+
+    async getEvidenceActions({ surface = null, entityId = null, sourceView = null, ref = null } = {}) {
+        const params = new URLSearchParams();
+        if (ref) {
+            params.set('ref', String(ref));
+        } else {
+            if (surface) params.set('surface', surface);
+            if (entityId) params.set('entity_id', String(entityId));
+        }
+        if (sourceView) params.set('source_view', sourceView);
+        const suffix = params.toString() ? `?${params.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/evidence/actions${suffix}`);
+        return await response.json();
+    },
+
+    async recordEvidenceAction({
+        surface = null,
+        entityId = null,
+        sourceView = null,
+        ref = null,
+        actionId = null,
+        invoker = 'operator',
+        role = 'viewer',
+        actionOrigin = null,
+        subject = null,
+        selectionReceipt = null,
+        evidenceLinks = null,
+        insightPayload = null,
+        scanPayload = null,
+        createReport = false,
+        actionRequestId = null,
+    } = {}) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/evidence/actions`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                surface,
+                entity_id: entityId,
+                source_view: sourceView,
+                ref,
+                action_id: actionId,
+                invoker,
+                role,
+                action_origin: actionOrigin,
+                subject,
+                selection_receipt: selectionReceipt,
+                evidence_links: evidenceLinks,
+                insight_payload: insightPayload,
+                scan_payload: scanPayload,
+                create_report: createReport,
+                action_request_id: actionRequestId,
+            }),
+        });
+        return await response.json();
+    },
+
+    async requestEvidenceInsight({ evidenceKey = null, sourceView = null, invoker = 'operator', role = 'Insight', evidenceContext = null } = {}) {
+        const key = String(evidenceKey || '').trim();
+        const route = key
+            ? `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/evidence/${encodeURIComponent(key)}/roles/insight`
+            : `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/evidence/roles/insight`;
+        const response = await fetch(route, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                evidence_key: key,
+                source_view: sourceView,
+                invoker,
+                role,
+                evidence_context: evidenceContext,
+            }),
+        });
+        return await response.json();
+    },
+
     async getCollectorManifest(refresh = false) {
         const status = await this.getStatus(refresh);
         const data = status?.data || {};
@@ -386,9 +617,12 @@ const API = {
     /**
      * Get receipts, optionally filtered by session_id
      */
-    async getReceipts(sessionId = null) {
-        const params = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : '';
-        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/receipts${params}`);
+    async getReceipts(sessionId = null, limit = LOW_PROCESSING_RECEIPT_LIMIT) {
+        const params = new URLSearchParams();
+        if (sessionId) params.set('session_id', sessionId);
+        params.set('limit', String(limit));
+        const query = params.toString() ? `?${params.toString()}` : '';
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/receipts${query}`);
         return await response.json();
     },
 
@@ -568,16 +802,22 @@ const API = {
         const query = new URLSearchParams();
         if (refresh) query.set('refresh', '1');
         const params = query.toString() ? `?${query.toString()}` : '';
-        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/processes${params}`);
-        return await response.json();
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/processes${params}`,
+            {},
+            refresh ? CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS : CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS
+        );
     },
 
     async getApplications(refresh = false) {
         const query = new URLSearchParams();
         if (refresh) query.set('refresh', '1');
         const params = query.toString() ? `?${query.toString()}` : '';
-        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/applications${params}`);
-        return await response.json();
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/applications${params}`,
+            {},
+            refresh ? CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS : CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS
+        );
     },
 
     async runSystemScan() {
@@ -589,17 +829,72 @@ const API = {
         return await response.json();
     },
 
-    async getWiresharkStatus() {
-        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/network/wireshark`);
+    async getAllowedThreats() {
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/allowed-threats`,
+            {},
+            CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS
+        );
+    },
+
+    async createAllowedThreat(payload) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/allowed-threats`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload || {})
+        });
         return await response.json();
     },
 
-    async getNetwork(refresh = false) {
-        const query = new URLSearchParams();
-        if (refresh) query.set('refresh', '1');
-        const params = query.toString() ? `?${query.toString()}` : '';
-        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/network${params}`);
+    async deleteAllowedThreat(allowedId) {
+        const response = await fetch(`${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/allowed-threats/${encodeURIComponent(allowedId)}`, {
+            method: 'DELETE'
+        });
         return await response.json();
+    },
+
+    async getNetwork(options = false) {
+        const normalized = typeof options === 'object' && options !== null
+            ? options
+            : { refresh: Boolean(options) };
+        const refresh = Boolean(normalized.refresh);
+        const snapshot = Boolean(normalized.snapshot);
+        const requireVvault = Boolean(normalized.requireVvault);
+        const query = new URLSearchParams();
+        if (snapshot) query.set('snapshot', '1');
+        if (refresh) query.set('refresh', '1');
+        if (requireVvault) query.set('require_vvault', '1');
+        if (refresh) query.set('_', String(Date.now()));
+        const params = query.toString() ? `?${query.toString()}` : '';
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/network${params}`,
+            normalized.signal ? { signal: normalized.signal } : {},
+            refresh ? CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS : CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS
+        );
+    },
+
+    async getNetworkProjection(view, range = '5s', options = false) {
+        const normalized = typeof options === 'object' && options !== null
+            ? options
+            : { refresh: Boolean(options) };
+        const refresh = Boolean(normalized.refresh);
+        const requireVvault = Boolean(normalized.requireVvault);
+        const query = new URLSearchParams();
+        query.set('view', view || 'findings');
+        if ((view || 'findings') !== 'findings') query.set('range', range || '5s');
+        if (normalized.metric) query.set('metric', normalized.metric);
+        if (refresh) query.set('refresh', '1');
+        if (requireVvault) query.set('require_vvault', '1');
+        if (refresh) query.set('_', String(Date.now()));
+        return await fetchJson(
+            `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/network/projection?${query.toString()}`,
+            normalized.signal ? { signal: normalized.signal } : {},
+            refresh ? CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS : CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS
+        );
+    },
+
+    getNetworkLiveUrl() {
+        return `${CLEANHOUSE_HTTP_ORIGIN}/cleanhouse/network/live?_=${Date.now()}`;
     },
 
     async getActiveContext(refresh = false, attach = false) {
@@ -726,40 +1021,11 @@ const API = {
                 message: e.message || 'rollback endpoint unavailable',
             };
         }
-        const receipts = receiptData?.receipts || [];
+        const receipts = (receiptData?.receipts || []).slice(0, LOW_PROCESSING_RECEIPT_LIMIT);
         const approvals = approvalData?.approval_queue || [];
         const rollbacks = rollbackData?.rollbacks || [];
         const replays = {};
         const manifests = {};
-        await Promise.all(receipts.map(async receipt => {
-            if (!receipt?.id) return;
-            try {
-                const replay = await this.getReceiptReplay(receipt.id);
-                replays[receipt.id] = replay || { status: 'unknown', message: 'replay response unavailable' };
-            } catch (e) {
-                replays[receipt.id] = { status: 'error', message: e.message || 'replay unavailable' };
-            }
-            try {
-                const bundle = await this.getReceiptBundle(receipt.id);
-                if (bundle?.status === 'ok') {
-                    manifests[receipt.id] = {
-                        status: 'ok',
-                        manifest: bundle.bundle?.manifest || {},
-                        integrity: bundle.bundle?.integrity || {},
-                        signature: bundle.bundle?.manifest_signature || {},
-                        verification: bundle.verification || {},
-                    };
-                } else {
-                    manifests[receipt.id] = {
-                        status: bundle?.status || 'unknown',
-                        message: bundle?.message || 'bundle unavailable',
-                        verification: bundle?.verification || {},
-                    };
-                }
-            } catch (e) {
-                manifests[receipt.id] = { status: 'unavailable', message: e.message || 'manifest unavailable' };
-            }
-        }));
         return {
             status: 'ok',
             session_id: sessionId || '',
@@ -770,6 +1036,7 @@ const API = {
             manifests,
             replay_count: Object.values(replays).filter(replay => replay?.status === 'ok').length,
             manifest_count: Object.values(manifests).filter(manifest => manifest?.status === 'ok').length,
+            lazy_replay_bundle: true,
             rollback_status: rollbackData?.status || 'unknown',
             rollback_count: rollbacks.length,
             rollback_message: rollbackData?.message || '',
