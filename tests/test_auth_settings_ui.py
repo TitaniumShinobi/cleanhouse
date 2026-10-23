@@ -22,7 +22,9 @@ class AuthSettingsUiTests(unittest.TestCase):
         self.assertIn('role="tabpanel"', HTML)
         self.assertIn('/js/settings.js?v=2', HTML)
         self.assertIn('/css/settings.css?v=2', HTML)
-        self.assertIn('href="/settings" aria-label="Settings"', SHELL)
+        self.assertIn('id="settings-profile-link" href="/settings"', SHELL)
+        self.assertIn('id="settings-profile-image"', SHELL)
+        self.assertIn('id="settings-profile-fallback"', SHELL)
         self.assertNotIn("CleanHouse Advanced Monitor", HTML)
 
     def test_complete_settings_shell_is_declared_in_canonical_order(self):
@@ -72,9 +74,16 @@ class AuthSettingsUiTests(unittest.TestCase):
 
     def test_provider_link_uses_authenticated_same_origin_prepare(self):
         self.assertIn("/start', { method: 'POST', body: { intent: 'link' } }", JS)
+        self.assertIn('data-settings-action="provider-avatar-refresh"', JS)
+        self.assertIn("'/api/auth/oauth/' + encodeURIComponent(provider) + '?intent=photo'", JS)
+        self.assertIn("target.origin !== expectedOrigin", JS)
         self.assertIn("String(target).startsWith('/')", JS)
         self.assertIn("String(target).startsWith('//')", JS)
         self.assertNotIn("window.location.assign('/api/auth/oauth/", JS)
+
+    def test_profile_is_hydrated_from_the_session(self):
+        self.assertIn("hydrateAccountChrome", JS)
+        self.assertIn("user.avatar_url || user.picture", JS)
 
     def test_keyboard_focus_and_deep_link_behavior_are_present(self):
         self.assertIn("event.key === 'Escape'", JS)

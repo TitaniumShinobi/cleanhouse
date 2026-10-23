@@ -58,6 +58,26 @@ _login_rate_lock = threading.Lock()
 _login_rate_events: Dict[str, list[int]] = {}
 
 
+def _oauth_avatar_url(provider: str, value: Any) -> str:
+    """Keep only bounded HTTPS image URLs from the expected provider host."""
+    if not isinstance(value, str):
+        return ''
+    url = value.strip()
+    if not url or len(url) > 2048:
+        return ''
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return ''
+    host = (parsed.hostname or '').lower()
+    allowed = (provider == 'google' and host.endswith('.googleusercontent.com')) or (
+        provider == 'github' and host == 'avatars.githubusercontent.com'
+    )
+    if parsed.scheme != 'https' or not allowed or parsed.username or parsed.password or parsed.fragment:
+        return ''
+    return url
+
+
 @bp.after_request
 def _auth_no_store(response):
     response.headers['Cache-Control'] = 'no-store'
@@ -211,7 +231,7 @@ def _bounded_oauth_states(value: Any, *, now: Optional[int] = None) -> Dict[str,
                 'provider': provider,
                 'code_verifier': code_verifier,
                 'created_at': created_at,
-                **{key: payload[key] for key in ('intent', 'user_id', 'consent') if key in payload},
+                **{key: payload[key] for key in ('intent', 'user_id', 'session_id', 'consent') if key in payload},
             }))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     return {state: payload for _, _, state, payload in candidates[:_MAX_PENDING_OAUTH_STATES]}
@@ -848,13 +868,14 @@ def oauth(provider):
                 'message': f'Unknown OAuth provider: {provider}'
             }), 400
 
+        intent = str(request.args.get('intent') or 'login').strip().lower()
+        if intent not in {'login', 'signup', 'link', 'photo'}:
+            return redirect('/login?error=invalid_oauth_intent')
         canonical_start = _canonical_oauth_start(provider)
         if canonical_start:
+            if intent == 'photo':
+                return _public_error('CANONICAL_ORIGIN_REQUIRED', 'Use the configured CleanHouse origin.', 400)
             return redirect(canonical_start)
-
-        intent = str(request.args.get('intent') or 'login').strip().lower()
-        if intent not in {'login', 'signup', 'link'}:
-            return redirect('/login?error=invalid_oauth_intent')
         link_identity = None
         signup_consent = None
         if intent == 'link':
@@ -881,6 +902,19 @@ def oauth(provider):
                     scope='provider_link',
                 ):
                     return _public_error('REAUTHENTICATION_REQUIRED', 'Recent human reauthentication is required.', 403)
+        elif intent == 'photo':
+            if request.method != 'POST':
+                return _public_error('PHOTO_REFRESH_POST_REQUIRED', 'Start photo refresh from the connected provider settings.', 405)
+            csrf_error = _require_cookie_mutation()
+            if csrf_error:
+                return csrf_error
+            link_identity = _current_identity()
+            if link_identity is None or link_identity.kind != 'session':
+                return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
+            if provider not in {'google', 'github'} or not any(
+                item['provider'] == provider for item in get_store().list_external_identities(link_identity.user_id)
+            ):
+                return _public_error('PROVIDER_NOT_CONNECTED', 'This provider is not connected to the current account.', 409)
         elif intent == 'signup':
             if request.method != 'POST':
                 return redirect('/signup?error=signup_admission_required')
@@ -913,6 +947,7 @@ def oauth(provider):
             'provider': provider,
             'intent': intent,
             'user_id': link_identity.user_id if link_identity else None,
+            'session_id': link_identity.credential_id if intent == 'photo' else None,
             'consent': signup_consent,
             'code_verifier': code_verifier,
             'created_at': int(datetime.now(timezone.utc).timestamp()),
@@ -939,8 +974,9 @@ def oauth(provider):
                 'state': state,
                 'code_challenge': code_challenge,
                 'code_challenge_method': 'S256',
-                'access_type': 'offline'
             }
+            if intent != 'photo':
+                params['access_type'] = 'offline'
         elif provider.lower() == 'microsoft':
             scope = 'openid email profile'
             auth_url = 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize'
@@ -988,7 +1024,7 @@ def oauth(provider):
         logging.info(f"[OAUTH] Redirecting to {provider} OAuth")
         logging.info(f"[OAUTH] Redirect URI: {redirect_uri}")
 
-        if request.method == 'POST' and intent in {'link', 'signup'}:
+        if request.method == 'POST' and intent in {'link', 'signup', 'photo'}:
             response = jsonify({'success': True, 'authorization_url': oauth_url})
             response.headers['Cache-Control'] = 'no-store'
             return response
@@ -1052,6 +1088,10 @@ def oauth_callback():
             return redirect('/login?error=invalid_state')
 
         if error:
+            if intent == 'photo':
+                return redirect('/settings?settings=providers&error=' + (
+                    'photo_denied' if str(error) == 'access_denied' else 'photo_provider_error'
+                ))
             return redirect('/login?error=access_denied' if str(error) == 'access_denied' else '/login?error=provider_error')
         if not isinstance(code, str) or not code.strip():
             return redirect('/login?error=invalid_callback')
@@ -1077,6 +1117,22 @@ def oauth_callback():
             return redirect('/login?error=provider_identity_invalid')
         binding = get_store().external_identity(provider, provider_subject)
         existing_user = user_service.get_user_by_id(user_id=str(binding['user_id'])) if binding else None
+        if intent == 'photo':
+            identity = _current_identity()
+            if (
+                not identity or identity.kind != 'session'
+                or identity.user_id != str(oauth_data.get('user_id') or '')
+                or identity.credential_id != str(oauth_data.get('session_id') or '')
+                or not binding or str(binding['user_id']) != identity.user_id
+            ):
+                return redirect('/settings?settings=providers&error=photo_identity_mismatch')
+            avatar_url = _oauth_avatar_url(provider, user_info.get('avatar_url'))
+            if not avatar_url:
+                return redirect('/settings?settings=providers&error=photo_unavailable')
+            get_store().refresh_provider_session_avatar(
+                identity.user_id, provider, avatar_url, current_session_id=identity.credential_id,
+            )
+            return redirect('/settings?settings=providers&photo_refreshed=' + urllib.parse.quote(provider))
         if provider == 'google' and not existing_user and intent == 'login':
             # One-time compatibility for established Google users. GitHub is
             # deliberately excluded from email matching.
@@ -1156,7 +1212,10 @@ def oauth_callback():
         response = redirect('/overview')
         issued = get_store().issue_session(
             str(user_data['user_id']), auth_method=f'oauth:{provider}',
-            metadata={'role': user_data.get('role', 'user')},
+            metadata={
+                'role': user_data.get('role', 'user'),
+                'avatar_url': _oauth_avatar_url(provider, user_info.get('avatar_url')),
+            },
         )
         apply_session_cookie(response, issued.secret)
         return response
@@ -1191,6 +1250,7 @@ def get_current_user():
                 'full_name': identity.user['full_name'],
                 'name': identity.user['full_name'],
                 'role': identity.user['role'],
+                'avatar_url': str((identity.credential_metadata or {}).get('avatar_url') or ''),
             },
         })
         response.headers['Cache-Control'] = 'no-store'
@@ -1861,7 +1921,8 @@ def get_oauth_user_info(provider: str, access_token: str) -> Optional[Dict[str, 
                 return {
                     'email': data.get('email'),
                     'name': data.get('name', ''),
-                    'id': data.get('id', '')
+                    'id': data.get('id', ''),
+                    'avatar_url': data.get('picture', ''),
                 }
         elif provider.lower() == 'microsoft':
             user_info_url = 'https://graph.microsoft.com/v1.0/me'
@@ -1901,7 +1962,8 @@ def get_oauth_user_info(provider: str, access_token: str) -> Optional[Dict[str, 
                 return {
                     'email': email,
                     'name': data.get('name') or data.get('login', ''),
-                    'id': str(data.get('id', ''))
+                    'id': str(data.get('id', '')),
+                    'avatar_url': data.get('avatar_url', ''),
                 }
         # Apple requires different handling (JWT token)
         elif provider.lower() == 'apple':

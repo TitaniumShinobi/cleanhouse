@@ -431,6 +431,57 @@ class AuthEndpointTests(unittest.TestCase):
             result = auth_api.get_oauth_user_info("github", "provider-token")
         self.assertEqual(result["id"], "7")
         self.assertEqual(result["email"], "owner@example.test")
+        self.assertEqual(result["avatar_url"], "")
+
+    def test_google_picture_is_mapped_to_oauth_avatar(self):
+        class _Response:
+            status_code = 200
+            content = b"{}"
+
+            def json(self):
+                return {"id": "google-subject", "email": "owner@example.test",
+                        "picture": "https://lh3.googleusercontent.com/a/owner"}
+
+        with patch.object(auth_api.requests, "get", return_value=_Response()):
+            result = auth_api.get_oauth_user_info("google", "provider-token")
+        self.assertEqual(result["avatar_url"], "https://lh3.googleusercontent.com/a/owner")
+
+    def test_photo_refresh_updates_current_authenticated_session(self):
+        issued = auth_api.get_store().issue_session(self.service.user.user_id, auth_method="password")
+        self.client.set_cookie(auth_context.DEVICE_COOKIE, issued.secret, domain="localhost")
+        auth_api.get_store().bind_external_identity(
+            self.service.user.user_id, "google", "google-subject", verified_email=self.service.user.email,
+        )
+        with patch.object(auth_api.auth_runtime_config, "provider_config", return_value={
+            "enabled": True, "available": True, "client_id": "fixture-client",
+        }):
+            started = self._post("/api/auth/oauth/google?intent=photo", {})
+        self.assertEqual(started.status_code, 200)
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            [(oauth_state, pending)] = state["oauth_states"].items()
+            self.assertEqual(pending["session_id"], issued.id)
+        avatar = "https://lh3.googleusercontent.com/a/owner"
+        with (
+            patch.object(auth_api, "exchange_oauth_token", return_value={"access_token": "fixture-token"}),
+            patch.object(auth_api, "get_oauth_user_info", return_value={
+                "id": "google-subject", "email": self.service.user.email, "avatar_url": avatar,
+            }),
+        ):
+            callback = self.client.get(
+                f"/api/auth/google/callback?code=once&state={oauth_state}",
+                base_url="http://localhost:3333",
+            )
+        self.assertIn("photo_refreshed=google", callback.location)
+        profile = self.client.get("/api/auth/me", base_url="http://localhost:3333")
+        self.assertEqual(profile.get_json()["user"]["avatar_url"], avatar)
+
+    def test_avatar_url_accepts_only_expected_https_provider_hosts(self):
+        self.assertEqual(
+            auth_api._oauth_avatar_url("google", "https://lh3.googleusercontent.com/a/owner"),
+            "https://lh3.googleusercontent.com/a/owner",
+        )
+        self.assertEqual(auth_api._oauth_avatar_url("google", "http://lh3.googleusercontent.com/a/owner"), "")
+        self.assertEqual(auth_api._oauth_avatar_url("google", "https://localhost/private"), "")
 
 
 if __name__ == "__main__":

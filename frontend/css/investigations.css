@@ -87,6 +87,22 @@ button { color: inherit; }
 
 .advanced-entry { margin-top: auto; }
 
+.sidebar-profile { overflow: hidden; border: 0; border-radius: 50%; background: transparent; }
+.sidebar-profile-image,
+.sidebar-profile-fallback { width: 40px; height: 40px; border-radius: 50%; }
+.sidebar-profile-image { display: block; object-fit: cover; }
+.sidebar-profile-image[hidden] { display: none; }
+.sidebar-profile-fallback { display: grid; place-items: center; color: var(--muted); }
+.sidebar-profile-fallback svg {
+    width: 25px;
+    height: 25px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
 .nav-link.active::before {
     position: absolute;
     left: -8px;

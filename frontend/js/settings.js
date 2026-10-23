@@ -142,12 +142,40 @@
                 const available = Boolean(provider.available || provider.configured);
                 const detail = connected ? 'Connected to this CleanHouse identity.' : (available ? 'Available to connect.' : 'Unavailable until owner configuration is complete.');
                 const action = connected
-                    ? '<button type="button" class="btn-secondary" data-settings-action="provider-unlink" data-provider="' + esc(id) + '">Unlink</button>'
+                    ? '<button type="button" class="btn-secondary" data-settings-action="provider-avatar-refresh" data-provider="' + esc(id) + '"' + (available ? '' : ' disabled') + '>Refresh photo</button><button type="button" class="btn-secondary" data-settings-action="provider-unlink" data-provider="' + esc(id) + '">Unlink</button>'
                     : '<button type="button" class="btn-primary" data-settings-action="provider-link" data-provider="' + esc(id) + '"' + (available ? '' : ' disabled') + '>Connect</button>';
                 return '<article class="settings-row"><div><h3>' + esc(provider.name || id) + '</h3><p>' + esc(detail) + '</p></div><div class="settings-row-action"><span class="settings-badge ' + (connected ? 'ok' : (available ? 'ready' : 'unavailable')) + '">' + (connected ? 'Connected' : (available ? 'Available' : 'Unavailable')) + '</span>' + action + '</div></article>';
             }).join('') + '</div>' + reauthControl() + '<div id="settings-action-result" aria-live="polite"></div></section>';
             setFooter();
+            await showProviderPhotoReturn();
         } catch (error) { setError(error.message); }
+    }
+
+    async function showProviderPhotoReturn() {
+        const url = new URL(window.location.href);
+        const provider = url.searchParams.get('photo_refreshed');
+        const failure = url.searchParams.get('error');
+        const errors = {
+            photo_identity_mismatch: 'Photo refresh was rejected because the provider or device session changed.',
+            photo_unavailable: 'The provider did not return a usable profile photo.',
+            photo_denied: 'Photo refresh was cancelled at the provider.',
+            photo_provider_error: 'The provider could not complete photo refresh.',
+        };
+        if (provider !== 'google' && provider !== 'github' && !Object.hasOwn(errors, failure)) return;
+        if (provider === 'google' || provider === 'github') {
+            try {
+                const profile = await request('/api/auth/me');
+                renderSidebarProfile(profile.user || null);
+                actionResult(profile.user && profile.user.avatar_url
+                    ? (provider === 'google' ? 'Google' : 'GitHub') + ' profile photo refreshed.'
+                    : 'Photo refresh returned without an available image.', !profile.user || !profile.user.avatar_url);
+            } catch (_) {
+                actionResult('CleanHouse could not confirm the refreshed profile photo. Retry this section.', true);
+            }
+        } else actionResult(errors[failure], true);
+        url.searchParams.delete('photo_refreshed');
+        url.searchParams.delete('error');
+        history.replaceState(history.state, '', url.pathname + url.search + url.hash);
     }
 
     function normalizeTokens(payload) {
@@ -308,6 +336,28 @@
         if (target) target.innerHTML = '<div class="settings-result ' + (error ? 'error' : 'success') + '" role="status">' + esc(message) + '</div>';
     }
 
+    function renderSidebarProfile(user) {
+        const link = document.getElementById('settings-profile-link');
+        const image = document.getElementById('settings-profile-image');
+        const fallback = document.getElementById('settings-profile-fallback');
+        if (!link || !image || !fallback || !user) return;
+        const label = String(user.full_name || user.name || user.email || 'Account');
+        link.setAttribute('aria-label', 'Open settings for ' + label);
+        link.dataset.label = label;
+        const avatarUrl = String(user.avatar_url || user.picture || '').trim();
+        if (!avatarUrl) return;
+        image.addEventListener('load', () => { image.hidden = false; fallback.hidden = true; }, { once: true });
+        image.addEventListener('error', () => { image.hidden = true; fallback.hidden = false; }, { once: true });
+        image.src = avatarUrl;
+    }
+
+    async function hydrateAccountChrome() {
+        try {
+            const payload = await request('/api/auth/me');
+            renderSidebarProfile(payload.user || null);
+        } catch (_) {}
+    }
+
     async function mutate(action, successMessage, rerender) {
         try {
             await action();
@@ -347,6 +397,17 @@
                 'A single-use confirmation link was sent to your verified email.',
                 false
             );
+        }
+        if (action === 'provider-avatar-refresh') {
+            const provider = button.dataset.provider;
+            if (!['google', 'github'].includes(provider)) return;
+            return mutate(async () => {
+                const result = await request('/api/auth/oauth/' + encodeURIComponent(provider) + '?intent=photo', { method: 'POST', body: {} });
+                const target = new URL(result.authorization_url || '');
+                const expectedOrigin = provider === 'google' ? 'https://accounts.google.com' : 'https://github.com';
+                if (target.origin !== expectedOrigin) throw new Error('Provider start did not return the expected authorization URL.');
+                window.location.assign(target.href);
+            }, 'Opening provider authorization…', false);
         }
         if (action === 'provider-link') {
             const provider = button.dataset.provider;
@@ -486,6 +547,7 @@
             openSettingsPanel('general');
         }));
         if (window.location.pathname === '/settings' || new URLSearchParams(window.location.search).has('settings')) openSettingsPanel();
+        hydrateAccountChrome();
     });
 
     window.openSettingsPanel = openSettingsPanel;
