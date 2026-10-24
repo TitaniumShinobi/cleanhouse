@@ -54,6 +54,26 @@ class RuntimeSupervisorTests(unittest.TestCase):
         self._data_tmp.cleanup()
         self._runtime_tmp.cleanup()
 
+    def test_stale_supervisor_write_cannot_regress_completed_warmup(self):
+        runtime_supervisor.write_state({
+            "runtime_state": "healthy",
+            "backend_pid": 4242,
+            "startup_phase": "warm",
+            "warmup_ready_at": "2026-10-15T15:00:00+00:00",
+            "startup_details": {"heartbeat": {"status": "ok"}},
+        })
+
+        result = runtime_supervisor.write_state({
+            "runtime_state": "healthy",
+            "backend_pid": 4242,
+            "startup_phase": "warming",
+            "warmup_ready_at": None,
+        })
+
+        self.assertEqual(result["startup_phase"], "warm")
+        self.assertEqual(result["warmup_ready_at"], "2026-10-15T15:00:00+00:00")
+        self.assertEqual(result["startup_details"], {"heartbeat": {"status": "ok"}})
+
     def _classify(self, previous, *, listeners=None, alive=None, owned=True, ready=True, heartbeat=True):
         listeners = listeners if listeners is not None else [previous.get("backend_pid", 100)]
         alive = alive or {}
@@ -96,7 +116,11 @@ class RuntimeSupervisorTests(unittest.TestCase):
         ), patch.object(runtime_supervisor, "_pid_info", side_effect=pid_info), patch.object(
             runtime_supervisor, "_pid_owned_by_cleanhouse", side_effect=pid_owned_by_cleanhouse
         ), patch.object(
-            runtime_supervisor, "_probe_ready", return_value={"status": "ok" if ready else "failed"}
+            runtime_supervisor,
+            "_probe_ready",
+            return_value={"status": "ok", "pid": listeners[0], "boot_id": "backend-boot"}
+            if ready and listeners
+            else {"status": "failed"},
         ), patch.object(
             runtime_supervisor, "_heartbeat_fresh", return_value=heartbeat
         ):
@@ -106,6 +130,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
         state = self._classify({
             "supervisor_pid": 200,
             "backend_pid": 100,
+            "backend_boot_id": "backend-boot",
             "heartbeat_at": "2026-05-27T00:00:00+00:00",
         })
         self.assertEqual(state["runtime_state"], "healthy")
@@ -274,7 +299,11 @@ class RuntimeSupervisorTests(unittest.TestCase):
             with patch.object(server, "_wait_for_listener_ready", return_value=True), patch.object(
                 server.cleanhouse_events, "init_db", side_effect=slow_init_db
             ), patch.object(
-                server.cleanhouse_events, "start_watcher", return_value={"status": "running"}
+                server.cleanhouse_events, "start_event_writer", return_value={"status": "running"}
+            ), patch.object(
+                server.cleanhouse_events, "start_watcher", return_value=None
+            ), patch.object(server, "start_network_collector_service", return_value={"status": "starting"}), patch.object(
+                server, "start_network_history_service", return_value=None
             ), patch.object(server, "_start_runtime_heartbeat", return_value=None), patch.object(
                 server.runtime_supervisor, "mark_backend_bootstrap_ready", side_effect=lambda *args, **kwargs: bootstrap_seen.set()
             ), patch.object(
@@ -307,10 +336,11 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "bootstrap_ready_at": "2026-08-18T16:40:01+00:00",
             "startup_phase": "warm",
             "backend_pid": 100,
+            "backend_boot_id": "backend-boot",
             "listener_pids": [100],
             "owned_listener_pids": [100],
             "foreign_listener_pids": [],
-            "last_probe": {"status": "ok"},
+            "last_probe": {"status": "ok", "pid": 100, "boot_id": "backend-boot"},
         }
         self.assertTrue(runtime_supervisor._launch_ready(state))
 
@@ -328,9 +358,10 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "bootstrap_ready_at": "2026-08-18T16:40:01+00:00",
             "startup_phase": "bootstrap_ready",
             "backend_pid": 100,
+            "backend_boot_id": "backend-boot",
             "owned_listener_pids": [100],
             "foreign_listener_pids": [],
-            "last_probe": {"status": "ok"},
+            "last_probe": {"status": "ok", "pid": 100, "boot_id": "backend-boot"},
         }
         contract = runtime_supervisor._operator_readiness_contract(state)
         self.assertFalse(contract["satisfied"])
@@ -372,6 +403,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "port": 3333,
             "supervisor_pid": 200,
             "backend_pid": 100,
+            "backend_boot_id": "backend-boot",
             "startup_phase": "warm",
             "bootstrap_started_at": "2026-05-27T00:00:00+00:00",
             "bootstrap_ready_at": "2026-05-27T00:00:01+00:00",
@@ -384,6 +416,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "reason_codes": [],
             "supervisor_pid": 200,
             "backend_pid": 100,
+            "backend_boot_id": "backend-boot",
             "supervisor_alive": True,
             "backend_alive": True,
             "boot_id": "boot",
@@ -401,7 +434,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "heartbeat_at": "2026-05-27T00:00:00+00:00",
             "heartbeat_sequence": 1,
             "heartbeat_fresh": True,
-            "last_probe": {"status": "ok"},
+            "last_probe": {"status": "ok", "pid": 100, "boot_id": "backend-boot"},
             "interpreter": {},
             "last_start_attempt": {},
             "blocked_recovery": {},
@@ -489,6 +522,8 @@ class RuntimeSupervisorTests(unittest.TestCase):
             with patch.object(server, "_wait_for_listener_ready", return_value=True), patch.object(
                 server.cleanhouse_events, "init_db", return_value=None
             ), patch.object(
+                server.cleanhouse_events, "start_event_writer", return_value={"status": "running"}
+            ), patch.object(
                 server.cleanhouse_events, "start_watcher", return_value={"status": "running"}
             ), patch.object(
                 server, "_start_runtime_heartbeat", side_effect=RuntimeError("heartbeat unavailable")
@@ -507,6 +542,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
 
         self.assertEqual(recorded["runtime_state"], "degraded")
         self.assertIn("heartbeat_start_failed", recorded["reason_codes"])
+        self.assertEqual(recorded["details"]["event_writer"]["status"], "running")
         self.assertEqual(recorded["details"]["heartbeat"]["status"], "failed")
 
     def test_wrapper_rejects_degraded_label_without_operator_readiness(self):
@@ -552,7 +588,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "alive": True,
             "command": f"python {runtime_supervisor.REPO_ROOT}/backend/server.py",
             "cwd": str(runtime_supervisor.REPO_ROOT),
-        }), patch.object(runtime_supervisor, "_probe_ready", return_value={"status": "ok"}), patch.object(
+        }), patch.object(runtime_supervisor, "_probe_ready", return_value={"status": "ok", "pid": 100, "boot_id": "backend-boot"}), patch.object(
             runtime_supervisor, "_heartbeat_fresh", return_value=True
         ), patch.object(runtime_supervisor, "_pid_resource_usage", return_value={
             "status": "observed",
@@ -618,7 +654,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "alive": True,
             "command": f"python {runtime_supervisor.REPO_ROOT}/backend/server.py",
             "cwd": str(runtime_supervisor.REPO_ROOT),
-        }), patch.object(runtime_supervisor, "_probe_ready", return_value={"status": "ok"}), patch.object(
+        }), patch.object(runtime_supervisor, "_probe_ready", return_value={"status": "ok", "pid": 100, "boot_id": "backend-boot"}), patch.object(
             runtime_supervisor, "_heartbeat_fresh", return_value=True
         ), patch.object(runtime_supervisor, "_pid_resource_usage", return_value={
             "status": "observed",
@@ -700,6 +736,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "reason_codes": ["runtime_memory_ceiling_exceeded"],
             "supervisor_pid": 200,
             "backend_pid": 100,
+            "backend_boot_id": "backend-boot",
             "supervisor_alive": True,
             "backend_alive": False,
             "boot_id": "boot",
@@ -758,6 +795,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "reason_codes": [],
             "supervisor_pid": 200,
             "backend_pid": 100,
+            "backend_boot_id": "backend-boot",
             "supervisor_alive": True,
             "backend_alive": True,
             "boot_id": "boot",
@@ -773,7 +811,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "heartbeat_at": "2026-06-07T00:00:00+00:00",
             "heartbeat_sequence": 1,
             "heartbeat_fresh": True,
-            "last_probe": {"status": "ok"},
+            "last_probe": {"status": "ok", "pid": 100, "boot_id": "backend-boot"},
             "interpreter": {},
             "last_start_attempt": {},
             "blocked_recovery": {},
@@ -806,7 +844,7 @@ class RuntimeSupervisorTests(unittest.TestCase):
             "alive": True,
             "command": f"python {runtime_supervisor.REPO_ROOT}/backend/server.py",
             "cwd": str(runtime_supervisor.REPO_ROOT),
-        }), patch.object(runtime_supervisor, "_probe_ready", return_value={"status": "ok"}), patch.object(
+        }), patch.object(runtime_supervisor, "_probe_ready", return_value={"status": "ok", "pid": 100, "boot_id": "backend-boot"}), patch.object(
             runtime_supervisor, "_heartbeat_fresh", return_value=True
         ), patch.object(runtime_supervisor, "_pid_resource_usage", return_value={
             "status": "observed",
@@ -953,6 +991,199 @@ class RuntimeSupervisorTests(unittest.TestCase):
         future["blocked_recovery"] = {"type": "runtime_cpu_sustained_exceeded"}
         future["self_deviation"] = {"id": "runtime_self_deviation:future", "status": "open"}
         self.assertTrue(runtime_supervisor._self_deviation_block_active(future))
+
+    def test_acknowledging_live_owned_generation_preserves_health_and_restart_count(self):
+        healthy = {
+            "runtime_state": "healthy",
+            "status": "healthy",
+            "reason_codes": [],
+            "restart_count": 7,
+            "supervisor_pid": 200,
+            "backend_pid": 100,
+            "backend_boot_id": "backend-boot",
+            "backend_alive": True,
+            "backend_owned": True,
+            "supervisor_alive": True,
+            "heartbeat_fresh": True,
+            "startup_phase": "warm",
+            "owned_listener_pids": [100],
+            "foreign_listener_pids": [],
+            "last_probe": {"status": "ok", "pid": 100, "boot_id": "backend-boot"},
+            "self_deviation": {"id": "runtime_self_deviation:test", "status": "open"},
+            "blocked_recovery": {"type": "runtime_unresponsive"},
+        }
+        with patch.object(runtime_supervisor, "classify_state", return_value=dict(healthy)):
+            acknowledged = runtime_supervisor.acknowledge_self_deviation(
+                "127.0.0.1", 3333, runtime_dir=Path(self._runtime_tmp.name)
+            )
+
+        self.assertEqual(acknowledged["runtime_state"], "healthy")
+        self.assertEqual(acknowledged["restart_count"], 7)
+        self.assertTrue(acknowledged["operator_ready"])
+        self.assertFalse(runtime_supervisor._backend_restart_required(acknowledged))
+
+    def test_restart_eligibility_tracks_generation_loss_not_health_label(self):
+        self.assertTrue(runtime_supervisor._backend_restart_required({
+            "runtime_state": "unhealthy",
+            "backend_alive": True,
+        }))
+        self.assertTrue(runtime_supervisor._backend_restart_required({
+            "runtime_state": "healthy",
+            "backend_alive": False,
+        }))
+        self.assertTrue(runtime_supervisor._backend_restart_required({
+            "runtime_state": "healthy",
+            "backend_alive": True,
+        }, backend_dead=True))
+        survivor = {
+            "runtime_state": "healthy",
+            "backend_pid": 100,
+            "backend_boot_id": "survivor-boot",
+            "backend_alive": True,
+            "backend_owned": True,
+            "owned_listener_pids": [100],
+            "foreign_listener_pids": [],
+            "last_probe": {"status": "ok", "pid": 100, "boot_id": "survivor-boot"},
+        }
+        for child_dead in (False, True):
+            self.assertFalse(runtime_supervisor._backend_restart_required(survivor, backend_dead=child_dead))
+        for invalid_ownership in (None, False, "true", 1):
+            for child_dead in (False, True):
+                with self.subTest(backend_owned=invalid_ownership, backend_dead=child_dead):
+                    survivor["backend_owned"] = invalid_ownership
+                    self.assertTrue(runtime_supervisor._backend_restart_required(survivor, backend_dead=child_dead))
+        survivor["backend_owned"] = True
+
+    def test_supervisor_does_not_respawn_when_exited_child_has_valid_owned_survivor(self):
+        class StopLoop(Exception):
+            pass
+
+        class ExitedChild:
+            pid = 300
+
+            @staticmethod
+            def poll():
+                return 1
+
+        interpreter = {
+            "path": "/usr/bin/python3",
+            "status": "runnable",
+            "runnable": True,
+            "supervisor_compatible": True,
+            "backend_compatible": True,
+        }
+        missing = {
+            "runtime_state": "unhealthy",
+            "status": "unhealthy",
+            "reason_codes": ["backend_not_running"],
+            "restart_count": 0,
+            "backend_pid": None,
+            "backend_alive": False,
+            "backend_owned": False,
+            "supervisor_alive": True,
+            "owned_listener_pids": [],
+            "foreign_listener_pids": [],
+            "last_probe": {"status": "skipped"},
+            "resource_guard": {},
+            "self_deviation": {},
+        }
+        survivor = {
+            "runtime_state": "healthy",
+            "status": "healthy",
+            "reason_codes": [],
+            "restart_count": 1,
+            "backend_pid": 100,
+            "backend_boot_id": "survivor-boot",
+            "backend_alive": True,
+            "backend_owned": True,
+            "supervisor_alive": True,
+            "heartbeat_fresh": True,
+            "startup_phase": "warm",
+            "owned_listener_pids": [100],
+            "foreign_listener_pids": [],
+            "last_probe": {"status": "ok", "pid": 100, "boot_id": "survivor-boot"},
+            "resource_guard": {},
+            "self_deviation": {},
+        }
+        writes = []
+
+        def capture_write(payload, runtime_dir=None):
+            writes.append(dict(payload))
+            return payload
+
+        def stop_after_survivor(_seconds):
+            if writes and writes[-1].get("runtime_state") == "healthy":
+                raise StopLoop()
+
+        with patch.object(runtime_supervisor, "read_state", return_value={}), patch.object(
+            runtime_supervisor, "write_state", side_effect=capture_write
+        ), patch.object(
+            runtime_supervisor, "classify_state", side_effect=[dict(missing), dict(survivor), dict(survivor)]
+        ), patch.object(
+            runtime_supervisor, "_resolve_supervisor_boot_interpreter", return_value=dict(interpreter)
+        ), patch.object(
+            runtime_supervisor.runtime_env, "resolve_interpreter", return_value={
+                "status": "runnable",
+                "selected_path": "/usr/bin/python3",
+                "selected_source": "test",
+                "runnable": True,
+                "supervisor_compatible": True,
+                "backend_compatible": True,
+                "attempts": [],
+                "failures": [],
+            }
+        ), patch.object(
+            runtime_supervisor, "_start_backend", return_value=ExitedChild()
+        ) as start_backend, patch.object(
+            runtime_supervisor, "persist_runtime_recovery", return_value={"id": "runtime_recovery:test"}
+        ), patch.object(runtime_supervisor.time, "sleep", side_effect=stop_after_survivor):
+            with self.assertRaises(StopLoop):
+                runtime_supervisor.supervisor_loop("127.0.0.1", 3333, Path(self._runtime_tmp.name))
+
+        self.assertEqual(start_backend.call_count, 1)
+        survivor_writes = [state for state in writes if state.get("runtime_state") == "healthy"]
+        self.assertEqual(len(survivor_writes), 1)
+        self.assertEqual(survivor_writes[0]["backend_pid"], 100)
+        self.assertEqual(survivor_writes[0]["restart_count"], 1)
+        self.assertFalse(any(state.get("restart_count") == 2 for state in writes))
+
+    def test_adoption_records_liveness_generation_and_mismatch_fails_closed(self):
+        adopted = self._classify({
+            "supervisor_pid": 200,
+            "backend_pid": 999,
+            "backend_boot_id": "stale-boot",
+        }, listeners=[100], alive={999: False})
+        self.assertEqual(adopted["backend_pid"], 100)
+        self.assertEqual(adopted["backend_boot_id"], "backend-boot")
+        self.assertEqual(adopted["last_probe"]["pid"], 100)
+        self.assertEqual(adopted["runtime_state"], "healthy")
+
+        mismatched = self._classify({
+            "supervisor_pid": 200,
+            "backend_pid": 100,
+            "backend_boot_id": "expected-boot",
+        })
+        self.assertEqual(mismatched["last_probe"]["status"], "failed")
+        self.assertEqual(mismatched["last_probe"]["failure_reason"], "liveness_boot_id_mismatch")
+        self.assertIn("liveness_boot_id_mismatch", mismatched["reason_codes"])
+        self.assertFalse(runtime_supervisor._launch_ready(mismatched))
+
+    def test_operator_readiness_rejects_missing_liveness_generation(self):
+        state = {
+            "runtime_state": "healthy",
+            "backend_alive": True,
+            "supervisor_alive": True,
+            "heartbeat_fresh": True,
+            "startup_phase": "warm",
+            "backend_pid": 100,
+            "backend_boot_id": "backend-boot",
+            "owned_listener_pids": [100],
+            "foreign_listener_pids": [],
+            "last_probe": {"status": "ok"},
+        }
+        contract = runtime_supervisor._operator_readiness_contract(state)
+        self.assertFalse(contract["satisfied"])
+        self.assertIn("readiness_probe_ok", contract["failed_checks"])
 
     def test_startup_preflight_handles_block_ack_and_foreign_listener(self):
         self_deviation = {
@@ -1251,6 +1482,31 @@ class RuntimeSupervisorTests(unittest.TestCase):
         stored = runtime_supervisor.read_state()
         self.assertEqual(stored["startup_recovery_allowed"]["self_deviation_id"], "runtime_self_deviation:runtime")
         self.assertEqual(stored["interpreter"]["path"], "/usr/bin/python3")
+
+    def test_startup_preflight_allows_healthy_owned_runtime_with_preserved_self_deviation(self):
+        self_deviation = {
+            "id": "runtime_self_deviation:recovered",
+            "status": "open",
+            "reason_codes": ["runtime_unresponsive"],
+            "mitigation_action": "degraded_state",
+        }
+        state = {
+            "runtime_state": "healthy",
+            "backend_alive": True,
+            "supervisor_alive": True,
+            "listener_pids": [25895],
+            "owned_listener_pids": [25895],
+            "foreign_listener_pids": [],
+            "reason_codes": ["runtime_self_deviation_restart_blocked"],
+            "blocked_recovery": {"type": "runtime_unresponsive"},
+            "self_deviation": self_deviation,
+        }
+
+        classification = runtime_supervisor._startup_self_deviation_classification(state)
+
+        self.assertEqual(classification["status"], "recoverable")
+        self.assertEqual(classification["reason_codes"], ["runtime_unresponsive"])
+        self.assertFalse(runtime_supervisor._self_deviation_summary(state)["blocks_startup"])
 
     def test_record_recovery_state_embeds_actionability(self):
         previous = {"runtime_state": "recovering", "reason_codes": ["readiness_probe_failed"]}

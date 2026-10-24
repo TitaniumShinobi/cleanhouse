@@ -19,6 +19,7 @@ except ImportError:
 
 from backend import runtime_supervisor
 from backend import launch_agent
+from backend import auth_runtime_config
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -29,7 +30,8 @@ class DesktopAuthApi:
     """Minimal system-browser handoff for the AUTH-configured Google flow."""
 
     def __init__(self, host: str, port: int):
-        self.origin = f"http://{host}:{port}"
+        runtime_origin = str(auth_runtime_config.runtime_config().get("public_origin") or "").rstrip("/")
+        self.origin = runtime_origin or f"http://{host}:{port}"
 
     def openOAuthUrl(self, _unused=None, provider: str = "") -> dict[str, object]:
         normalized = str(provider or "").strip().lower()
@@ -57,7 +59,7 @@ def _resolve_cleanhouse_port() -> int:
     return port
 
 
-def cleanhouse_url(path: str = "/dashboard") -> str:
+def cleanhouse_url(path: str = "/overview") -> str:
     return f"http://{_resolve_cleanhouse_host()}:{_resolve_cleanhouse_port()}{path}"
 
 
@@ -90,7 +92,7 @@ def main() -> None:
 
     webview.create_window(
         "CleanHouse",
-        cleanhouse_url("/dashboard"),
+        cleanhouse_url("/overview"),
         js_api=DesktopAuthApi(host, port),
         width=450,
         height=775,

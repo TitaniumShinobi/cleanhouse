@@ -50,6 +50,15 @@ collector therefore reports `degraded` with the exact reason
 events, and retries using bounded watchdog backoff. This is an expected honest
 installation state, not an operational capture claim or a crash loop.
 
+## Assessment boundary
+
+Collector envelopes and gap receipts are evidence inputs, not security
+categories. The shared `cleanhouse.security_assessment.v1` projection may
+derive a versioned Strength, Vulnerability, or Threat only through a reviewed
+backend rule with bounded evidence references. Capture warming, degradation,
+retry, permission failure, engine unavailability, and continuity gaps remain
+operational or evidence-coverage states; they never fabricate an assessment.
+
 ## Explicitly deferred
 
 The following are not part of Network Core: capture-engine binaries or

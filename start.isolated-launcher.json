@@ -1,0 +1,161 @@
+{
+  "contract": "life-start-isolated-launcher/v1",
+  "version": "1.0.0",
+  "trusted_adapter_id": "start.cleanhouse-isolated-launcher/v1",
+  "source": {
+    "revision": "eab94a5b9da990dc71ebbc1e045e6095532808cd",
+    "content_digest": "64f200a34364c90e42b365ab5c97af94edb1fa3d9fb29b1e502f3a3b448c722c",
+    "digest_algorithm": "sha256-length-prefixed-path-bytes-v1",
+    "files": [
+      "backend/api/cleanhouse.py",
+      "backend/runtime_env.py",
+      "backend/runtime_supervisor.py",
+      "backend/server.py",
+      "scripts/start_isolated_runtime.py"
+      ,"tests/test_start_isolated_runtime.py"
+    ]
+  },
+  "entry": {
+    "executable": "cleanhouse_env/bin/python3",
+    "argv": ["scripts/start_isolated_runtime.py"],
+    "cwd": "."
+  },
+  "isolation": {
+    "bootstrap_home": "HOME under START_TASK_ROOT",
+    "state_root": "START_STATE_ROOT",
+    "data_root": "START_DATA_ROOT",
+    "auth_config": "START_AUTH_CONFIG",
+    "ephemeral_credentials": "START_EPHEMERAL_CREDENTIALS",
+    "no_canonical_storage": true,
+    "no_launch_manager": true,
+    "no_browser": true
+  },
+  "ownership": {
+    "contract": "cleanhouse.start_isolation_evidence.v1",
+    "invocation_nonce": {
+      "input": "START_INVOCATION_NONCE",
+      "minimum_length": 32,
+      "response_path": "isolation.invocation_nonce",
+      "binding": "hmac-sha256"
+    },
+    "direct_child_binding": {
+      "supervisor_path": "start_isolation.supervisor.pid",
+      "backend_parent_path": "start_isolation.backend.parent_pid",
+      "predicate": "backend_parent_pid_equals_supervisor_pid"
+    },
+    "process_group_binding": {
+      "supervisor_path": "start_isolation.supervisor.process_group_id",
+      "backend_path": "start_isolation.backend.process_group_id",
+      "predicate": "both_equal_start_owned_process_group"
+    },
+    "listener_binding": {
+      "health_path": "/health",
+      "readiness_path": "/cleanhouse/status?ready=1",
+      "predicate": "nonce_generation_source_pid_and_boot_id_match"
+    },
+    "extinction_proof": {
+      "authority": "start_adapter_only",
+      "predicate": "captured_pids_absent_and_process_group_absent_and_listener_unreachable",
+      "product_claim": "NOT_VERIFIED_WHILE_LIVE"
+    }
+  },
+  "runtime": {
+    "loopback_host": "127.0.0.1",
+    "port": "START_PORT",
+    "health": "/health",
+    "readiness": "/cleanhouse/status?ready=1",
+    "generation_path": "isolation.generation",
+    "freshness_path": "isolation.observed_at",
+    "binding_path": "isolation.binding.digest"
+  },
+  "verification": {
+    "contract": "life-start-final-verification/v2",
+    "version": "2.0.0",
+    "lanes": [
+      {
+        "id": "build",
+        "status": "DECLARED_NOT_VERIFIED",
+        "proposed_adapter_id": "start.python-task-cache-build/v1",
+        "predicate_version": "start.predicate.fresh-task-artifact/v1",
+        "operation_id": "cleanhouse.isolated.build.pycompile/v1",
+        "command": ["cleanhouse_env/bin/python3", "-m", "py_compile", "backend/runtime_supervisor.py", "backend/server.py", "scripts/start_isolated_runtime.py"],
+        "environment": {"PYTHONPYCACHEPREFIX": "START_BUILD_ROOT/pycache"},
+        "fresh_artifact": "START_BUILD_ROOT/pycache",
+        "timeout_seconds": 20,
+        "max_output_bytes": 65536,
+        "expected": {"exit_code": 0},
+        "source_binding": "source.content_digest"
+      },
+      {
+        "id": "regression",
+        "status": "DECLARED_NOT_VERIFIED",
+        "proposed_adapter_id": "start.python-unittest/v1",
+        "predicate_version": "start.predicate.unittest-summary/v1",
+        "operation_id": "cleanhouse.isolated.regression/v1",
+        "command": ["cleanhouse_env/bin/python3", "-m", "unittest", "tests.test_start_isolated_runtime"],
+        "timeout_seconds": 30,
+        "max_output_bytes": 65536,
+        "expected": {"exit_code": 0, "tests": 19},
+        "source_binding": "source.content_digest"
+      },
+      {
+        "id": "behavioral",
+        "status": "DECLARED_NOT_VERIFIED",
+        "proposed_adapter_id": "start.http-challenge-runtime/v1",
+        "predicate_version": "start.predicate.challenge-health-readiness/v1",
+        "operation_id": "cleanhouse.isolated.behavior/v1",
+        "predicate": "sha256_of_fresh_challenge_returned_by_isolated_transform_endpoint",
+        "endpoint": "/cleanhouse/start/transform",
+        "freshness_seconds": 10,
+        "expected": {"health_status": 200, "readiness_status": 200, "ready": true}
+      },
+      {
+        "id": "security_penetration",
+        "status": "DECLARED_NOT_VERIFIED",
+        "proposed_adapter_id": "start.http-task-fixture-denial/v1",
+        "predicate_version": "start.predicate.denial-no-mutation-control/v1",
+        "operation_id": "cleanhouse.isolated.security/v1",
+        "predicate": "missing_challenge_denied_without_task_auth_fixture_mutation_and_valid_challenge_control_succeeds",
+        "endpoint": "/cleanhouse/start/transform",
+        "freshness_seconds": 10,
+        "expected": {"denied_status": 403, "authorized_control_status": 200}
+      },
+      {
+        "id": "recovery",
+        "status": "DECLARED_NOT_VERIFIED",
+        "proposed_adapter_id": "start.owned-process-group-recovery/v1",
+        "predicate_version": "start.predicate.generation-replacement/v1",
+        "operation_id": "cleanhouse.isolated.recovery/v1",
+        "adapter_predicate": "terminate_captured_generation_then_start_new_nonce_generation_and_rebind_listener",
+        "expected": {"old_generation_extinct": true, "new_generation_distinct": true}
+      },
+      {
+        "id": "integration",
+        "status": "DECLARED_NOT_VERIFIED",
+        "proposed_adapter_id": "start.http-task-component-roundtrip/v1",
+        "predicate_version": "start.predicate.distinct-component-roundtrip/v1",
+        "operation_id": "cleanhouse.isolated.integration/v1",
+        "predicate": "single_use_nonce_written_and_read_by_distinct_components_in_task_storage",
+        "write_endpoint": "/cleanhouse/start/integration/write",
+        "read_endpoint": "/cleanhouse/start/integration/read",
+        "single_use": true,
+        "freshness_seconds": 10,
+        "expected": {"round_trip": true, "task_only_storage": true}
+      },
+      {
+        "id": "acceptance",
+        "status": "DECLARED_NOT_VERIFIED",
+        "proposed_adapter_id": "start.cleanhouse-authenticated-product-acceptance/v1",
+        "predicate_version": "start.predicate.authenticated-product-session-lifecycle/v1",
+        "operation_id": "cleanhouse.isolated.acceptance/v1",
+        "predicate": "canonical_ui_and_runtime_data_reached_by_real_task_owned_device_session_then_logout_revokes_session_and_runtime_is_fully_disposed",
+        "ui_route": "/overview",
+        "session_endpoint": "/cleanhouse/start/acceptance/session",
+        "identity_endpoint": "/cleanhouse/start/acceptance/me",
+        "data_endpoint": "/cleanhouse/runtime",
+        "logout_endpoint": "/cleanhouse/start/acceptance/logout",
+        "expected": {"canonical_runtime_untouched": true, "completion_claimed_by_product": false, "session_revoked": true}
+      }
+    ]
+  }
+}

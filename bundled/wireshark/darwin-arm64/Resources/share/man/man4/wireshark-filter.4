@@ -1,0 +1,1251 @@
+'\" t
+.\"     Title: wireshark-filter
+.\"    Author: [see the "AUTHOR(S)" section]
+.\" Generator: Asciidoctor 2.0.26
+.\"      Date: 2026-04-21
+.\"    Manual: \ \&
+.\"    Source: \ \&
+.\"  Language: English
+.\"
+.TH "WIRESHARK\-FILTER" "4" "2026-04-21" "\ \&" "\ \&"
+.ie \n(.g .ds Aq \(aq
+.el       .ds Aq '
+.ss \n[.ss] 0
+.nh
+.ad l
+.de URL
+\fI\\$2\fP <\\$1>\\$3
+..
+.als MTO URL
+.if \n[.g] \{\
+.  mso www.tmac
+.  am URL
+.    ad l
+.  .
+.  am MTO
+.    ad l
+.  .
+.  LINKSTYLE blue R < >
+.\}
+.SH "NAME"
+wireshark-filter \- Wireshark display filter syntax and reference
+.SH "SYNOPSIS"
+.sp
+\fBwireshark\fP [other options]
+[ \fB\-Y\fP "display filter expression" | \fB\-\-display\-filter\fP "display filter expression" ]
+.sp
+\fBtshark\fP [other options]
+[ \fB\-Y\fP "display filter expression" | \fB\-\-display\-filter\fP "display filter expression" ]
+.SH "DESCRIPTION"
+.sp
+\fBWireshark\fP and \fBTShark\fP share a powerful filter engine that helps remove
+the noise from a packet trace and lets you see only the packets that interest
+you.  If a packet meets the requirements expressed in your filter, then it
+is displayed in the list of packets.  Display filters let you compare the
+fields within a protocol against a specific value, compare fields against
+fields, and check the existence of specified fields or protocols.
+.sp
+Filters are also used by other features such as statistics generation and
+packet list colorization (the latter is only available to \fBWireshark\fP). This
+manual page describes their syntax. A comprehensive reference of filter fields
+can be found within Wireshark and in the display filter reference at
+.URL "https://www.wireshark.org/docs/dfref/" "" "."
+.SH "FILTER SYNTAX"
+.SS "Check whether a field or protocol exists"
+.sp
+The simplest filter allows you to check for the existence of a protocol or
+field.  If you want to see all packets which contain the IP protocol, the
+filter would be "ip" (without the quotation marks). To see all packets
+that contain a Token\-Ring RIF field, use "tr.rif".
+.sp
+Whenever a protocol or field appears as the argument of a function in a filter,
+an exists operator for that protocol or field implicitly appears.
+.SS "Values and operators"
+.sp
+Each field has a value, and that value can be used in operations with
+comparable values (which may be literals, other fields, or function results).
+The value of a field is not necessarily what appears in the \fBWireshark\fP
+display or \fBTShark\fP output.  For example, a protocol is semantically
+equivalent to the sequence of bytes that it spans, not its displayed text
+in the protocol tree.
+.SS "Comparison operators"
+.sp
+The comparison operators can be expressed either through English\-like
+abbreviations or through C\-like symbols:
+.sp
+.if n .RS 4
+.nf
+.fam C
+eq, ==\&    Equal
+ne, !=\&    Not Equal
+gt, >\&     Greater Than
+lt, \&     Less Than
+ge, =\&    Greater than or Equal to
+le, <=\&    Less than or Equal to
+.fam
+.fi
+.if n .RE
+.sp
+The ordering depends on the value type in the usual way (e.g., lexicographic
+for strings and arithmetic for integers.)  A field may appear more than once
+in a given frame.  In that case equality can be strict (all fields must match
+the condition) or not (any field must match the condition). The inequality is
+the logical negation of equality. The following table contains all equality
+operators, their aliases and meaning:
+.sp
+.if n .RS 4
+.nf
+.fam C
+eq, any_eq, ==\&    Any field must be equal
+ne, all_ne, !=\&    All fields must be not equal
+    all_eq, ===\&   All fields must be equal
+    any_ne, !==\&   Any fields must be not equal
+.fam
+.fi
+.if n .RE
+.sp
+The operators "any" or "all" can be used with any comparison operator to make
+the test match any or all fields:
+.sp
+.if n .RS 4
+.nf
+.fam C
+all tcp.port > 1024
+.fam
+.fi
+.if n .RE
+.sp
+.if n .RS 4
+.nf
+.fam C
+any ip.addr != 1.1.1.1
+.fam
+.fi
+.if n .RE
+.sp
+The "any" and "all" modifiers take precedence over comparison operators such
+as "===" and "any_eq".
+.SS "Search and match operators"
+.sp
+Additional operators exist expressed only in English, not C\-like syntax:
+.sp
+.if n .RS 4
+.nf
+.fam C
+contains\&     Does the protocol, field or slice contain a value
+matches, ~\&   Does the string match the given case\-insensitive
+             Perl\-compatible regular expression
+.fam
+.fi
+.if n .RE
+.sp
+The "contains" operator allows a filter to search for a sequence of
+characters, expressed as a string, or bytes, expressed as a byte array.
+The type of the left hand side of the "contains" operator must be comparable to
+that of the right hand side after any implicit or explicit conversions.
+.sp
+For example, to search for a given HTTP
+URL in a capture, the following filter can be used:
+.sp
+.if n .RS 4
+.nf
+.fam C
+http contains "https://www.wireshark.org"
+.fam
+.fi
+.if n .RE
+.sp
+The "contains" operator cannot be used on atomic fields,
+such as numbers or IP addresses.
+.sp
+The "matches" or "~" operator allows a filter to apply to a specified
+Perl\-compatible regular expression (PCRE2).  The regular expression must
+be a double quoted string.  The left hand side of the "matches" operator
+must be a string, which can be a non\-stringlike field implicitly or
+explicitly converted to a string.  Matches are case\-insensitive by default.
+For example, to search for a given WAP WSP User\-Agent, you can write:
+.sp
+.if n .RS 4
+.nf
+.fam C
+wsp.header.user_agent matches "cldc"
+.fam
+.fi
+.if n .RE
+.sp
+This would match "cldc", "CLDC", "cLdC" or any other combination of upper
+and lower case letters.
+.sp
+You can force case sensitivity using
+.sp
+.if n .RS 4
+.nf
+.fam C
+wsp.header.user_agent matches "(?\-i)cldc"
+.fam
+.fi
+.if n .RE
+.sp
+This is an example of PCRE2\(cqs \fB(?\fPoption\fB)\fP construct. \fB(?\-i)\fP performs a
+case\-sensitive pattern match but other options can be specified as well. More
+information can be found in the
+pcre2pattern(3)|https://www.pcre.org/current/doc/html/pcre2pattern.html man page.
+.SS "Functions"
+.sp
+The filter language has the following functions:
+.sp
+.if n .RS 4
+.nf
+.fam C
+upper(string\-field) \- converts a string field to uppercase
+lower(string\-field) \- converts a string field to lowercase
+len(field)\&          \- returns the byte length of a string or bytes field
+count(field)\&        \- returns the number of field occurrences in a frame
+string(field)\&       \- converts a non\-string field to string
+vals(field)\&         \- converts a field value to its value string
+dec(field)\&          \- converts an unsigned integer to a decimal string
+hex(field)\&          \- converts an unsigned integer to a hexadecimal string
+float(field)\&        \- converts a field to single precision floating point
+double(field)\&       \- converts a field to double precision floating point
+max(f1,...,fn)\&      \- return the maximum value
+min(f1,...,fn)\&      \- return the minimum value
+abs(field)\&          \- return the absolute value of numeric fields
+.fam
+.fi
+.if n .RE
+.sp
+upper() and lower() are useful for performing case\-insensitive string
+comparisons. For example:
+.sp
+.if n .RS 4
+.nf
+.fam C
+upper(ncp.nds_stream_name) contains "MACRO"
+lower(mount.dump.hostname) == "angel"
+.fam
+.fi
+.if n .RE
+.sp
+string() converts a field value to a string, suitable for use with operators like
+"matches" or "contains". Integer fields are converted to their decimal representation.
+It can be used with IP/Ethernet addresses (as well as others), but not with string or
+byte fields. For example:
+.sp
+.if n .RS 4
+.nf
+.fam C
+string(frame.number) matches "[13579]$"
+.fam
+.fi
+.if n .RE
+.sp
+gives you all the odd packets. Note that the "matches" operator implicitly
+converts types of their value string representation; to match against the
+decimal representation of an integer field use string().
+.sp
+vals() converts an integer or boolean field value to a string using the
+field\(cqs associated value string, if it has one. This produces strings
+similar to those seen in custom columns. The resultant string can also
+be used with other operators. E.g.:
+.sp
+.if n .RS 4
+.nf
+.fam C
+vals(pfcp.msg_type) contains "Request"
+.fam
+.fi
+.if n .RE
+.sp
+would match all packets which have a PFCP request, even if that request is not
+matched with a response.
+.sp
+dec() and hex() convert unsigned integer fields to decimal or hexadecimal
+representation. Currently dec() and string() give same result for an unsigned
+integer, but it is possible that in the future string() will use the native
+base of the field.
+.sp
+max() and min() take any number of arguments and returns one value, respectively
+the largest/smallest. The arguments must all have the same type.
+.sp
+There is also a set of functions to test IP addresses:
+.sp
+.if n .RS 4
+.nf
+.fam C
+ip_special_name(ip)\&       \- Returns the IP special\-purpose block name as a string
+ip_special_mask(ip)\&       \- Returns the IP special\-purpose block flags as a mask. The bits are:
+                                4 3 2 1 0
+                                \-\-\-\-\-\-\-\-\-
+                                S D F G R
+                            S = Source, D = Destination, F = Forwardable, G = Globally\-reachable, R = Reserved\-by\-protocol
+.fam
+.fi
+.if n .RE
+.sp
+.if n .RS 4
+.nf
+.fam C
+ip_linklocal(ip)\&          \- true if the IPv4 or IPv6 address is link\-local
+ip_multicast(ip)\&          \- true if the IPv4 or IPv6 address is multicast
+ip_rfc1918(ipv4)\&          \- true if the IPv4 address is private\-use (from the allocation in RFC 1918)
+ip_ula(ipv6)\&              \- true if the IPv6 address is unique\-local (ULA) as in RFC 4193
+.fam
+.fi
+.if n .RE
+.SS "Macros"
+.sp
+It is possible to define display filter macros. Macro are names that are
+replaced with the associated expression, possibly performing argument substitution.
+Macro expansions are purely textual replacements and performed recursively before compilation.
+They allow replacing long and often used expressions with easy to use names.
+.sp
+Macros are defined using the GUI or directly in the "dmacros" configuration
+file. For example the definition
+.sp
+.if n .RS 4
+.nf
+.fam C
+"addplusone" {$1 + $2 + 1}
+.fam
+.fi
+.if n .RE
+.sp
+creates a macro called \f(CRaddplusone\fP that takes two arguments and expands to the given expression.
+Arguments in the replacement expression are given using the dollar sign.
+.sp
+Macros are invoked like function but preceded with a dollar sign
+(sometimes also called a sigil):
+.sp
+.if n .RS 4
+.nf
+.fam C
+$addplusone(udp.src_port,udp.dst_port)
+.fam
+.fi
+.if n .RE
+.sp
+results in the expression
+.sp
+.if n .RS 4
+.nf
+.fam C
+{udp.src_port + udp.dst_port + 1}
+.fam
+.fi
+.if n .RE
+.sp
+after argument substitution. There is an older alternative notation to invoke macros:
+.sp
+.if n .RS 4
+.nf
+.fam C
+${addplusone:udp.src_port;udp.dst_port}
+.fam
+.fi
+.if n .RE
+.sp
+or
+.sp
+.if n .RS 4
+.nf
+.fam C
+${addplusone;udp.src_port;udp.dst_port}
+.fam
+.fi
+.if n .RE
+.sp
+Both forms are equivalent and can be used interchangibly as a matter of
+preference.
+.SS "Protocol field types"
+.sp
+Each protocol field is typed. The types are:
+.sp
+.if n .RS 4
+.nf
+.fam C
+ASN.1 object identifier, plain or relative
+AX.25 address
+Boolean
+Byte sequence
+Character string
+Character, 1 byte
+Date and time
+Ethernet or other MAC address
+EUI64 address
+Fibre Channel WWN
+Floating point, single or double precision
+Frame number
+Globally Unique Identifier
+IEEE\-11073 floating point, 16 or 32 bits
+IPv4 address
+IPv6 address
+IPX network number
+Label
+OSI System\-ID
+Protocol
+Signed integer, 1, 2, 3, 4, or 8 bytes
+Time offset
+Unsigned integer, 1, 2, 3, 4, or 8 bytes
+VINES address
+.fam
+.fi
+.if n .RE
+.sp
+An integer may be expressed in decimal, octal, hexadecimal or binary notation,
+or as a C\-style character constant.  The following seven display filters
+are equivalent:
+.sp
+.if n .RS 4
+.nf
+.fam C
+frame.len > 10
+frame.len > 012
+frame.len > 0xa
+frame.len > 0b1010
+frame.len > \*(Aq\(rsn\*(Aq
+frame.len > \*(Aq\(rsx0a\*(Aq
+frame.len > \*(Aq\(rs012\*(Aq
+.fam
+.fi
+.if n .RE
+.sp
+Boolean values are either true or false.  In a display filter expression
+testing the value of a Boolean field, true is expressed as the word \f(CRtrue\fP
+(case\-insensitive) or any non\-zero number.  False is expressed as
+\f(CRfalse\fP (case\-insensitive) or the number zero. For example, a token\-ring packet\(cqs
+source route field is Boolean.  To find any source\-routed packets, a display
+filter would be any of the following:
+.sp
+.if n .RS 4
+.nf
+.fam C
+tr.sr == 1
+tr.sr == true
+tr.sr == TRUE
+.fam
+.fi
+.if n .RE
+.sp
+Non source\-routed packets can be found with:
+.sp
+.if n .RS 4
+.nf
+.fam C
+tr.sr == 0
+tr.sr == false
+tr.sr == FALSE
+.fam
+.fi
+.if n .RE
+.sp
+Ethernet addresses and byte arrays are represented by hex
+digits.  The hex digits may be separated by colons, periods, or hyphens:
+.sp
+.if n .RS 4
+.nf
+.fam C
+eth.dst eq ff:ff:ff:ff:ff:ff
+aim.data == 0.1.0.d
+fddi.src == aa\-aa\-aa\-aa\-aa\-aa
+echo.data == 7a
+.fam
+.fi
+.if n .RE
+.sp
+IPv4 addresses can be represented in either dotted decimal notation or
+by using the hostname:
+.sp
+.if n .RS 4
+.nf
+.fam C
+ip.src == 192.168.1.1
+ip.dst eq www.mit.edu
+.fam
+.fi
+.if n .RE
+.sp
+IPv4 addresses can be compared with the same logical relations as numbers:
+eq, ne, gt, ge, lt, and le.  The IPv4 address is stored in host order,
+so you do not have to worry about the endianness of an IPv4 address
+when using it in a display filter.
+.sp
+Classless Inter\-Domain Routing (CIDR) notation can be used to test if an
+IPv4 address is in a certain subnet.  For example, this display filter
+will find all packets in the 129.111 network:
+.sp
+.if n .RS 4
+.nf
+.fam C
+ip.addr == 129.111.0.0/16
+.fam
+.fi
+.if n .RE
+.sp
+Remember, the number after the slash represents the number of bits used
+to represent the network.  CIDR notation can also be used with
+hostnames, as in this example of finding IP addresses on the same
+network as \*(Aqsneezy\*(Aq (requires that \*(Aqsneezy\*(Aq resolve to an IP address for filter to be valid):
+.sp
+.if n .RS 4
+.nf
+.fam C
+ip.addr eq sneezy/24
+.fam
+.fi
+.if n .RE
+.sp
+The CIDR notation can only be used on IP addresses or hostnames, not in
+variable names.  So, a display filter like "ip.src/24 == ip.dst/24" is
+not valid (yet).
+.sp
+Transaction and other IDs are often represented by unsigned 16 or 32 bit integers
+and formatted as a hexadecimal string with "0x" prefix:
+.sp
+.if n .RS 4
+.nf
+.fam C
+(dhcp.id == 0xfe089c15) || (ip.id == 0x0373)
+.fam
+.fi
+.if n .RE
+.sp
+Strings are enclosed in double quotes:
+.sp
+.if n .RS 4
+.nf
+.fam C
+http.request.method == "POST"
+.fam
+.fi
+.if n .RE
+.sp
+Inside double quotes, you may use a backslash to embed a double quote
+or an arbitrary byte represented in either octal or hexadecimal.
+.sp
+.if n .RS 4
+.nf
+.fam C
+browser.comment == "An embedded \(rs" double\-quote"
+.fam
+.fi
+.if n .RE
+.sp
+Use of hexadecimal to look for "HEAD":
+.sp
+.if n .RS 4
+.nf
+.fam C
+http.request.method == "\(rsx48EAD"
+.fam
+.fi
+.if n .RE
+.sp
+Use of octal to look for "HEAD":
+.sp
+.if n .RS 4
+.nf
+.fam C
+http.request.method == "\(rs110EAD"
+.fam
+.fi
+.if n .RE
+.sp
+This means that you must escape backslashes with backslashes inside
+double quotes.
+.sp
+.if n .RS 4
+.nf
+.fam C
+smb.path contains "\(rs\(rs\(rs\(rsSERVER\(rs\(rsSHARE"
+.fam
+.fi
+.if n .RE
+.sp
+looks for \(rs\(rsSERVER\(rsSHARE in "smb.path". This may be more conveniently written
+as
+.sp
+.if n .RS 4
+.nf
+.fam C
+smb.path contains r"\(rs\(rsSERVER\(rsSHARE"
+.fam
+.fi
+.if n .RE
+.sp
+String literals prefixed with \*(Aqr\*(Aq are called "raw strings". Such strings treat
+backslash as a literal character. Double quotes may still be escaped with
+backslash but note that backslashes are always preserved in the result.
+.sp
+The following table lists all escape sequences supported with strings
+and character constants:
+.sp
+.if n .RS 4
+.nf
+.fam C
+\(rs\*(Aq\&          single quote
+\(rs"\&          double quote
+\(rs\(rs\&          backslash
+\(rsa\&          audible bell
+\(rsb\&          backspace
+\(rsf\&          form feed
+\(rsn\&          line feed
+\(rsr\&          carriage return
+\(rst\&          horizontal tab
+\(rsv\&          vertical tab
+\(rsNNN\&        arbitrary octal value
+\(rsxNN\&        arbitrary hexadecimal value
+\(rsuNNNN\&      Unicode codepoint U+NNNN
+\(rsUNNNNNNNN\&  Unicode codepoint U+NNNNNNNN
+.fam
+.fi
+.if n .RE
+.sp
+Date and time values can be given in ISO 8601 format or using a legacy
+month\-year\-time format:
+.sp
+.if n .RS 4
+.nf
+.fam C
+"2020\-07\-04T12:34:56"
+"Sep 26, 2004 23:18:04.954975"
+.fam
+.fi
+.if n .RE
+.sp
+The \*(AqT\*(Aq separator in ISO 8601 can be omitted. The timezone can be given
+as "Z" or an offset from UTC.
+.sp
+When not using ISO 8601 the timezone can be given as the strings "UTC", "GMT"
+or "UT" for UTC or also given as an offset from UTC, plus some North American and Nautical/Military
+designations (\c
+.URL "https://man.netbsd.org/strptime.3" "see the specification for %z in strptime(3)" ")."
+Note that arbitrary timezone names are not supported however.
+.sp
+If the timezone is omitted then date and time values are interpreted as local time.
+.SS "The slice operator"
+.sp
+You can take a slice of a field if the field base type is a text string or a
+byte array (the base type of most network address fields is bytes).
+For example, you can filter on the vendor portion of an ethernet address
+(the first three bytes) like this:
+.sp
+.if n .RS 4
+.nf
+.fam C
+eth.src[0:3] == 00:00:83
+.fam
+.fi
+.if n .RE
+.sp
+Another example is:
+.sp
+.if n .RS 4
+.nf
+.fam C
+http.content_type[0:4] == "text"
+.fam
+.fi
+.if n .RE
+.sp
+You can use the slice operator on a protocol name, too.
+The "frame" protocol can be useful, encompassing all the data captured
+by \fBWireshark\fP or \fBTShark\fP.
+.sp
+.if n .RS 4
+.nf
+.fam C
+token[0:5] ne 0.0.0.1.1
+llc[0] eq aa
+frame[100\-199] contains "wireshark"
+.fam
+.fi
+.if n .RE
+.sp
+The following syntax governs slices:
+.sp
+.if n .RS 4
+.nf
+.fam C
+[i:j]\&    i = start_offset, j = length
+[i\-j]\&    i = start_offset, j = end_offset, inclusive.
+[i]\&      i = start_offset, length = 1
+[:j]\&     start_offset = 0, length = j
+[i:]\&     start_offset = i, end_offset = end_of_field
+.fam
+.fi
+.if n .RE
+.sp
+Slice indexes are zero\-based.
+Offsets can be negative, in which case they indicate the
+offset from the \fBend\fP of the field.  The last byte of the field is at offset
+\-1, the last but one byte is at offset \-2, and so on.
+Here\(cqs how to check the last four bytes of a frame:
+.sp
+.if n .RS 4
+.nf
+.fam C
+frame[\-4:4] == 0.1.2.3
+.fam
+.fi
+.if n .RE
+.sp
+or
+.sp
+.if n .RS 4
+.nf
+.fam C
+frame[\-4:] == 0.1.2.3
+.fam
+.fi
+.if n .RE
+.sp
+As mentioned above the slice operator can be used on string and byte fields
+and will respectively produce string or byte slices. String slices are
+indexed on UTF\-8 codepoint boundaries (i.e: internationalized characters),
+so the following comparison is true:
+.sp
+.if n .RS 4
+.nf
+.fam C
+"touché"[5] == "é"
+.fam
+.fi
+.if n .RE
+.sp
+The example above generates an error because the compiler rejects constant
+expressions but is otherwise syntactically correct and exemplifies the
+behaviour of string slices.
+.sp
+To obtain a byte slice of the same string the raw (@) operator can be used:
+.sp
+.if n .RS 4
+.nf
+.fam C
+@"touché"[5\-6] == c3:a9
+.fam
+.fi
+.if n .RE
+.sp
+A slice can always be compared against either a string or a byte sequence.
+.sp
+Slices can be combined. You can concatenate them using the comma operator:
+.sp
+.if n .RS 4
+.nf
+.fam C
+ftp[1,3\-5,9:] == 01:03:04:05:09:0a:0b
+.fam
+.fi
+.if n .RE
+.sp
+This concatenates offset 1, offsets 3\-5, and offset 9 to the end of the ftp
+data.
+.SS "The layer operator"
+.sp
+A field can be restricted to a certain layer in the protocol stack using the
+layer operator (#), followed by a decimal number:
+.sp
+.if n .RS 4
+.nf
+.fam C
+ip.addr#2 == 192.168.30.40
+.fam
+.fi
+.if n .RE
+.sp
+matches only the inner (second) layer in the packet.
+Layers use simple stacking semantics and protocol layers are counted sequentially starting from 1.
+For example, in a packet that contains two IPv4 headers, the outer (first) source address can be matched with "ip.src#1" and the inner (second) source address can be matched with "ip.src#2".
+.sp
+For more complicated ranges the same syntax used with slices is valid:
+.sp
+.if n .RS 4
+.nf
+.fam C
+tcp.port#[2\-4]
+.fam
+.fi
+.if n .RE
+.sp
+means layers number 2, 3 or 4 inclusive. The hash symbol is required to
+distinguish a layer range from a slice.
+.SS "The at operator"
+.sp
+By prefixing the field name with an at sign (@) the comparison is done against
+the raw packet data for the field.
+.sp
+A character string must be decoded from a source encoding during dissection.
+If there are decoding errors the resulting string will usually contain
+replacement characters:
+.sp
+.if n .RS 4
+.nf
+.fam C
+browser.comment == "string is &#xFFFD;&#xFFFD;&#xFFFD;&#xFFFD;"
+.fam
+.fi
+.if n .RE
+.sp
+The at operator allows testing the raw undecoded data:
+.sp
+.if n .RS 4
+.nf
+.fam C
+@browser.comment == 73:74:72:69:6e:67:20:69:73:20:aa:aa:aa:aa
+.fam
+.fi
+.if n .RE
+.sp
+The syntactical rules for a bytes field type apply to the second example.
+.SS "The membership operator"
+.sp
+A field may be checked for matches against a set of values simply with the
+membership operator. For instance, you may find traffic on common HTTP/HTTPS
+ports with the following filter:
+.sp
+.if n .RS 4
+.nf
+.fam C
+tcp.port in {80,443,8080}
+.fam
+.fi
+.if n .RE
+.sp
+as opposed to the more verbose:
+.sp
+.if n .RS 4
+.nf
+.fam C
+tcp.port == 80 or tcp.port == 443 or tcp.port == 8080
+.fam
+.fi
+.if n .RE
+.sp
+To find HTTP requests using the HEAD or GET methods:
+.sp
+.if n .RS 4
+.nf
+.fam C
+http.request.method in {"HEAD", "GET"}
+.fam
+.fi
+.if n .RE
+.sp
+The set of values can also contain ranges:
+.sp
+.if n .RS 4
+.nf
+.fam C
+tcp.port in {443, 4430..4434}
+ip.addr in {10.0.0.5 .. 10.0.0.9, 192.168.1.1..192.168.1.9}
+frame.time_delta in {10 .. 10.5}
+.fam
+.fi
+.if n .RE
+.SS "Implicit type conversions"
+.sp
+When fields which are sequences of bytes, including protocols, are compared
+with (double quoted) literal strings and raw strings, the literals are converted
+to their byte representation using the UTF\-8 encoding. (To be precise, the
+original byte sequence is used, not the canonical normalized forms, so the
+precomposed é (U+00E9) and decomposed é (U+0065 U+0301) can match differently.)
+.sp
+So, for instance, the following filters are equivalent:
+.sp
+.if n .RS 4
+.nf
+.fam C
+tcp.payload contains "GET"
+tcp.payload contains 47.45.54
+.fam
+.fi
+.if n .RE
+.sp
+As noted above, a slice can also be compared in either way:
+.sp
+.if n .RS 4
+.nf
+.fam C
+frame[60:2] gt 50.51
+frame[60:2] gt "PQ"
+.fam
+.fi
+.if n .RE
+.sp
+The inverse does not occur; stringlike fields are not implicitly converted to
+byte arrays.  (Some operators allow stringlike fields to be compared with
+unquoted literals, which are then treated as strings; this is deprecated in
+general and specifically disallowed by the "matches" operator.
+Literal strings should be double quoted for clarity.)
+.sp
+A hex integer that is 0xff or less (which means it fits inside one byte)
+can be implicitly converted to a byte string.  This is not allowed for
+hex integers greater than one byte, because then one would need to specify
+the endianness of the multi\-byte integer. Also, this is not allowed for
+decimal or octal numbers, since they would be confused with the hex numbers
+that make up byte string literals. Nevertheless, single\-byte hex integers
+can be convenient:
+.sp
+.if n .RS 4
+.nf
+.fam C
+frame[4] == 0xff
+frame[1:4] contains 0x02
+.fam
+.fi
+.if n .RE
+.sp
+An integer or boolean field that has a value string can be compared to
+to one of the strings that corresponds with a value.
+As with stringlike fields and comparisons, it is possible to perform
+the comparison with an unquoted literal, though this is deprecated and
+will not work if the literal contains a space (as with "Modify Bearer
+Response" above). Double quotes are recommended.
+.sp
+If there is a unique reverse mapping from the string literal into a
+numeric value, the string is converted into that number and the
+comparison function is applied using arithmetic rules. If the mapping
+is not unique, then equality and inequality can be tested, but not the
+ordered comparisons.
+.sp
+This is in contrast with the \f(CRstring()\fP and \f(CRvals()\fP functions, which
+convert the field value to a string and applies string (lexicographic)
+comparisons, as well as work with all operators that take strings.
+Therefore the following two filters give the same result:
+.sp
+.if n .RS 4
+.nf
+.fam C
+gtpv2.message_type <= 35
+gtpv2.message_type <= "Modify Bearer Response"
+.fam
+.fi
+.if n .RE
+.sp
+whereas
+.sp
+.if n .RS 4
+.nf
+.fam C
+vals(gtpv2.message_type) <= "Modify Bearer Response"
+.fam
+.fi
+.if n .RE
+.sp
+matches all messages whose value string precedes "Modify Bearer Response"
+in lexicographical order, and
+.sp
+.if n .RS 4
+.nf
+.fam C
+string(gtpv2.message_type) <= "35"
+.fam
+.fi
+.if n .RE
+.sp
+matches all messages such that the message type comes before "35" in
+lexicographical order, i.e. would also match "170" (the message type
+for "Release Access Bearers Request.")
+.sp
+For the "contains" and "matches" operators, which operate on strings
+(or byte arrays in the case of "contains"), fields on the left hand
+side are implicitly converted to their value strings for comparison.
+(To compare a field with a byte array, use the raw/at (@) operator.)
+.SS "Bitwise operators"
+.sp
+It is also possible to define tests with bitwise operations. Currently the
+following bitwise operator is supported:
+.sp
+.if n .RS 4
+.nf
+.fam C
+bitand, bitwise_and, &\&        Bitwise AND
+.fam
+.fi
+.if n .RE
+.sp
+The bitwise AND operation allows masking bits and testing to see if one or
+more bits are set. Bitwise AND operates on integer protocol fields and slices.
+.sp
+When testing for TCP SYN packets, you can write:
+.sp
+.if n .RS 4
+.nf
+.fam C
+tcp.flags & 0x02
+.fam
+.fi
+.if n .RE
+.sp
+That expression will match all packets that contain a "tcp.flags" field
+with the 0x02 bit, i.e. the SYN bit, set.
+.sp
+To match locally administered unicast ethernet addresses you can use:
+.sp
+.if n .RS 4
+.nf
+.fam C
+eth.addr[0] & 0x0f == 2
+.fam
+.fi
+.if n .RE
+.sp
+When using slices, the bit mask must be specified as a byte string, and it must
+have the same number of bytes as the slice itself, as in:
+.sp
+.if n .RS 4
+.nf
+.fam C
+ip[42:2] & 40:ff
+.fam
+.fi
+.if n .RE
+.SS "Arithmetic operators"
+.sp
+Arithmetic expressions are supported with the usual operators:
+.sp
+.if n .RS 4
+.nf
+.fam C
++\&   Addition
+\-\&   Subtraction
+*\&   Multiplication
+/\&   Division
+%\&   Modulo (integer remainder)
+.fam
+.fi
+.if n .RE
+.sp
+Arithmetic operations can be performed on numeric types. Numeric types are
+integers, floating point numbers and date and time values.
+.sp
+Date and time values can only be multiplied by integers or floating point
+numbers (i.e: scalars) and furthermore the scalar multiplier must appear on
+the right\-hand side of the arithmetic operation.
+.sp
+For example it is possible to filter for UDP destination ports greater or
+equal by one to the source port with the expression:
+.sp
+.if n .RS 4
+.nf
+.fam C
+udp.dstport >= udp.srcport + 1
+.fam
+.fi
+.if n .RE
+.sp
+It is possible to group arithmetic expressions using curly brackets (parenthesis
+will not work for this):
+.sp
+.if n .RS 4
+.nf
+.fam C
+tcp.dstport >= 4 * {tcp.srcport + 3}
+.fam
+.fi
+.if n .RE
+.sp
+Do not confuse this usage of curly brackets with set membership.
+.sp
+An unfortunate quirk in the filter syntax is that the subtraction operator
+must be preceded by a space character, so "A\-B" must be written as "A \-B"
+or "A \- B".
+.SS "Protocol field references"
+.sp
+A variable using a sigil with the form $some.proto.field or ${some.proto.field} is called a field
+reference. A field reference is a field value read from the currently
+selected frame in the GUI. This is useful to build dynamic filters such as,
+frames since the last five minutes to the selected frame:
+.sp
+.if n .RS 4
+.nf
+.fam C
+frame.time_relative >= ${frame.time_relative} \- 300
+.fam
+.fi
+.if n .RE
+.sp
+or more simply
+.sp
+.if n .RS 4
+.nf
+.fam C
+frame.time_relative >= $frame.time_relative \- 300
+.fam
+.fi
+.if n .RE
+.sp
+Field references share a similar notation to macros but are distinct
+syntactical elements in the filter language.
+.SS "Logical expressions"
+.sp
+Tests can be combined using logical expressions.
+These too are expressible in C\-like syntax or with English\-like
+abbreviations. The following table lists the logical operators from
+highest to lowest precedence:
+.sp
+.if n .RS 4
+.nf
+.fam C
+not, !\&    Logical NOT\&   (right\-associative)
+and, &&\&   Logical AND\&   (left\-associative)
+xor, ^^\&   Logical XOR\&   (left\-associative)
+or,\&  ||\&   Logical OR\&    (left\-associative)
+.fam
+.fi
+.if n .RE
+.sp
+The evaluation is always performed left to right. Expressions can be grouped
+by parentheses as well. The expression "A and B or not C or D and not E or F"
+is read:
+.sp
+.if n .RS 4
+.nf
+.fam C
+(A and B) or (not C) or (D and (not E)) or F
+.fam
+.fi
+.if n .RE
+.sp
+It\(cqs usually better to be explicit about grouping using parenthesis.
+The following are all valid display filter expressions:
+.sp
+.if n .RS 4
+.nf
+.fam C
+tcp.port == 80 and ip.src == 192.168.2.1
+not llc
+http and frame[100\-199] contains "wireshark"
+(ipx.src.net == 0xbad && ipx.src.node == 0.0.0.0.0.1) || ip
+.fam
+.fi
+.if n .RE
+.sp
+Remember that whenever a protocol or field name occurs in an expression, the
+"exists" operator is implicitly called. The "exists" operator has the highest
+priority. This means that the first filter expression must be read as "show me
+the packets for which tcp.port exists and equals 80, and ip.src exists and
+equals 192.168.2.1". The second filter expression means "show me the packets
+where not exists llc", or in other words "where llc does not exist" and hence
+will match all packets that do not contain the llc protocol.
+The third filter expression includes the constraint that offset 199 in the
+frame exists, in other words the length of the frame is at least 200.
+.sp
+Because each comparison has an implicit exists test for field values care must
+be taken when using the display filter to remove noise from
+the packet trace. If, for example, you want to filter out all IP
+multicast packets to address 224.1.2.3, then using:
+.sp
+.if n .RS 4
+.nf
+.fam C
+ip.dst ne 224.1.2.3
+.fam
+.fi
+.if n .RE
+.sp
+may be too restrictive. This is the same as writing:
+.sp
+.if n .RS 4
+.nf
+.fam C
+ip.dst and ip.dst ne 224.1.2.3
+.fam
+.fi
+.if n .RE
+.sp
+The filter selects only frames that have the "ip.dst" field. Any
+other frames, including all non\-IP packets, will not be displayed. To
+display the non\-IP packets as well, you can use one of the following
+two expressions:
+.sp
+.if n .RS 4
+.nf
+.fam C
+not ip.dst or ip.dst ne 224.1.2.3
+not ip.dst eq 224.1.2.3
+.fam
+.fi
+.if n .RE
+.sp
+The first filter uses "not ip.dst" to include all non\-IP packets and then
+lets "ip.dst ne 224.1.2.3" filter out the unwanted IP packets. The
+second filter also negates the implicit existence test and so is
+a shorter way to write the first.
+.SH "FILTER FIELD REFERENCE"
+.sp
+The entire list of display filters is too large to list here. You can
+can find references and examples at the following locations:
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.  sp -1
+.  IP \(bu 2.3
+.\}
+The online Display Filter Reference: \c
+.URL "https://www.wireshark.org/docs/dfref/" "" ""
+.RE
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.  sp -1
+.  IP \(bu 2.3
+.\}
+\fIView:Internals:Supported Protocols\fP in Wireshark
+.RE
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.  sp -1
+.  IP \(bu 2.3
+.\}
+\f(CRtshark \-G fields\fP on the command line
+.RE
+.sp
+.RS 4
+.ie n \{\
+\h'-04'\(bu\h'+03'\c
+.\}
+.el \{\
+.  sp -1
+.  IP \(bu 2.3
+.\}
+The Wireshark wiki: \c
+.URL "https://wiki.wireshark.org/DisplayFilters" "" ""
+.RE
+.SH "NOTES"
+.sp
+The \fBwireshark\-filter(4)\fP manpage is part of the \fBWireshark\fP distribution.
+The latest version of \fBWireshark\fP can be found at
+.URL "https://www.wireshark.org" "" "."
+.sp
+Regular expressions in the "matches" operator are provided by the PCRE2 library.
+See \c
+.URL "https://www.pcre.org/" "" ""
+for more information.
+.sp
+This manpage does not describe the capture filter syntax, which is
+different. See the manual page of pcap\-filter(7) or, if that doesn\(cqt exist,
+tcpdump(8), or, if that doesn\(cqt exist, \c
+.URL "https://wiki.wireshark.org/CaptureFilters" ""
+for a description of capture filters.
+.sp
+Display Filters are also described in the \c
+.URL "https://www.wireshark.org/docs/wsug_html_chunked/ChWorkBuildDisplayFilterSection.html" "Wireshark User\(cqs Guide" "."
+.SH "SEE ALSO"
+.sp
+wireshark(1), tshark(1), editcap(1), pcap(3), pcap\-filter(7) or tcpdump(8) if it
+doesn\(cqt exist.
+.SH "AUTHORS"
+.sp
+See the list of authors in the \fBWireshark\fP man page for a list of authors of
+that code.

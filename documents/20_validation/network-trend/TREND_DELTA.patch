@@ -1,0 +1,1704 @@
+diff --git a/baseline/backend/api/cleanhouse.py b/after/backend/api/cleanhouse.py
+index 502921c..d638592 100644
+--- a/baseline/backend/api/cleanhouse.py
++++ b/after/backend/api/cleanhouse.py
+@@ -88,6 +88,8 @@ NETWORK_FINDINGS_RELATED_ID_LIMIT = 8
+ NETWORK_FINDINGS_DESTINATION_LIMIT = 8
+ NETWORK_TREND_BUCKET_EVENT_TYPE = "network_trend_bucket"
+ NETWORK_TREND_TICK_EVENT_TYPE = "network_trend_tick"
++NETWORK_TREND_INTERPRETATION_SCHEMA = "cleanhouse.network.trend.interpretation.v1"
++NETWORK_TREND_RULE_VERSION = "network-trend-rationalization.v1"
+ NETWORK_OBSERVATION_EVENT_TYPE = "network_observation"
+ NETWORK_TIMELINE_NOTABLE_EVENT_TYPE = "network_timeline_notable"
+ NETWORK_TIMELINE_GAP_EVENT_TYPE = "network_timeline_gap"
+@@ -3899,6 +3901,7 @@ def _network_apply_enrichment(event: dict[str, Any], enrichment: dict[str, dict[
+         "system_impact": normalized["system_impact"],
+         "timeline_anchor": normalized["timestamp"],
+     }
++    normalized["trend_interpretation"] = _network_trend_interpretation_from_event(normalized)
+     normalized.pop("interface", None)
+     return normalized
+ 
+@@ -3934,6 +3937,7 @@ def _network_public_event(event: dict[str, Any]) -> dict[str, Any]:
+         "summary",
+         "meaning",
+         "suspicious",
++        "known_malicious",
+         "reason",
+         "source_display",
+         "destination_display",
+@@ -3949,6 +3953,14 @@ def _network_public_event(event: dict[str, Any]) -> dict[str, Any]:
+         "degradedCount",
+         "missingDestinationCount",
+         "externalOnlyCount",
++        "evidence_state",
++        "interpretation_schema",
++        "rule_version",
++        "interpretation",
++        "trend_interpretation",
++        "capture_generations",
++        "evidence_count",
++        "contradiction_count",
+         "source_event_id",
+         "socket_state",
+         "socket_role",
+@@ -4254,16 +4266,22 @@ def _network_trend_bucket_key(timestamp: str, range_key: str = "5s") -> tuple[st
+     dt = _network_event_datetime(timestamp)
+     duration_ms = NETWORK_TIME_RANGES_MS.get(range_key, NETWORK_TIME_RANGES_MS["5s"])
+     bucket_count = NETWORK_TREND_BUCKETS.get(range_key, NETWORK_TREND_BUCKETS["5s"])
+-    bucket_seconds = max(duration_ms / bucket_count / 1000.0, 1.0)
+-    bucket_start_epoch = int(dt.timestamp() // bucket_seconds * bucket_seconds)
+-    start = datetime.fromtimestamp(bucket_start_epoch, tz=timezone.utc)
+-    end = datetime.fromtimestamp(bucket_start_epoch + bucket_seconds, tz=timezone.utc)
+-    return f"{range_key}:{int(bucket_start_epoch)}", start, end
++    bucket_ms = max(int(duration_ms / bucket_count), 1)
++    event_ms = int(dt.timestamp() * 1000)
++    bucket_start_ms = event_ms // bucket_ms * bucket_ms
++    start = datetime.fromtimestamp(bucket_start_ms / 1000.0, tz=timezone.utc)
++    end = datetime.fromtimestamp((bucket_start_ms + bucket_ms) / 1000.0, tz=timezone.utc)
++    return f"{range_key}:{bucket_start_ms}", start, end
+ 
+ 
+-def _stored_network_buckets(limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
++def _stored_network_buckets(
++    limit: int = NETWORK_EVIDENCE_LOOKBACK,
++    *,
++    start: datetime | None = None,
++    end: datetime | None = None,
++) -> list[dict[str, Any]]:
+     buckets = []
+-    for row in _network_stored_event_rows(NETWORK_TREND_BUCKET_EVENT_TYPE, limit=limit):
++    for row in _network_stored_event_rows(NETWORK_TREND_BUCKET_EVENT_TYPE, limit=limit, start=start, end=end):
+         data = row.get("data") if isinstance(row.get("data"), dict) else {}
+         bucket = data.get("network_bucket") if isinstance(data.get("network_bucket"), dict) else {}
+         if bucket:
+@@ -4312,11 +4330,171 @@ def _network_trend_sample_from_event(network_event: dict[str, Any]) -> dict[str,
+         "tls_sni": public.get("tls_sni") or "",
+         "http_host": public.get("http_host") or "",
+         "severity": public.get("severity") or "low",
++        "confidence": public.get("confidence") or "low",
++        "category": public.get("category") or "",
++        "protocol": public.get("protocol") or "",
++        "known_malicious": bool(public.get("known_malicious")),
+         "suspicious": bool(public.get("suspicious")),
++        "system_impact": int(public.get("system_impact") or 0),
++        "collector_generation": public.get("collector_generation"),
++        "server_boot_id": public.get("server_boot_id") or "",
+         "evidence_refs": [f"local://cleanhouse/network/{source_event_id}"] if source_event_id else [],
+     }
+ 
+ 
++def _network_trend_interpretation_from_event(network_event: dict[str, Any]) -> dict[str, Any]:
++    """Classify retained evidence without rewriting its factual record."""
++    event = dict(network_event or {})
++    app = str(event.get("app") or event.get("process") or "Unknown app").strip() or "Unknown app"
++    destination = str(
++        event.get("dns_query")
++        or event.get("http_host")
++        or event.get("tls_sni")
++        or event.get("destination")
++        or event.get("dst_ip")
++        or ""
++    ).strip()
++    dst_ip = str(event.get("dst_ip") or destination or "").strip()
++    dst_port = str(event.get("dst_port") or "").strip()
++    protocol = str(event.get("protocol") or "").strip().upper()
++    severity = str(event.get("severity") or "low").strip().lower()
++    confidence = str(event.get("confidence") or "low").strip().lower()
++    suspicious = bool(event.get("suspicious"))
++    known_malicious = bool(event.get("known_malicious"))
++    external = bool(dst_ip) and not _is_local_network_host(dst_ip)
++    named_destination = str(event.get("dns_query") or event.get("http_host") or event.get("tls_sni") or "").strip()
++    explicit_destination = str(event.get("destination") or "").strip()
++    readable_destination = bool(named_destination or (explicit_destination and explicit_destination != dst_ip))
++    source_event_id = str(event.get("source_event_id") or event.get("event_id") or event.get("sample_id") or "").strip()
++    evidence_refs = list(dict.fromkeys(
++        str(value).strip()
++        for value in (event.get("evidence_refs") or ([f"local://cleanhouse/network/{source_event_id}"] if source_event_id else []))
++        if str(value).strip()
++    ))[:30]
++    series = {
++        "vulnerabilities": {"matched": False, "confidence": 0.0, "rationale": [], "signals": []},
++        "threats": {"matched": False, "confidence": 0.0, "rationale": [], "signals": []},
++        "strengths": {"matched": False, "confidence": 0.0, "rationale": [], "signals": []},
++    }
++
++    def mark(key: str, signal: str, rationale: str, weight: float) -> None:
++        target = series[key]
++        target["matched"] = True
++        target["confidence"] = max(float(target["confidence"]), weight)
++        if signal not in target["signals"]:
++            target["signals"].append(signal)
++        if rationale not in target["rationale"]:
++            target["rationale"].append(rationale)
++
++    if known_malicious:
++        mark("threats", "known_malicious", "Reviewed evidence marks this observation as known malicious.", 1.0)
++    if suspicious:
++        mark("threats", "suspicious", "Retained evidence carries a suspicious review signal.", 0.85)
++    severity_weight = {"critical": 0.95, "high": 0.85, "warning": 0.7, "medium": 0.65}.get(severity)
++    if severity_weight:
++        mark("threats", f"severity:{severity}", f"Retained evidence has {severity} review severity.", severity_weight)
++    if external and app.lower() == "unknown app":
++        mark("vulnerabilities", "unknown_external_owner", "External activity lacks a verified owning application.", 0.8)
++    if external and not readable_destination:
++        mark("vulnerabilities", "unresolved_external_destination", "External activity lacks a readable destination identity.", 0.7)
++    if external and confidence == "low":
++        mark("vulnerabilities", "low_attribution_confidence", "External attribution confidence is low.", 0.6)
++    if protocol == "HTTP" or dst_port == "80":
++        mark("vulnerabilities", "cleartext_http", "Observed service metadata indicates cleartext HTTP.", 0.85)
++    if app.lower() != "unknown app" and confidence == "high":
++        mark("strengths", "identified_owner", "Application ownership is identified with high confidence.", 0.85)
++    if readable_destination:
++        mark("strengths", "readable_destination", "The destination is represented by retained readable evidence.", 0.7)
++    if protocol in {"TLS", "HTTPS", "QUIC"} or dst_port in {"443", "465", "853", "993", "995"}:
++        mark("strengths", "encrypted_service", "Observed protocol or service metadata indicates encrypted transport.", 0.8)
++    if dst_ip and not external:
++        mark("strengths", "local_scope", "Observed traffic remains within a local or private network scope.", 0.65)
++    matched = [key for key, value in series.items() if value["matched"]]
++    return {
++        "schema": NETWORK_TREND_INTERPRETATION_SCHEMA,
++        "rule_version": NETWORK_TREND_RULE_VERSION,
++        "evidence_state": "observed" if source_event_id else "unknown",
++        "source_event_id": source_event_id,
++        "evidence_refs": evidence_refs,
++        "capture_generation": event.get("collector_generation"),
++        "series": series,
++        "contradictory": "strengths" in matched and bool({"vulnerabilities", "threats"}.intersection(matched)),
++    }
++
++
++def _network_trend_interpretation_buckets(range_key: str, samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
++    buckets: dict[str, dict[str, Any]] = {}
++    deduplicated: dict[str, dict[str, Any]] = {}
++    for sample in samples:
++        identity = str(sample.get("source_event_id") or sample.get("event_id") or sample.get("sample_id") or "").strip()
++        if identity:
++            deduplicated.setdefault(identity, sample)
++    for identity, sample in deduplicated.items():
++        timestamp = str(sample.get("timestamp") or _now_iso())
++        bucket_key, start, end = _network_trend_bucket_key(timestamp, range_key)
++        interpretation = _network_trend_interpretation_from_event(sample)
++        tick_id = "network_trend_interpretation:" + hashlib.sha256(
++            f"{NETWORK_TREND_RULE_VERSION}:{bucket_key}".encode("utf-8")
++        ).hexdigest()[:24]
++        bucket = buckets.setdefault(bucket_key, {
++            "event_id": tick_id,
++            "tick_id": tick_id,
++            "event_type": "network_trend_interpretation",
++            "timestamp": timestamp,
++            "bucket_key": bucket_key,
++            "bucket_range": range_key,
++            "bucket_start": start.isoformat().replace("+00:00", "Z"),
++            "bucket_end": end.isoformat().replace("+00:00", "Z"),
++            "sealed_at": end.isoformat().replace("+00:00", "Z"),
++            "immutable": datetime.now(timezone.utc) >= end,
++            "evidence_state": "observed",
++            "interpretation_schema": NETWORK_TREND_INTERPRETATION_SCHEMA,
++            "rule_version": NETWORK_TREND_RULE_VERSION,
++            "interpretation": {
++                key: {"value": 0, "confidence": None, "rationale": [], "signals": [], "evidence_refs": []}
++                for key in ("vulnerabilities", "threats", "strengths")
++            },
++            "capture_generations": [],
++            "evidence_count": 0,
++            "contradiction_count": 0,
++            "related_event_ids": [],
++            "evidence_refs": [],
++            "_confidence": {"vulnerabilities": [], "threats": [], "strengths": []},
++        })
++        bucket["timestamp"] = max(str(bucket.get("timestamp") or ""), timestamp)
++        bucket["evidence_count"] += 1
++        bucket["contradiction_count"] += 1 if interpretation.get("contradictory") else 0
++        generation = interpretation.get("capture_generation")
++        if generation is not None and generation not in bucket["capture_generations"]:
++            bucket["capture_generations"].append(generation)
++        if identity not in bucket["related_event_ids"] and len(bucket["related_event_ids"]) < 30:
++            bucket["related_event_ids"].append(identity)
++        for evidence_ref in interpretation.get("evidence_refs") or []:
++            if evidence_ref not in bucket["evidence_refs"] and len(bucket["evidence_refs"]) < 30:
++                bucket["evidence_refs"].append(evidence_ref)
++        for key, result in interpretation["series"].items():
++            if not result.get("matched"):
++                continue
++            target = bucket["interpretation"][key]
++            target["value"] += 1
++            bucket["_confidence"][key].append(float(result.get("confidence") or 0.0))
++            for rationale in result.get("rationale") or []:
++                if rationale not in target["rationale"] and len(target["rationale"]) < 8:
++                    target["rationale"].append(rationale)
++            for signal in result.get("signals") or []:
++                if signal not in target["signals"] and len(target["signals"]) < 12:
++                    target["signals"].append(signal)
++            for evidence_ref in interpretation.get("evidence_refs") or []:
++                if evidence_ref not in target["evidence_refs"] and len(target["evidence_refs"]) < 30:
++                    target["evidence_refs"].append(evidence_ref)
++    for bucket in buckets.values():
++        for key, confidences in bucket.pop("_confidence").items():
++            bucket["interpretation"][key]["confidence"] = (
++                round(sum(confidences) / len(confidences), 3) if confidences else None
++            )
++    return sorted(buckets.values(), key=lambda item: (_network_event_datetime(item.get("bucket_start")), str(item.get("event_id") or "")))
++
++
+ def _preserve_network_trend_sample(network_event: dict[str, Any]) -> None:
+     sample = _network_trend_sample_from_event(network_event)
+     if not sample.get("sample_id"):
+@@ -4345,9 +4523,14 @@ def _vvault_network_trend_samples(start: datetime | None = None, end: datetime |
+         return []
+ 
+ 
+-def _stored_network_trend_ticks(limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
++def _stored_network_trend_ticks(
++    limit: int = NETWORK_EVIDENCE_LOOKBACK,
++    *,
++    start: datetime | None = None,
++    end: datetime | None = None,
++) -> list[dict[str, Any]]:
+     ticks = []
+-    for row in _network_stored_event_rows(NETWORK_TREND_TICK_EVENT_TYPE, limit=limit):
++    for row in _network_stored_event_rows(NETWORK_TREND_TICK_EVENT_TYPE, limit=limit, start=start, end=end):
+         data = row.get("data") if isinstance(row.get("data"), dict) else {}
+         tick = data.get("network_tick") if isinstance(data.get("network_tick"), dict) else {}
+         if tick:
+@@ -4401,39 +4584,64 @@ def _network_trend_tick_from_event(network_event: dict[str, Any], range_key: str
+ 
+ 
+ def _network_trend_ticks_from_samples(range_key: str, samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+-    ticks = []
++    buckets: dict[str, dict[str, Any]] = {}
+     for sample in samples:
+         source_event_id = str(sample.get("source_event_id") or sample.get("event_id") or sample.get("sample_id") or "")
+         timestamp = str(sample.get("timestamp") or _now_iso())
+         bucket_key, start, end = _network_trend_bucket_key(timestamp, range_key)
+-        tick_id = "network_tick:" + hashlib.sha256(f"{source_event_id}:{range_key}:{timestamp}".encode("utf-8")).hexdigest()[:24]
++        tick_id = "network_tick:" + hashlib.sha256(bucket_key.encode("utf-8")).hexdigest()[:24]
+         external = not _is_local_network_host(str(sample.get("dst_ip") or sample.get("destination") or ""))
+         degraded = bool(sample.get("suspicious")) or NETWORK_SEVERITY_RANK.get(str(sample.get("severity") or ""), 0) >= NETWORK_SEVERITY_RANK["warning"]
+         missing_destination = external and not (sample.get("dns_query") or sample.get("http_host") or sample.get("tls_sni") or sample.get("destination"))
+-        ticks.append({
++        identity = _network_startup_operator_identity(sample)
++        bucket = buckets.setdefault(bucket_key, {
+             "event_id": tick_id,
+             "tick_id": tick_id,
+             "timestamp": timestamp,
+-            "sealed_at": timestamp,
+-            "immutable": True,
+-            "bucket_key": f"tick:{range_key}:{tick_id}",
++            "sealed_at": end.isoformat().replace("+00:00", "Z"),
++            "immutable": datetime.now(timezone.utc) >= end,
++            "bucket_key": bucket_key,
+             "bucket_range": range_key,
+             "bucket_start": start.isoformat().replace("+00:00", "Z"),
+             "bucket_end": end.isoformat().replace("+00:00", "Z"),
+-            "connectionCount": 1,
+-            "degradedCount": 1 if degraded else 0,
+-            "missingDestinationCount": 1 if missing_destination else 0,
+-            "externalOnlyCount": 1 if external else 0,
++            "connectionCount": 0,
++            "degradedCount": 0,
++            "missingDestinationCount": 0,
++            "externalOnlyCount": 0,
+             "source_event_id": source_event_id,
+-            "related_event_ids": [source_event_id] if source_event_id else [],
+-            "evidence_refs": list(sample.get("evidence_refs") or ([f"local://cleanhouse/network/{source_event_id}"] if source_event_id else [])),
++            "related_event_ids": [],
++            "evidence_refs": [],
+             "app": sample.get("app") or sample.get("process") or "Unknown app",
+             "process": sample.get("process") or sample.get("app") or "Unknown app",
+             "dst_ip": sample.get("dst_ip") or "",
+             "dst_port": sample.get("dst_port") or "",
+             "severity": sample.get("severity") or "low",
++            "_connections": set(),
++            "_degraded_connections": set(),
++            "_missing_destination_connections": set(),
++            "_external_connections": set(),
+         })
+-    return ticks
++        bucket["timestamp"] = max(str(bucket.get("timestamp") or ""), timestamp)
++        bucket["_connections"].add(identity)
++        if degraded:
++            bucket["_degraded_connections"].add(identity)
++        if missing_destination:
++            bucket["_missing_destination_connections"].add(identity)
++        if external:
++            bucket["_external_connections"].add(identity)
++        if source_event_id and source_event_id not in bucket["related_event_ids"] and len(bucket["related_event_ids"]) < 30:
++            bucket["related_event_ids"].append(source_event_id)
++        for evidence_ref in sample.get("evidence_refs") or ([f"local://cleanhouse/network/{source_event_id}"] if source_event_id else []):
++            if evidence_ref not in bucket["evidence_refs"] and len(bucket["evidence_refs"]) < 30:
++                bucket["evidence_refs"].append(evidence_ref)
++    ticks = []
++    for bucket in buckets.values():
++        bucket["connectionCount"] = len(bucket.pop("_connections"))
++        bucket["degradedCount"] = len(bucket.pop("_degraded_connections"))
++        bucket["missingDestinationCount"] = len(bucket.pop("_missing_destination_connections"))
++        bucket["externalOnlyCount"] = len(bucket.pop("_external_connections"))
++        ticks.append(bucket)
++    return sorted(ticks, key=lambda item: (_network_event_datetime(item.get("bucket_start")), str(item.get("tick_id") or "")))
+ 
+ 
+ def _all_network_trend_ticks(range_key: str, start: datetime | None = None, end: datetime | None = None, limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
+@@ -6198,42 +6406,29 @@ def _network_projection_trend(range_key: str) -> tuple[dict[str, Any], int]:
+     history_sources["local_buckets"] = len(local_buckets)
+     history_sources["vvault_buckets"] = len(vvault_buckets)
+     local_ticks = [
+-        tick for tick in _stored_network_trend_ticks(limit=history_limit)
+-        if tick.get("bucket_range") == range_key and start <= _network_event_datetime(tick.get("timestamp")) <= end
+-    ]
+-    vvault_ticks = _vvault_network_trend_ticks(range_key, start, end, limit=history_limit)
++        tick for tick in _stored_network_trend_ticks(limit=history_limit, start=start, end=end)
++        if tick.get("bucket_range") == range_key and start <= _network_event_datetime(tick.get("timestamp")) < end
++    ] if not recent_only else []
++    vvault_ticks = [] if recent_only else _vvault_network_trend_ticks(range_key, start, end, limit=history_limit)
+     history_sources["local_ticks"] = len(local_ticks)
+     history_sources["vvault_ticks"] = len(vvault_ticks)
+-    local_samples = [
+-        _network_trend_sample_from_event(item)
+-        for item in _network_stored_observations(limit=history_limit)
+-        if start <= _network_event_datetime(item.get("timestamp")) <= end
+-    ]
+-    vvault_samples = _vvault_network_trend_samples(start, end, limit=history_limit)
++    local_sample_events = {
++        str(item.get("event_id") or ""): item
++        for item in ([] if recent_only else _network_stored_observations(limit=history_limit, start=start, end=end))
++        if str(item.get("event_id") or "") and start <= _network_event_datetime(item.get("timestamp")) < end
++    }
++    for item in recent_sample_events:
++        event_id = str(item.get("event_id") or "")
++        if event_id:
++            local_sample_events[event_id] = item
++    local_samples = [_network_trend_sample_from_event(item) for item in local_sample_events.values()]
++    vvault_samples = [] if recent_only else _vvault_network_trend_samples(start, end, limit=history_limit)
+     history_sources["local_samples"] = len(local_samples)
+     history_sources["recent_samples"] = len(recent_sample_events)
+     history_sources["vvault_samples"] = len(vvault_samples)
+-    ticks_by_id: dict[str, dict[str, Any]] = {}
+-    for tick in [*local_ticks, *vvault_ticks]:
+-        tick_id = str(tick.get("tick_id") or tick.get("event_id") or "")
+-        if tick_id:
+-            ticks_by_id.setdefault(tick_id, tick)
+-    for tick in _network_trend_ticks_from_samples(range_key, [*local_samples, *vvault_samples]):
+-        tick_id = str(tick.get("tick_id") or tick.get("event_id") or "")
+-        if tick_id:
+-            ticks_by_id.setdefault(tick_id, tick)
+-            _preserve_network_trend_tick(tick)
+-    trend_points: dict[str, dict[str, Any]] = dict(ticks_by_id)
+-    if not trend_points:
+-        for bucket in [*local_buckets, *vvault_buckets]:
+-            bucket_id = str(bucket.get("event_id") or bucket.get("bucket_key") or "")
+-            if bucket_id:
+-                trend_points.setdefault(bucket_id, bucket)
+-    ticks = sorted(
+-        trend_points.values(),
+-        key=lambda item: (_network_event_datetime(item.get("timestamp")), str(item.get("tick_id") or item.get("event_id") or "")),
+-    )
+-    gap_count = 0
++    observed_samples = [*local_samples, *vvault_samples]
++    ticks = _network_trend_interpretation_buckets(range_key, observed_samples)
++    gap_count = max(NETWORK_TREND_BUCKETS.get(range_key, NETWORK_TREND_BUCKETS["5s"]) - len(ticks), 0)
+     if not ticks and not local_samples and not vvault_samples:
+         gap_event_id = "network_gap:" + hashlib.sha256(f"trend:{range_key}:{start.isoformat()}:{end.isoformat()}".encode("utf-8")).hexdigest()[:24]
+         preservation = vvault_preservation.preserve_network_timeline_gap(
+@@ -6271,6 +6466,11 @@ def _network_projection_trend(range_key: str) -> tuple[dict[str, Any], int]:
+                 "live_ticks": True,
+                 "gap_count": gap_count,
+                 "immutable_ticks": True,
++                "interpretation_schema": NETWORK_TREND_INTERPRETATION_SCHEMA,
++                "rule_version": NETWORK_TREND_RULE_VERSION,
++                "series": ["vulnerabilities", "threats", "strengths"],
++                "zero_means": "observed_bucket_without_matching_signal",
++                "missing_means": "no_retained_evidence_for_bucket",
+                 "history_limit": history_limit,
+                 "coverage_state": (
+                     "continuous" if observed_coverage_start and observed_coverage_start <= start
+diff --git a/baseline/documents/00_start-here/INDEX.md b/after/documents/00_start-here/INDEX.md
+index de89e89..aa3c7a2 100644
+--- a/baseline/documents/00_start-here/INDEX.md
++++ b/after/documents/00_start-here/INDEX.md
+@@ -8,6 +8,8 @@
+ - `cleanhouse-auth-continuity.md`: canonical wizard boundaries and CleanHouse authentication acceptance contract.
+ - `network-product-contract.md`: locked source of truth for observable Network behavior, evidence guarantees, Translation, and tab boundaries.
+ - `network-findings-implementation.md`: authoritative subordinate implementation contract for the responsive, retained Findings checkpoint.
++- `network-trend-implementation.md`: authoritative subordinate implementation contract for versioned Trend rationalization, controls, parity, gaps, and responsive geometry.
++- `../20_validation/network-trend/README.md`: reproducibility receipt for the bounded Network Trend implementation and verification path set.
+ - `network-table-implementation-proposal.md`: draft, not-approved, non-authoritative home for deferred Network Table implementation decisions.
+ - `../30_evidence/transcript-ledger/INDEX.md`: project-wide active and archived transcript receipt.
+ - `../30_evidence/network-pm-scorecard.md`: live dispatch, gate, evidence, and thread-continuity register for the active Network milestone.
+diff --git a/after/documents/00_start-here/network-trend-implementation.md b/after/documents/00_start-here/network-trend-implementation.md
+new file mode 100644
+index 0000000..dc07376
+--- /dev/null
++++ b/after/documents/00_start-here/network-trend-implementation.md
+@@ -0,0 +1,272 @@
++# Network Trend implementation contract
++
++## Approved boundary: NETWORK-TREND-RATIONALIZATION-001
++
++This is the authoritative subordinate contract for the implemented Network
++Trend checkpoint. Code and this contract move together. It does not modify the
++master `CLEANHOUSE.md` canon, factual Timeline receipts, collection,
++authentication, runtime readiness, Distribution, Findings, or Connections.
++
++The owner has clarified Trend as **interpreted bias and rationalization over
++time**. Timeline remains the factual chronology. The older master sentence
++describing Trend only as observed activity is therefore a canon-reconciliation
++candidate, but is not edited by this checkpoint because master-canon changes
++require an explicit owner instruction naming that file.
++
++## Product question and boundaries
++
++Trend answers:
++
++> How do the current versioned interpretation rules rationalize retained
++> Network evidence across time, and where does evidence coverage stop?
++
++Trend is not a packet counter, socket inventory, factual event log, malware
++verdict, authorization decision, interpolated forecast, or replacement for
++Timeline. Raw observed connection counts are not presented as meaningful Trend.
++An interpretation never rewrites the retained observation that supports it.
++
++Three independently visible series are implemented:
++
++- **Vulnerabilities** — conditions that reduce confidence or expose a weakness;
++- **Threats** — retained review signals indicating suspicious, malicious, or
++  elevated-severity evidence;
++- **Strengths** — retained evidence supporting identified ownership, readable
++  destination context, encrypted service, or local/private scope.
++
++The same item may support Strengths and an opposing series. Such contradictory
++evidence is preserved and counted; signals are never netted into a single
++verdict.
++
++## Architecture and provenance
++
++```text
++immutable Network observation
++    -> bounded local event spine and authenticated OVVAULTS sample history
++    -> source-event deduplication
++    -> network-trend-rationalization.v1 rules
++    -> half-open UTC bucket [start, end)
++    -> interpretation aggregate with evidence links
++    -> GET /cleanhouse/network/projection?view=trend&range={range}
++    -> one shared filtered dataset
++    -> Graph or Chart presentation
++```
++
++The endpoint retains the established ranges: `5s`, `1m`, `30m`, `1h`, `24h`,
++`7d`, `1mo`, `3mo`, and `12mo`. Reads remain bounded by the existing projection
++history limit and `NETWORK_PROJECTION_LIMIT`. The projection cache remains the
++existing bounded Network cache. Buckets are aligned to UTC epoch boundaries at
++the configured range duration divided by its bucket count; the `5s` range keeps
++its subsecond resolution instead of silently widening buckets to one second.
++
++Old count-only trend ticks and legacy connection-count buckets remain preserved
++as factual historical artifacts. They are intentionally not projected as
++interpreted Trend because they lack the versioned rule result required by this
++contract. No record is deleted or rewritten.
++
++## Versioned interpretation schema
++
++Every returned bucket uses:
++
++```json
++{
++  "interpretation_schema": "cleanhouse.network.trend.interpretation.v1",
++  "rule_version": "network-trend-rationalization.v1",
++  "evidence_state": "observed",
++  "bucket_range": "1m",
++  "bucket_start": "UTC timestamp",
++  "bucket_end": "UTC timestamp",
++  "capture_generations": [4],
++  "evidence_count": 2,
++  "contradiction_count": 1,
++  "related_event_ids": ["immutable source ids"],
++  "evidence_refs": ["local:// or provider references"],
++  "interpretation": {
++    "vulnerabilities": {
++      "value": 1,
++      "confidence": 0.8,
++      "rationale": ["human-readable rule rationale"],
++      "signals": ["stable signal ids"],
++      "evidence_refs": ["supporting references"]
++    },
++    "threats": {},
++    "strengths": {}
++  }
++}
++```
++
++`value` is the number of distinct retained evidence items matching that series
++inside the bucket. `confidence` is the mean confidence of matching rules for
++the series, rounded to three decimals. Source IDs, evidence references,
++capture generations, rule version, signal IDs, and rationales make the result
++traceable. A zero is valid only in an **observed bucket** whose evidence matched
++no rule for that series. An absent bucket is a **gap**, never zero.
++
++## `network-trend-rationalization.v1` rules
++
++Rules are deterministic and independently additive. Within one evidence item,
++multiple reasons for the same series produce one series value and retain all
++bounded rationales/signals.
++
++| Series | Stable signal | Evidence condition | Confidence |
++|---|---|---|---:|
++| Threats | `known_malicious` | Reviewed source marks evidence known malicious | 1.00 |
++| Threats | `suspicious` | Retained source has a suspicious review signal | 0.85 |
++| Threats | `severity:{level}` | Critical, high, warning, or medium severity | 0.95 / 0.85 / 0.70 / 0.65 |
++| Vulnerabilities | `unknown_external_owner` | External traffic lacks identified application ownership | 0.80 |
++| Vulnerabilities | `unresolved_external_destination` | External traffic lacks DNS, HTTP host, TLS SNI, or another distinct readable destination | 0.70 |
++| Vulnerabilities | `low_attribution_confidence` | External attribution confidence is low | 0.60 |
++| Vulnerabilities | `cleartext_http` | Protocol is HTTP or destination port is 80 | 0.85 |
++| Strengths | `identified_owner` | Application is identified with high confidence | 0.85 |
++| Strengths | `readable_destination` | Retained evidence includes a readable destination distinct from an IP-only fallback | 0.70 |
++| Strengths | `encrypted_service` | TLS, HTTPS, QUIC, or reviewed encrypted service port | 0.80 |
++| Strengths | `local_scope` | Destination is local/private network scope | 0.65 |
++
++Reclassification occurs only by publishing a new rule version and recomputing
++the derived projection. Factual observations and prior evidence references
++remain unchanged. This checkpoint does not persist an interpretation back into
++the factual Timeline.
++
++## State and gap contract
++
++- **Loading / refreshing:** established Network request state and copy remain
++  authoritative.
++- **Observed bucket:** has one or more deduplicated retained evidence items and
++  may contain zero for a particular series.
++- **Gap:** no retained evidence covers that bucket. Graph renders a labeled,
++  hatched gap; Chart renders an em dash and `Gap` evidence state.
++- **Partial coverage:** summary exposes `gap_count`, coverage state/start,
++  history source counts, rule version, and zero/missing meanings.
++- **No data:** projection has no interpreted buckets and preserves a durable
++  gap receipt through the existing preservation path.
++- **Unavailable/degraded:** the exact collector/capture reason remains visible;
++  retained interpreted buckets may still render when the projection succeeds.
++- **Contradiction:** `contradiction_count` records evidence supporting Strengths
++  and either Vulnerabilities or Threats in the same source item.
++
++No interpolation occurs. No absent bucket is drawn as a value. HTTP failure is
++not converted into an empty successful projection.
++
++## Controls, ordering, and parity
++
++The Trend range toolbar retains all nine established windows. Trend adds:
++
++- Graph/Chart toggle in `.network-graph-toggle` using
++  `[data-network-trend-display]` and `aria-pressed`;
++- series filter buttons using `[data-network-trend-series]` and
++  `aria-pressed`;
++- series order selector `[data-network-trend-sort]` with `canonical`,
++  `value_desc`, and `alphabetical` options;
++- the existing `Refresh Network` action.
++
++At least one series must remain visible. Canonical order is Vulnerabilities,
++Threats, Strengths. Highest-signal order uses the aggregate value over the
++selected range with an alphabetical tie break. Sorting changes series order,
++never chronological bucket order.
++
++Graph and Chart are two renderings of `networkTrendDataset(events)`. They share
++the same selected range, filtered series, ordering, bucket boundaries, values,
++gaps, evidence references, rule version, and rationales. Graph uses grouped
++series bars and explicit hatched gaps. Chart uses one chronological row per
++bucket. Controls persist in URL/local storage without altering evidence.
++
++All controls are native keyboard-operable elements. Focus-visible outlines are
++required. Bars are buttons with accessible series/value/range names. Tooltips
++show rationale, confidence, contradiction notice, rule version, and time range.
++Selecting evidence continues to bind the exact bucket to `ctrl`; no remediation
++is executed.
++
++## Responsive geometry and selectors
++
++The Network shell remains the five-row grid with the permanent `44px`
++Wireshark provider row. Trend uses:
++
++```css
++#network #network-results:has(.network-trend-window) {
++    grid-template-rows: minmax(250px, 1fr);
++    overflow: hidden;
++}
++
++.network-trend-window {
++    height: calc(100% - 10px);
++    margin: 0 auto;
++    max-width: 1280px;
++    min-height: 240px;
++    overflow: hidden;
++    width: 100%;
++}
++
++.network-trend-content {
++    overflow: auto;
++    overscroll-behavior: contain;
++}
++```
++
++The effective geometry is:
++
++```text
++Trend top    = toolbar bottom + 8px
++Trend height = results-row height - 10px
++Trend bottom = provider row top - 18px
++Provider     = permanent 44px row
++```
++
++The window is centered, responsive, and left aligned. Page-level Network
++overflow remains hidden. The Trend content area alone owns local overflow.
++Graph has a `640px` local minimum; Chart has a `660px` local minimum, so portrait
++layouts scroll inside the Trend window instead of moving the shell, provider,
++or `ctrl`. At `980px` and below, the header stacks and controls remain left
++aligned.
++
++## Implementation paths
++
++- `backend/api/cleanhouse.py`
++- `frontend/investigations.html`
++- `frontend/js/investigations.js`
++- `frontend/css/investigations.css`
++- `tests/test_network_trend_interpretation.py`
++- `tests/test_network_header_static.py`
++- `tests/network_resilience_node.test.mjs`
++- this document
++
++## Validation commands
++
++The reproducibility receipt for this boundary is
++[`../20_validation/network-trend/README.md`](../20_validation/network-trend/README.md).
++Its manifest fixes the eleven reviewed implementation and verification paths,
++records the three excluded runtime/preservation paths, and proves the Trend-only
++delta by replaying it in an isolated temporary tree. The receipt is validation
++evidence; it does not expand this implementation contract or modify master
++canon.
++
++```bash
++cleanhouse_env/bin/python3 -m unittest -v \
++  tests.test_network_trend_interpretation \
++  tests.test_network_header_static \
++  tests.test_network_capture_truth
++node --test tests/network_resilience_node.test.mjs
++node --test tests/network_table_ctrl_resilience_node.test.mjs
++node --check frontend/js/investigations.js
++cleanhouse_env/bin/python3 -m py_compile backend/api/cleanhouse.py tests/test_network_trend_interpretation.py
++cleanhouse_env/bin/python3 scripts/verify-product-surfaces.py
++```
++
++Browser acceptance must cover `768x1024`, `1024x640`, `1440x900`, and
++`1728x1117`, all range controls, Graph/Chart parity, each series filter, each
++sort order, refresh/reload continuity, keyboard traversal, `ctrl` evidence
++binding, exact `8px`/`18px`/`44px` geometry, no page overflow, no unexpected
++console errors, and no failed asset/API requests. Source/runtime hashes must
++match before live claims.
++
++## Failure and limitations
++
++- Capture-provider absence remains an explicit degraded state; retained Trend
++  interpretation does not upgrade collector health.
++- Interpretation quality is limited to retained fields. It does not infer
++  actor intent, authorization, exploitability, or malware verdicts.
++- IP-only destination evidence does not earn readable-destination Strength.
++- Existing count-only historical buckets remain preserved but are not migrated
++  or displayed as interpreted Trend.
++- `1mo`, `3mo`, and `12mo` use the existing fixed-duration Network range
++  contract; this checkpoint does not introduce calendar-month semantics.
++- Authenticated browser acceptance requires an existing approved owner session;
++  this checkpoint does not create accounts, alter providers, or bypass auth.
+diff --git a/baseline/frontend/css/investigations.css b/after/frontend/css/investigations.css
+index bbc152b..4db2009 100644
+--- a/baseline/frontend/css/investigations.css
++++ b/after/frontend/css/investigations.css
+@@ -4057,3 +4057,272 @@ code, pre {
+         transition: none;
+     }
+ }
++
++/* Network Trend: retained-evidence interpretation window. */
++#network #network-results:has(.network-trend-window) {
++    align-content: stretch;
++    grid-template-rows: minmax(250px, 1fr);
++    overflow: hidden;
++}
++
++.network-trend-window {
++    align-self: start;
++    display: grid;
++    gap: 10px;
++    grid-template-rows: auto auto minmax(0, 1fr) auto;
++    height: calc(100% - 10px);
++    margin: 0 auto;
++    max-width: 1280px;
++    min-height: 240px;
++    overflow: hidden;
++    text-align: left;
++    width: 100%;
++}
++
++.network-trend-header {
++    align-items: end;
++    display: flex;
++    gap: 14px;
++    justify-content: space-between;
++    min-width: 0;
++}
++
++.network-trend-header > div:first-child {
++    display: grid;
++    gap: 3px;
++    min-width: 0;
++}
++
++.network-trend-header h3 {
++    color: var(--ink);
++    font-size: 17px;
++    font-weight: 850;
++}
++
++.network-trend-header p,
++.network-trend-provenance {
++    color: var(--muted);
++    font-size: 11px;
++    line-height: 1.35;
++}
++
++.network-trend-controls {
++    align-items: center;
++    display: flex;
++    flex: 0 1 auto;
++    flex-wrap: wrap;
++    gap: 8px;
++    justify-content: flex-end;
++}
++
++.network-trend-series-controls {
++    display: inline-flex;
++    flex-wrap: wrap;
++    gap: 5px;
++}
++
++.network-trend-series-controls button,
++.network-trend-sort-label select {
++    background: rgba(255, 255, 255, 0.045);
++    border: 1px solid var(--line-soft);
++    border-radius: 999px;
++    color: var(--muted);
++    cursor: pointer;
++    font-size: 10px;
++    font-weight: 800;
++    min-height: 30px;
++    padding: 5px 9px;
++}
++
++.network-trend-series-controls button.active {
++    background: rgba(143, 211, 199, 0.16);
++    border-color: rgba(143, 211, 199, 0.44);
++    color: var(--ink);
++}
++
++.network-trend-series-controls button:focus-visible,
++.network-trend-sort-label select:focus-visible,
++.network-trend-bar:focus-visible {
++    outline: 2px solid var(--accent);
++    outline-offset: 2px;
++}
++
++.network-trend-sort-label {
++    align-items: center;
++    color: var(--muted);
++    display: inline-flex;
++    font-size: 10px;
++    font-weight: 800;
++    gap: 6px;
++}
++
++.network-trend-sort-label select {
++    border-radius: 7px;
++    padding-right: 24px;
++}
++
++.network-trend-legend {
++    display: flex;
++    flex-wrap: wrap;
++    gap: 12px;
++}
++
++.network-trend-legend span {
++    align-items: center;
++    color: var(--muted);
++    display: inline-flex;
++    font-size: 10px;
++    font-weight: 800;
++    gap: 5px;
++}
++
++.network-trend-legend span::before {
++    background: currentColor;
++    border-radius: 3px;
++    content: "";
++    height: 8px;
++    width: 8px;
++}
++
++.trend-vulnerabilities { color: #f0c36a !important; }
++.trend-threats { color: #ff8b8b !important; }
++.trend-strengths { color: var(--accent) !important; }
++
++.network-trend-content {
++    min-height: 0;
++    overflow: auto;
++    overscroll-behavior: contain;
++    scrollbar-gutter: stable;
++}
++
++.network-trend-graph {
++    display: grid;
++    gap: 8px;
++    min-height: 100%;
++    min-width: 640px;
++}
++
++.network-trend-chart {
++    align-items: stretch;
++    background-image: linear-gradient(to top, var(--line-soft) 1px, transparent 1px);
++    background-size: 100% 25%;
++    display: grid;
++    gap: 5px;
++    height: 100%;
++    min-height: 190px;
++    padding: 8px 2px 0;
++}
++
++.network-trend-bucket {
++    align-items: end;
++    display: flex;
++    gap: 2px;
++    justify-content: center;
++    min-width: 0;
++}
++
++.network-trend-bucket.is-gap {
++    align-items: center;
++    background: repeating-linear-gradient(135deg, transparent 0 6px, rgba(255, 255, 255, 0.035) 6px 8px);
++    border: 1px dashed var(--line-soft);
++    color: var(--muted);
++    font-size: 9px;
++    justify-content: center;
++}
++
++.network-trend-bucket .network-trend-bar {
++    align-items: start;
++    align-self: end;
++    background: currentColor;
++    border: 0;
++    border-radius: 4px 4px 1px 1px;
++    cursor: pointer;
++    display: flex;
++    height: var(--trend-height);
++    justify-content: center;
++    min-height: 0;
++    min-width: 5px;
++    padding: 2px 0 0;
++    width: min(30%, 18px);
++}
++
++.network-trend-bucket .network-trend-bar.is-zero {
++    background: transparent;
++    border: 1px solid currentColor;
++    border-top-width: 2px;
++    height: 2px;
++    opacity: 0.55;
++    padding: 0;
++}
++
++.network-trend-bucket .network-trend-bar span {
++    color: #08090b;
++    font-size: 8px;
++    font-weight: 900;
++    line-height: 1;
++}
++
++.network-trend-bucket .network-trend-bar.is-zero span {
++    display: none;
++}
++
++.network-trend-axis {
++    color: var(--muted);
++    display: flex;
++    font-size: 10px;
++    justify-content: space-between;
++}
++
++.network-trend-table-wrap {
++    min-width: 660px;
++    overflow: auto;
++}
++
++.network-trend-table {
++    border-collapse: collapse;
++    table-layout: fixed;
++    width: 100%;
++}
++
++.network-trend-table th,
++.network-trend-table td {
++    border-bottom: 1px solid var(--line-soft);
++    color: var(--ink);
++    font-size: 11px;
++    padding: 8px 9px;
++    text-align: left;
++}
++
++.network-trend-table thead th {
++    background: #25292f;
++    color: var(--muted);
++    position: sticky;
++    top: 0;
++    z-index: 1;
++}
++
++.network-trend-table tr.is-gap td,
++.network-trend-table tr.is-gap th {
++    color: var(--muted);
++    font-style: italic;
++}
++
++.network-trend-provenance {
++    min-height: 15px;
++}
++
++@media (max-width: 980px) {
++    .network-trend-header {
++        align-items: start;
++        flex-direction: column;
++    }
++
++    .network-trend-controls {
++        justify-content: flex-start;
++        width: 100%;
++    }
++
++    .network-trend-window {
++        gap: 8px;
++    }
++}
+diff --git a/baseline/frontend/investigations.html b/after/frontend/investigations.html
+index 44c7655..43e7e45 100644
+--- a/baseline/frontend/investigations.html
++++ b/after/frontend/investigations.html
+@@ -233,9 +233,9 @@
+                 </div>
+                 <div class="network-toolbar-actions">
+                     <div id="network-toolbar-context" class="network-toolbar-context" hidden></div>
+-                    <div class="network-graph-toggle" aria-label="Network graph type" hidden>
+-                        <button type="button" data-network-graph-view="bar">Graph</button>
+-                        <button type="button" data-network-graph-view="pie">Chart</button>
++                    <div class="network-graph-toggle" aria-label="Trend presentation" hidden>
++                        <button type="button" data-network-trend-display="graph" aria-pressed="true">Graph</button>
++                        <button type="button" data-network-trend-display="chart" aria-pressed="false">Chart</button>
+                     </div>
+                     <button id="scan-network-btn" class="network-refresh-pill" type="button">Refresh Network</button>
+                 </div>
+diff --git a/baseline/frontend/js/investigations.js b/after/frontend/js/investigations.js
+index 7b15cfe..a98d92d 100644
+--- a/baseline/frontend/js/investigations.js
++++ b/after/frontend/js/investigations.js
+@@ -171,11 +171,20 @@ const NETWORK_HEADER_FLUSH_MS = 500;
+ const NETWORK_SNAPSHOT_BACKOFF_BASE_MS = 1000;
+ const NETWORK_SNAPSHOT_BACKOFF_MAX_MS = 30000;
+ const NETWORK_TREND_LIVE_TICK_LIMIT = 2000;
+-const NETWORK_TREND_Y_AXIS_OPTIONS = [100, 250, 500, 1000];
+-let networkTrendYAxisMax = 250;
++const NETWORK_TREND_SERIES = Object.freeze([
++    Object.freeze({ key: 'vulnerabilities', label: 'Vulnerabilities' }),
++    Object.freeze({ key: 'threats', label: 'Threats' }),
++    Object.freeze({ key: 'strengths', label: 'Strengths' }),
++]);
++const NETWORK_TREND_SERIES_KEYS = new Set(NETWORK_TREND_SERIES.map(item => item.key));
++let networkTrendSeriesFilter = new Set(NETWORK_TREND_SERIES.map(item => item.key));
++let networkTrendSortMode = 'canonical';
++let networkTrendDisplayMode = 'graph';
+ const NETWORK_VIEW_STORAGE_KEY = 'cleanhouse.network.view';
+ const NETWORK_TIMELINE_RANGE_STORAGE_KEY = 'cleanhouse.network.timeline.range';
+-const NETWORK_TREND_Y_AXIS_STORAGE_KEY = 'cleanhouse.network.trend.yAxisMax';
++const NETWORK_TREND_SERIES_STORAGE_KEY = 'cleanhouse.network.trend.series';
++const NETWORK_TREND_SORT_STORAGE_KEY = 'cleanhouse.network.trend.sort';
++const NETWORK_TREND_DISPLAY_STORAGE_KEY = 'cleanhouse.network.trend.display';
+ const NETWORK_SERVER_BOOT_STORAGE_KEY = 'cleanhouse.network.serverBootId';
+ const NETWORK_VIEW_MODES = new Set(['table', 'findings', 'bar', 'pie', 'timeline']);
+ const NETWORK_CTRL_VIEW_ALIASES = {
+@@ -378,9 +387,18 @@ function validNetworkTimelineRange(value) {
+     return Object.prototype.hasOwnProperty.call(NETWORK_TIMELINE_RANGES, value) ? value : '';
+ }
+ 
+-function validNetworkTrendYAxisMax(value) {
+-    const numeric = Number(value);
+-    return NETWORK_TREND_Y_AXIS_OPTIONS.includes(numeric) ? numeric : 0;
++function validNetworkTrendDisplayMode(value) {
++    return ['graph', 'chart'].includes(String(value || '').toLowerCase()) ? String(value).toLowerCase() : '';
++}
++
++function validNetworkTrendSortMode(value) {
++    return ['canonical', 'value_desc', 'alphabetical'].includes(String(value || '').toLowerCase()) ? String(value).toLowerCase() : '';
++}
++
++function validNetworkTrendSeries(value) {
++    const values = Array.isArray(value) ? value : String(value || '').split(',');
++    const selected = values.map(item => String(item || '').trim().toLowerCase()).filter(item => NETWORK_TREND_SERIES_KEYS.has(item));
++    return selected.length ? Array.from(new Set(selected)) : [];
+ }
+ 
+ function networkViewFromUrl() {
+@@ -401,12 +419,16 @@ function networkTimelineRangeFromUrl() {
+     }
+ }
+ 
+-function networkTrendYAxisMaxFromUrl() {
++function networkTrendControlsFromUrl() {
+     try {
+         const params = new URLSearchParams(window.location.search);
+-        return validNetworkTrendYAxisMax(params.get('network_trend_y') || params.get('trend_y'));
++        return {
++            display: validNetworkTrendDisplayMode(params.get('network_trend_display')),
++            sort: validNetworkTrendSortMode(params.get('network_trend_sort')),
++            series: validNetworkTrendSeries(params.get('network_trend_series')),
++        };
+     } catch (error) {
+-        return 0;
++        return { display: '', sort: '', series: [] };
+     }
+ }
+ 
+@@ -426,18 +448,26 @@ function storedNetworkTimelineRange() {
+     }
+ }
+ 
+-function storedNetworkTrendYAxisMax() {
++function storedNetworkTrendControls() {
+     try {
+-        return validNetworkTrendYAxisMax(window.localStorage?.getItem(NETWORK_TREND_Y_AXIS_STORAGE_KEY));
++        return {
++            display: validNetworkTrendDisplayMode(window.localStorage?.getItem(NETWORK_TREND_DISPLAY_STORAGE_KEY)),
++            sort: validNetworkTrendSortMode(window.localStorage?.getItem(NETWORK_TREND_SORT_STORAGE_KEY)),
++            series: validNetworkTrendSeries(window.localStorage?.getItem(NETWORK_TREND_SERIES_STORAGE_KEY)),
++        };
+     } catch (error) {
+-        return 0;
++        return { display: '', sort: '', series: [] };
+     }
+ }
+ 
+ function restoreNetworkViewMode() {
+     networkViewMode = networkViewFromUrl() || storedNetworkViewMode() || validNetworkViewMode(networkViewMode) || 'table';
+     networkTimelineRangeMode = networkTimelineRangeFromUrl() || storedNetworkTimelineRange() || validNetworkTimelineRange(networkTimelineRangeMode) || '5s';
+-    networkTrendYAxisMax = networkTrendYAxisMaxFromUrl() || storedNetworkTrendYAxisMax() || validNetworkTrendYAxisMax(networkTrendYAxisMax) || 250;
++    const urlControls = networkTrendControlsFromUrl();
++    const storedControls = storedNetworkTrendControls();
++    networkTrendDisplayMode = urlControls.display || storedControls.display || validNetworkTrendDisplayMode(networkTrendDisplayMode) || 'graph';
++    networkTrendSortMode = urlControls.sort || storedControls.sort || validNetworkTrendSortMode(networkTrendSortMode) || 'canonical';
++    networkTrendSeriesFilter = new Set(urlControls.series.length ? urlControls.series : (storedControls.series.length ? storedControls.series : NETWORK_TREND_SERIES.map(item => item.key)));
+     syncNetworkCoordinatorUiState();
+ }
+ 
+@@ -477,20 +507,24 @@ function persistNetworkTimelineRange(mode) {
+     }
+ }
+ 
+-function persistNetworkTrendYAxisMax(value) {
+-    networkTrendYAxisMax = validNetworkTrendYAxisMax(value) || 250;
++function persistNetworkTrendControls() {
++    const series = Array.from(networkTrendSeriesFilter).filter(item => NETWORK_TREND_SERIES_KEYS.has(item));
+     try {
+-        window.localStorage?.setItem(NETWORK_TREND_Y_AXIS_STORAGE_KEY, String(networkTrendYAxisMax));
++        window.localStorage?.setItem(NETWORK_TREND_DISPLAY_STORAGE_KEY, networkTrendDisplayMode);
++        window.localStorage?.setItem(NETWORK_TREND_SORT_STORAGE_KEY, networkTrendSortMode);
++        window.localStorage?.setItem(NETWORK_TREND_SERIES_STORAGE_KEY, series.join(','));
+     } catch (error) {
+-        // localStorage may be unavailable in restricted browser contexts.
++        // localStorage is best-effort in restricted browser contexts.
+     }
+     if (!window.location.pathname.startsWith('/network')) return;
+     try {
+         const url = new URL(window.location.href);
+-        url.searchParams.set('network_trend_y', String(networkTrendYAxisMax));
++        url.searchParams.set('network_trend_display', networkTrendDisplayMode);
++        url.searchParams.set('network_trend_sort', networkTrendSortMode);
++        url.searchParams.set('network_trend_series', series.join(','));
+         window.history.replaceState({}, '', url);
+     } catch (error) {
+-        // URL persistence is best-effort; localStorage keeps the axis choice.
++        // URL persistence is best-effort; localStorage keeps the controls.
+     }
+ }
+ 
+@@ -2412,9 +2446,11 @@ function renderNetworkProjectionLoading(mode = networkViewMode) {
+         button.classList.toggle('active', button.dataset.networkView === mode);
+     });
+     const graphToggle = document.querySelector('.network-graph-toggle');
+-    if (graphToggle) graphToggle.hidden = !['bar', 'pie'].includes(mode);
+-    document.querySelectorAll('[data-network-graph-view]').forEach(button => {
+-        button.classList.toggle('active', button.dataset.networkGraphView === mode);
++    if (graphToggle) graphToggle.hidden = mode !== 'bar';
++    document.querySelectorAll('[data-network-trend-display]').forEach(button => {
++        const active = button.dataset.networkTrendDisplay === networkTrendDisplayMode;
++        button.classList.toggle('active', active);
++        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+     });
+     const label = view.charAt(0).toUpperCase() + view.slice(1);
+     setText('network-area-status', networkTabLoadingCopy(mode, networkPagePhase));
+@@ -6611,9 +6647,11 @@ function renderNetworkDisplay() {
+         button.classList.toggle('active', button.dataset.networkView === networkViewMode);
+     });
+     const graphToggle = document.querySelector('.network-graph-toggle');
+-    if (graphToggle) graphToggle.hidden = !['bar', 'pie'].includes(networkViewMode);
+-    document.querySelectorAll('[data-network-graph-view]').forEach(button => {
+-        button.classList.toggle('active', button.dataset.networkGraphView === networkViewMode);
++    if (graphToggle) graphToggle.hidden = networkViewMode !== 'bar';
++    document.querySelectorAll('[data-network-trend-display]').forEach(button => {
++        const active = button.dataset.networkTrendDisplay === networkTrendDisplayMode;
++        button.classList.toggle('active', active);
++        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+     });
+     renderNetworkToolbarContext();
+     const tabState = networkTabViewState(renderModel);
+@@ -6684,13 +6722,13 @@ function renderNetworkDisplay() {
+     }
+     if (networkViewMode === 'bar' || networkViewMode === 'timeline') {
+         bindNetworkFloatingTooltips();
+-        bindNetworkEvidenceElements('.network-timeline-marker[data-evidence-entity-id]');
++        bindNetworkEvidenceElements('.network-trend-bar[data-evidence-entity-id], .network-trend-bucket[data-evidence-entity-id], .network-trend-table [data-evidence-entity-id], .network-timeline-marker[data-evidence-entity-id]');
+     }
+     if (networkViewMode === 'bar' || networkViewMode === 'timeline') {
+         bindNetworkTimelineRangeControls();
+     }
+     if (networkViewMode === 'bar') {
+-        bindNetworkTrendYAxisControls();
++        bindNetworkTrendControls();
+     }
+     applyNetworkCtrlRouteTarget();
+     return true;
+@@ -7088,20 +7126,22 @@ function networkTimelineRangeControlsHtml() {
+     });
+ }
+ 
+-function networkTrendYAxisControlsHtml() {
++function networkTrendSeriesControlsHtml() {
+     return (
+-        '<div class="network-trend-y-controls" aria-label="Trend Y axis maximum">' +
+-        NETWORK_TREND_Y_AXIS_OPTIONS.slice().reverse().map(value => (
+-            '<button type="button" data-network-trend-y="' + escapeHtml(value) + '"' + (value === networkTrendYAxisMax ? ' class="active"' : '') + '>' + escapeHtml(value) + '</button>'
+-        )).join('') +
+-        '</div>'
++        '<div class="network-trend-series-controls" role="group" aria-label="Trend series">' +
++        NETWORK_TREND_SERIES.map(series => {
++            const active = networkTrendSeriesFilter.has(series.key);
++            return '<button type="button" data-network-trend-series="' + escapeHtml(series.key) + '" aria-pressed="' + (active ? 'true' : 'false') + '"' + (active ? ' class="active"' : '') + '>' + escapeHtml(series.label) + '</button>';
++        }).join('') +
++        '</div>' +
++        '<label class="network-trend-sort-label">Order' +
++        '<select data-network-trend-sort aria-label="Trend series order">' +
++        '<option value="canonical"' + (networkTrendSortMode === 'canonical' ? ' selected' : '') + '>Canonical</option>' +
++        '<option value="value_desc"' + (networkTrendSortMode === 'value_desc' ? ' selected' : '') + '>Highest signal</option>' +
++        '<option value="alphabetical"' + (networkTrendSortMode === 'alphabetical' ? ' selected' : '') + '>Alphabetical</option>' +
++        '</select></label>'
+     );
+ }
+-function networkTrendYAxisLabelsHtml(axisMax) {
+-    const labels = [axisMax, axisMax * 0.75, axisMax * 0.5, axisMax * 0.25, 0].map(value => Math.round(value));
+-    return '<div class="network-trend-y-axis" aria-hidden="true">' + labels.map(value => '<span>' + escapeHtml(value) + '</span>').join('') + '</div>';
+-}
+-
+ 
+ function renderNetworkToolbarContext() {
+     const context = byId('network-toolbar-context');
+@@ -7159,7 +7199,18 @@ function networkTrendBucketForLiveEvent(event, rangeKey = networkTimelineRangeMo
+     const start = new Date(bucketStartMs);
+     const end = new Date(bucketStartMs + slotSize);
+     const tickKey = 'live-tick:' + rangeKey + ':' + bucketStartMs;
+-    const degraded = eventCriticalReason(event) || eventDegradedReason(event) || (networkEventIsExternal(event) && !networkEventHasReadableDestination(event));
++    const interpretation = event.trend_interpretation;
++    if (!interpretation || interpretation.schema !== 'cleanhouse.network.trend.interpretation.v1') return null;
++    const series = Object.fromEntries(NETWORK_TREND_SERIES.map(item => {
++        const result = interpretation.series?.[item.key] || {};
++        return [item.key, {
++            value: result.matched ? 1 : 0,
++            confidence: result.matched ? Number(result.confidence || 0) : null,
++            rationale: Array.isArray(result.rationale) ? result.rationale.slice(0, 8) : [],
++            signals: Array.isArray(result.signals) ? result.signals.slice(0, 12) : [],
++            evidence_refs: Array.isArray(interpretation.evidence_refs) ? interpretation.evidence_refs.slice(0, 30) : [],
++        }];
++    }));
+     return {
+         event_id: tickKey,
+         tick_id: tickKey,
+@@ -7170,12 +7221,16 @@ function networkTrendBucketForLiveEvent(event, rangeKey = networkTimelineRangeMo
+         timestamp: date.toISOString(),
+         sealed_at: end.toISOString(),
+         immutable: Date.now() >= end.getTime(),
+-        connectionCount: 1,
+-        degradedCount: degraded ? 1 : 0,
+-        missingDestinationCount: networkEventIsExternal(event) && !networkEventHasReadableDestination(event) ? 1 : 0,
+-        externalOnlyCount: networkEventIsExternal(event) ? 1 : 0,
++        evidence_state: interpretation.evidence_state || 'observed',
++        interpretation_schema: interpretation.schema,
++        rule_version: interpretation.rule_version || 'network-trend-rationalization.v1',
++        interpretation: series,
++        capture_generations: interpretation.capture_generation === null || interpretation.capture_generation === undefined ? [] : [interpretation.capture_generation],
++        evidence_count: 1,
++        contradiction_count: interpretation.contradictory ? 1 : 0,
+         source_event_id: event.event_id || '',
+         related_event_ids: event.event_id ? [event.event_id] : [],
++        evidence_refs: Array.isArray(interpretation.evidence_refs) ? interpretation.evidence_refs.slice(0, 30) : [],
+     };
+ }
+ 
+@@ -7193,6 +7248,22 @@ function rememberNetworkLiveTrendTick(event) {
+             const bucketEnd = new Date(existing.bucket_end || existing.sealed_at || '').getTime();
+             if (Number.isFinite(bucketEnd) && Date.now() >= bucketEnd) return;
+             const related = new Set([...(existing.related_event_ids || []), ...(tick.related_event_ids || [])].filter(Boolean));
++            const mergedInterpretation = {};
++            NETWORK_TREND_SERIES.forEach(series => {
++                const previous = existing.interpretation?.[series.key] || {};
++                const incoming = tick.interpretation?.[series.key] || {};
++                const previousCount = Number(previous.value) || 0;
++                const incomingCount = Number(incoming.value) || 0;
++                const count = previousCount + incomingCount;
++                const confidenceValues = [previous, incoming].filter(item => Number(item.value) > 0 && Number.isFinite(Number(item.confidence)));
++                mergedInterpretation[series.key] = {
++                    value: count,
++                    confidence: confidenceValues.length ? confidenceValues.reduce((sum, item) => sum + Number(item.confidence), 0) / confidenceValues.length : null,
++                    rationale: Array.from(new Set([...(previous.rationale || []), ...(incoming.rationale || [])])).slice(0, 8),
++                    signals: Array.from(new Set([...(previous.signals || []), ...(incoming.signals || [])])).slice(0, 12),
++                    evidence_refs: Array.from(new Set([...(previous.evidence_refs || []), ...(incoming.evidence_refs || [])])).slice(0, 30),
++                };
++            });
+             networkTrendLiveTape[existingIndex] = Object.freeze({
+                 ...existing,
+                 timestamp: tick.timestamp,
+@@ -7231,6 +7302,8 @@ function networkTrendProjectionWithLive(baseData, rangeKey = networkTimelineRang
+     const data = baseData && typeof baseData === 'object'
+         ? baseData
+         : { state: 'CAPTURING', events: [], summary: { reason: 'projection', view: 'trend', range: networkTimelineRangeMode } };
++    const baseState = normalizeNetworkContractState(data.state || 'NO_DATA');
++    const captureUnavailable = ['ERROR', 'CAPTURE_BLOCKED'].includes(baseState);
+     const events = Array.isArray(data.events) ? data.events.slice() : [];
+     const seen = new Set(events.map(item => String(item.tick_id || item.event_id || item.bucket_key || '')).filter(Boolean));
+     networkTrendLiveTicksForRange(rangeKey).forEach(tick => {
+@@ -7241,11 +7314,11 @@ function networkTrendProjectionWithLive(baseData, rangeKey = networkTimelineRang
+     });
+     return {
+         ...data,
+-        state: 'CAPTURING',
++        state: captureUnavailable ? baseState : (events.length ? 'CAPTURING' : baseState),
+         events,
+         summary: {
+             ...(data.summary || {}),
+-            reason: 'projection',
++            reason: captureUnavailable ? (data.summary?.reason || 'capture_failed') : 'projection',
+             view: 'trend',
+             range: rangeKey,
+             event_count: events.length,
+@@ -7362,13 +7435,38 @@ function networkTimelineCategoryForPriority(priority, fallbackEvent) {
+     return networkEventCategory(fallbackEvent);
+ }
+ 
+-function renderNetworkBarGraph(events) {
+-    const trendRangeMode = networkTimelineSelectedRangeMode();
+-    const rangeConfig = NETWORK_TIMELINE_RANGES[trendRangeMode] || NETWORK_TIMELINE_RANGES['5s'];
+-    const projectedBuckets = Array.isArray(events)
+-        ? events.filter(event => event && (event.bucket_key || event.bucket_start))
+-        : [];
+-    const selectedWindow = networkSelectedRangeWindow(trendRangeMode);
++function networkTrendMergeBuckets(existing, incoming) {
++    if (!existing) return { ...incoming };
++    const interpretation = {};
++    NETWORK_TREND_SERIES.forEach(series => {
++        const left = existing.interpretation?.[series.key] || {};
++        const right = incoming.interpretation?.[series.key] || {};
++        const leftCount = Number(left.value) || 0;
++        const rightCount = Number(right.value) || 0;
++        const matchedConfidence = [left, right].filter(item => Number(item.value) > 0 && Number.isFinite(Number(item.confidence)));
++        interpretation[series.key] = {
++            value: leftCount + rightCount,
++            confidence: matchedConfidence.length ? matchedConfidence.reduce((sum, item) => sum + Number(item.confidence), 0) / matchedConfidence.length : null,
++            rationale: Array.from(new Set([...(left.rationale || []), ...(right.rationale || [])])).slice(0, 8),
++            signals: Array.from(new Set([...(left.signals || []), ...(right.signals || [])])).slice(0, 12),
++            evidence_refs: Array.from(new Set([...(left.evidence_refs || []), ...(right.evidence_refs || [])])).slice(0, 30),
++        };
++    });
++    return {
++        ...existing,
++        timestamp: String(existing.timestamp || '') > String(incoming.timestamp || '') ? existing.timestamp : incoming.timestamp,
++        interpretation,
++        evidence_count: (Number(existing.evidence_count) || 0) + (Number(incoming.evidence_count) || 0),
++        contradiction_count: (Number(existing.contradiction_count) || 0) + (Number(incoming.contradiction_count) || 0),
++        capture_generations: Array.from(new Set([...(existing.capture_generations || []), ...(incoming.capture_generations || [])])).slice(0, 30),
++        related_event_ids: Array.from(new Set([...(existing.related_event_ids || []), ...(incoming.related_event_ids || [])])).slice(0, 30),
++        evidence_refs: Array.from(new Set([...(existing.evidence_refs || []), ...(incoming.evidence_refs || [])])).slice(0, 30),
++    };
++}
++
++function networkTrendDataset(events) {
++    const rangeKey = networkTimelineSelectedRangeMode();
++    const selectedWindow = networkSelectedRangeWindow(rangeKey);
+     const slotCount = selectedWindow.range.buckets;
+     const slotSize = Math.max(selectedWindow.range.durationMs / slotCount, 1);
+     const latestSlotStart = Math.floor(selectedWindow.end.getTime() / slotSize) * slotSize;
+@@ -7384,67 +7482,90 @@ function renderNetworkBarGraph(events) {
+         const bucketEnd = new Date(bucket.bucket_end || bucket.timestamp || '').getTime();
+         if (!Number.isFinite(bucketStart) || bucketEnd < slotStart || bucketStart > selectedWindow.end.getTime()) return;
+         const index = Math.min(slotCount - 1, Math.max(0, Math.floor((bucketStart - slotStart) / slotSize)));
+-        const existing = slots[index].event;
+-        if (!existing) {
+-            slots[index].event = { ...bucket };
+-            return;
+-        }
+-        slots[index].event = {
+-            ...existing,
+-            connectionCount: (Number(existing.connectionCount) || 0) + (Number(bucket.connectionCount) || 0),
+-            degradedCount: (Number(existing.degradedCount) || 0) + (Number(bucket.degradedCount) || 0),
+-            missingDestinationCount: (Number(existing.missingDestinationCount) || 0) + (Number(bucket.missingDestinationCount) || 0),
+-            externalOnlyCount: (Number(existing.externalOnlyCount) || 0) + (Number(bucket.externalOnlyCount) || 0),
+-            evidence_refs: mergeNetworkEventList(existing.evidence_refs, bucket.evidence_refs),
+-            related_event_ids: mergeNetworkEventList(existing.related_event_ids, bucket.related_event_ids),
+-        };
++        slots[index].event = networkTrendMergeBuckets(slots[index].event, bucket);
+     });
+-    const range = networkRangeAxis(trendRangeMode);
+-    const rangeLabel = networkRangePlainLabel(rangeConfig);
+-    const axisMax = validNetworkTrendYAxisMax(networkTrendYAxisMax) || 250;
+-    const chart = '<div class="network-trend-chart" aria-label="Network connection trend" style="grid-template-columns: repeat(' + escapeHtml(slots.length) + ', minmax(10px, 1fr));">' +
+-        slots.map(slot => {
+-            const bucket = slot.event;
+-            if (!bucket) {
+-                return '<div class="network-trend-bar is-empty" style="height:2%"></div>';
++    const totals = Object.fromEntries(NETWORK_TREND_SERIES.map(series => [series.key, 0]));
++    slots.forEach(slot => NETWORK_TREND_SERIES.forEach(series => {
++        totals[series.key] += Number(slot.event?.interpretation?.[series.key]?.value) || 0;
++    }));
++    let series = NETWORK_TREND_SERIES.filter(item => networkTrendSeriesFilter.has(item.key));
++    if (networkTrendSortMode === 'alphabetical') series = series.slice().sort((a, b) => a.label.localeCompare(b.label));
++    if (networkTrendSortMode === 'value_desc') series = series.slice().sort((a, b) => totals[b.key] - totals[a.key] || a.label.localeCompare(b.label));
++    return { rangeKey, selectedWindow, slots, series, totals };
++}
++
++function networkTrendSeriesTooltip(bucket, series) {
++    const interpretation = bucket?.interpretation?.[series.key] || {};
++    const rationale = Array.isArray(interpretation.rationale) ? interpretation.rationale.join(' ') : '';
++    const confidence = Number.isFinite(Number(interpretation.confidence))
++        ? Math.round(Number(interpretation.confidence) * 100) + '% confidence.'
++        : 'No matching signal confidence.';
++    const contradiction = Number(bucket?.contradiction_count) > 0
++        ? Number(bucket.contradiction_count) + ' evidence item(s) also support an opposing series.'
++        : '';
++    return [rationale || 'Observed bucket contains no matching signal for this series.', confidence, contradiction].filter(Boolean).join(' ');
++}
++
++function networkTrendGraphHtml(dataset) {
++    const values = dataset.slots.flatMap(slot => dataset.series.map(series => Number(slot.event?.interpretation?.[series.key]?.value) || 0));
++    const axisMax = Math.max(1, ...values);
++    return (
++        '<div class="network-trend-graph" data-trend-mode="graph">' +
++        '<div class="network-trend-chart" aria-label="Interpreted network trend graph" style="grid-template-columns: repeat(' + escapeHtml(dataset.slots.length) + ', minmax(28px, 1fr));">' +
++        dataset.slots.map(slot => {
++            if (!slot.event) {
++                return '<div class="network-trend-bucket is-gap" role="img" aria-label="No retained evidence for ' + escapeHtml(networkDateLabel(slot.start, dataset.rangeKey)) + '"><span>Gap</span></div>';
+             }
+-            const connectionCount = Number(bucket.connectionCount) || 0;
+-            const degradedCount = (Number(bucket.degradedCount) || 0) + (Number(bucket.missingDestinationCount) || 0);
+-            const cappedCount = Math.min(connectionCount, axisMax);
+-            const height = Math.max(8, Math.round((cappedCount / axisMax) * 100));
+-            const isCapped = connectionCount > axisMax;
+-            const title = connectionCount + ' observed connection' + (connectionCount === 1 ? '' : 's');
+-            const bucketStart = slot.start;
+-            const bucketEnd = slot.end;
+-            const rangeLabel = bucketStart && bucketEnd ? networkDateLabel(bucketStart, trendRangeMode) + ' to ' + networkDateLabel(bucketEnd, trendRangeMode) : '';
+-            const tooltipBody = [
+-                'Frozen bucket snapshot.',
+-                isCapped ? 'This bucket exceeded the fixed ' + axisMax + '-connection chart ceiling.' : '',
+-                degradedCount ? degradedCount + ' observed connection' + (degradedCount === 1 ? '' : 's') + ' need review.' : 'No review-heavy observation in this bucket.',
+-            ].filter(Boolean).join(' ');
+-            const cappedLabel = isCapped ? '<span class="network-trend-cap-label">' + escapeHtml(connectionCount) + '</span>' : '';
+-            return (
+-                '<div class="network-trend-bar' + (isCapped ? ' is-capped' : '') + '"' +
+-                ' data-floating-tooltip data-tooltip-title="' + escapeHtml(title) + '" data-tooltip-body="' + escapeHtml(tooltipBody) + '" data-tooltip-meta="' + escapeHtml(rangeLabel) + '" style="height:' + height + '%">' + cappedLabel + '</div>'
+-            );
+-        '</div>';
+-    const body =
+-        '<div class="network-trend-plot">' +
+-        networkTrendYAxisControlsHtml() +
+-        networkTrendYAxisLabelsHtml(axisMax) +
+-        '<div class="network-trend-graph">' +
+-        chart +
+-        '<div class="network-trend-axis"><span>' + escapeHtml(range.start) + '</span><span>' + escapeHtml(range.end) + '</span></div>' +
++            const rangeLabel = networkDateLabel(slot.start, dataset.rangeKey) + ' to ' + networkDateLabel(slot.end, dataset.rangeKey);
++            return '<div class="network-trend-bucket"' + networkEvidenceAttributes(slot.event, 'trend') + ' aria-label="Observed Trend bucket ' + escapeHtml(rangeLabel) + '">' +
++                dataset.series.map(series => {
++                    const value = Number(slot.event.interpretation?.[series.key]?.value) || 0;
++                    const height = value > 0 ? Math.max(6, Math.round((value / axisMax) * 100)) : 0;
++                    return '<button type="button" class="network-trend-bar trend-' + escapeHtml(series.key) + (value === 0 ? ' is-zero' : '') + '"' +
++                        networkEvidenceAttributes(slot.event, 'trend') +
++                        ' data-floating-tooltip data-tooltip-title="' + escapeHtml(series.label + ': ' + value) + '" data-tooltip-body="' + escapeHtml(networkTrendSeriesTooltip(slot.event, series)) + '" data-tooltip-meta="' + escapeHtml(slot.event.rule_version || 'Unversioned interpretation') + ' · ' + escapeHtml(rangeLabel) + '" aria-label="' + escapeHtml(series.label + ' ' + value + ', ' + rangeLabel) + '" style="--trend-height:' + height + '%"><span>' + escapeHtml(value) + '</span></button>';
++                }).join('') + '</div>';
+         }).join('') +
+         '</div>' +
+-        '</div>';
+-    return (
+-        '<div class="network-trend">' +
+-        body +
++        '<div class="network-trend-axis"><span>' + escapeHtml(networkRangeAxis(dataset.rangeKey).start) + '</span><span>' + escapeHtml(networkRangeAxis(dataset.rangeKey).end) + '</span></div>' +
+         '</div>'
+     );
+ }
+ 
++function networkTrendChartHtml(dataset) {
++    return (
++        '<div class="network-trend-table-wrap" data-trend-mode="chart">' +
++        '<table class="network-trend-table"><thead><tr><th scope="col">Bucket</th>' +
++        dataset.series.map(series => '<th scope="col">' + escapeHtml(series.label) + '</th>').join('') +
++        '<th scope="col">Evidence</th><th scope="col">Rule</th></tr></thead><tbody>' +
++        dataset.slots.map(slot => {
++            if (!slot.event) {
++                return '<tr class="is-gap"><th scope="row">' + escapeHtml(networkDateLabel(slot.start, dataset.rangeKey)) + '</th>' + dataset.series.map(() => '<td aria-label="No retained evidence">—</td>').join('') + '<td>Gap</td><td>—</td></tr>';
++            }
++            return '<tr' + networkEvidenceAttributes(slot.event, 'trend') + '><th scope="row">' + escapeHtml(networkDateLabel(slot.start, dataset.rangeKey)) + '</th>' +
++                dataset.series.map(series => {
++                    const value = Number(slot.event.interpretation?.[series.key]?.value) || 0;
++                    return '<td data-floating-tooltip data-tooltip-title="' + escapeHtml(series.label + ': ' + value) + '" data-tooltip-body="' + escapeHtml(networkTrendSeriesTooltip(slot.event, series)) + '" data-tooltip-meta="' + escapeHtml(slot.event.rule_version || 'Unversioned interpretation') + '">' + escapeHtml(value) + '</td>';
++                }).join('') +
++                '<td>' + escapeHtml(slot.event.evidence_count || 0) + '</td><td>' + escapeHtml(slot.event.rule_version || 'Unknown') + '</td></tr>';
++        }).join('') + '</tbody></table></div>'
++    );
++}
++
++function renderNetworkBarGraph(events) {
++    const dataset = networkTrendDataset(events);
++    const legend = '<div class="network-trend-legend" aria-label="Visible Trend series">' + dataset.series.map(series => '<span class="trend-' + escapeHtml(series.key) + '">' + escapeHtml(series.label) + '</span>').join('') + '</div>';
++    return (
++        '<section class="network-trend-window" aria-labelledby="network-trend-heading">' +
++        '<div class="network-trend-header"><div><h3 id="network-trend-heading">Interpreted Trend</h3><p>Versioned rationalization of retained evidence. Gaps are not zeroes.</p></div>' +
++        '<div class="network-trend-controls">' + networkTrendSeriesControlsHtml() + '</div></div>' +
++        legend +
++        '<div class="network-trend-content">' + (networkTrendDisplayMode === 'chart' ? networkTrendChartHtml(dataset) : networkTrendGraphHtml(dataset)) + '</div>' +
++        '<p class="network-trend-provenance" role="status">Rule ' + escapeHtml(currentNetworkData?.summary?.rule_version || 'network-trend-rationalization.v1') + '. Values are interpretations linked to retained evidence; factual Timeline receipts remain unchanged.</p>' +
++        '</section>'
++    );
++}
++
+ function renderNetworkPie(events, data = {}) {
+     const openApplications = Array.isArray(data?.summary?.open_applications)
+         ? data.summary.open_applications
+@@ -7742,13 +7863,26 @@ function bindNetworkTimelineRangeControls() {
+     });
+ }
+ 
+-function bindNetworkTrendYAxisControls() {
+-    document.querySelectorAll('[data-network-trend-y]').forEach(button => {
++function bindNetworkTrendControls() {
++    document.querySelectorAll('[data-network-trend-series]').forEach(button => {
+         button.addEventListener('click', () => {
+-            persistNetworkTrendYAxisMax(button.dataset.networkTrendY || '250');
++            const key = String(button.dataset.networkTrendSeries || '');
++            if (!NETWORK_TREND_SERIES_KEYS.has(key)) return;
++            if (networkTrendSeriesFilter.has(key)) {
++                if (networkTrendSeriesFilter.size === 1) return;
++                networkTrendSeriesFilter.delete(key);
++            } else {
++                networkTrendSeriesFilter.add(key);
++            }
++            persistNetworkTrendControls();
+             renderNetworkDisplay();
+         });
+     });
++    document.querySelector('[data-network-trend-sort]')?.addEventListener('change', event => {
++        networkTrendSortMode = validNetworkTrendSortMode(event.target?.value) || 'canonical';
++        persistNetworkTrendControls();
++        renderNetworkDisplay();
++    });
+ }
+ 
+ function customFilterMatch(app, filter) {
+@@ -7795,9 +7929,11 @@ function init() {
+             selectNetworkView(button.dataset.networkView || 'table');
+         });
+     });
+-    document.querySelectorAll('[data-network-graph-view]').forEach(button => {
++    document.querySelectorAll('[data-network-trend-display]').forEach(button => {
+         button.addEventListener('click', () => {
+-            selectNetworkView(button.dataset.networkGraphView || 'bar');
++            networkTrendDisplayMode = validNetworkTrendDisplayMode(button.dataset.networkTrendDisplay) || 'graph';
++            persistNetworkTrendControls();
++            renderNetworkDisplay();
+         });
+     });
+     byId('reconcile-files-btn')?.addEventListener('click', reconcileFiles);
+diff --git a/after/tests/test_network_trend_interpretation.py b/after/tests/test_network_trend_interpretation.py
+new file mode 100644
+index 0000000..20fdb06
+--- /dev/null
++++ b/after/tests/test_network_trend_interpretation.py
+@@ -0,0 +1,166 @@
++from __future__ import annotations
++
++import unittest
++from datetime import datetime, timezone
++from unittest.mock import patch
++
++from backend.api import cleanhouse
++
++
++class NetworkTrendInterpretationTests(unittest.TestCase):
++    def setUp(self) -> None:
++        with cleanhouse._NETWORK_PROJECTION_CACHE_LOCK:
++            cleanhouse._NETWORK_PROJECTION_CACHE.clear()
++
++    def test_rules_preserve_contradictory_threat_and_strength_signals(self):
++        result = cleanhouse._network_trend_interpretation_from_event({
++            "event_id": "network:contradiction",
++            "process": "Safari",
++            "dst_ip": "203.0.113.9",
++            "dst_port": "443",
++            "tls_sni": "example.test",
++            "protocol": "TLS",
++            "confidence": "high",
++            "suspicious": True,
++            "severity": "warning",
++            "collector_generation": 7,
++        })
++
++        self.assertEqual(result["schema"], "cleanhouse.network.trend.interpretation.v1")
++        self.assertEqual(result["rule_version"], "network-trend-rationalization.v1")
++        self.assertTrue(result["series"]["threats"]["matched"])
++        self.assertTrue(result["series"]["strengths"]["matched"])
++        self.assertTrue(result["contradictory"])
++        self.assertEqual(result["capture_generation"], 7)
++        self.assertEqual(result["source_event_id"], "network:contradiction")
++
++    def test_unknown_cleartext_external_evidence_maps_to_vulnerability_without_inventing_strength(self):
++        result = cleanhouse._network_trend_interpretation_from_event({
++            "event_id": "network:vulnerability",
++            "process": "Unknown app",
++            "dst_ip": "203.0.113.10",
++            "dst_port": "80",
++            "protocol": "HTTP",
++            "confidence": "low",
++        })
++
++        vulnerability = result["series"]["vulnerabilities"]
++        self.assertTrue(vulnerability["matched"])
++        self.assertIn("unknown_external_owner", vulnerability["signals"])
++        self.assertIn("unresolved_external_destination", vulnerability["signals"])
++        self.assertIn("cleartext_http", vulnerability["signals"])
++        self.assertFalse(result["series"]["strengths"]["matched"])
++        self.assertFalse(result["series"]["threats"]["matched"])
++
++    def test_bucket_deduplicates_evidence_and_preserves_rule_provenance(self):
++        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
++        sample = {
++            "source_event_id": "network:deduplicated",
++            "event_id": "network:deduplicated",
++            "timestamp": timestamp,
++            "app": "Safari",
++            "dst_ip": "203.0.113.11",
++            "dst_port": "443",
++            "tls_sni": "example.test",
++            "protocol": "TLS",
++            "confidence": "high",
++            "suspicious": True,
++            "collector_generation": 4,
++            "evidence_refs": ["local://cleanhouse/network/network:deduplicated"],
++        }
++
++        buckets = cleanhouse._network_trend_interpretation_buckets("1m", [sample, dict(sample)])
++
++        self.assertEqual(len(buckets), 1)
++        bucket = buckets[0]
++        self.assertEqual(bucket["evidence_count"], 1)
++        self.assertEqual(bucket["contradiction_count"], 1)
++        self.assertEqual(bucket["capture_generations"], [4])
++        self.assertEqual(bucket["related_event_ids"], ["network:deduplicated"])
++        self.assertEqual(bucket["rule_version"], "network-trend-rationalization.v1")
++        self.assertEqual(bucket["interpretation"]["threats"]["value"], 1)
++        self.assertEqual(bucket["interpretation"]["strengths"]["value"], 1)
++        self.assertEqual(bucket["interpretation"]["vulnerabilities"]["value"], 0)
++
++    def test_five_second_range_retains_subsecond_bucket_resolution(self):
++        _, start, end = cleanhouse._network_trend_bucket_key(
++            "2026-10-16T12:00:00.900Z",
++            "5s",
++        )
++
++        self.assertLess((end - start).total_seconds(), 1.0)
++        self.assertAlmostEqual(
++            (end - start).total_seconds(),
++            int(cleanhouse.NETWORK_TIME_RANGES_MS["5s"] / cleanhouse.NETWORK_TREND_BUCKETS["5s"]) / 1000,
++            places=3,
++        )
++
++    def test_projection_ignores_legacy_count_ticks_and_reports_missing_buckets_as_gaps(self):
++        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
++        legacy_tick = {
++            "event_id": "network_tick:legacy",
++            "tick_id": "network_tick:legacy",
++            "timestamp": now,
++            "bucket_key": "tick:1m:legacy",
++            "bucket_range": "1m",
++            "connectionCount": 99,
++        }
++        with patch.object(cleanhouse, "_stored_network_trend_ticks", return_value=[legacy_tick]), patch.object(
++            cleanhouse, "_vvault_network_trend_ticks", return_value=[]
++        ), patch.object(cleanhouse, "_network_stored_observations", return_value=[]), patch.object(
++            cleanhouse, "_vvault_network_trend_samples", return_value=[]
++        ), patch.object(cleanhouse, "_network_vvault_readiness", return_value={"state": "unavailable", "authenticated": False}
++        ), patch.object(cleanhouse.vvault_preservation, "preserve_network_timeline_gap") as preserve_gap:
++            payload, status = cleanhouse._network_projection_trend("1m")
++
++        self.assertEqual(status, 200)
++        self.assertEqual(payload["events"], [])
++        self.assertEqual(payload["summary"]["gap_count"], cleanhouse.NETWORK_TREND_BUCKETS["1m"])
++        self.assertEqual(payload["summary"]["zero_means"], "observed_bucket_without_matching_signal")
++        self.assertEqual(payload["summary"]["missing_means"], "no_retained_evidence_for_bucket")
++        preserve_gap.assert_called_once()
++
++    def test_factual_event_is_not_rewritten_by_interpretation(self):
++        event = {
++            "event_id": "network:immutable-fact",
++            "process": "Safari",
++            "dst_ip": "203.0.113.12",
++            "dst_port": "443",
++            "tls_sni": "example.test",
++            "protocol": "TLS",
++            "confidence": "high",
++        }
++        original = dict(event)
++
++        cleanhouse._network_trend_interpretation_from_event(event)
++
++        self.assertEqual(event, original)
++
++    def test_enrichment_publishes_the_versioned_interpretation_without_replacing_facts(self):
++        event = {
++            "event_id": "network:enriched-fact",
++            "process": "Safari",
++            "dst_ip": "203.0.113.13",
++            "dst_port": "443",
++            "tls_sni": "example.test",
++            "protocol": "TLS",
++            "confidence": "high",
++        }
++
++        enriched = cleanhouse._network_apply_enrichment(event, {})
++        public = cleanhouse._network_public_event(enriched)
++
++        self.assertEqual(public["event_id"], event["event_id"])
++        self.assertEqual(public["dst_ip"], event["dst_ip"])
++        self.assertEqual(
++            public["trend_interpretation"]["schema"],
++            "cleanhouse.network.trend.interpretation.v1",
++        )
++        self.assertEqual(
++            public["trend_interpretation"]["rule_version"],
++            "network-trend-rationalization.v1",
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()

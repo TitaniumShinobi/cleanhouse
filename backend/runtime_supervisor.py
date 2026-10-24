@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import signal
@@ -19,11 +20,12 @@ import sys
 import threading
 import time
 import uuid
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 try:  # macOS/Linux lock path; tests can still run on platforms without fcntl.
     import fcntl  # type: ignore
@@ -61,6 +63,19 @@ DEFAULT_BACKEND_LOG_BACKUPS = 3
 OPERATOR_READY_RUNTIME_STATE = "healthy"
 OPERATOR_READY_STARTUP_PHASES = frozenset({"warm"})
 BACKEND_LIVENESS_SCHEMA = "cleanhouse.backend_liveness.v1"
+START_ISOLATION_SCHEMA = "cleanhouse.start_isolation_evidence.v1"
+START_CHALLENGE_RE = __import__("re").compile(r"^[A-Za-z0-9_-]{32,128}$")
+START_EVIDENCE_MAX_AGE_SECONDS = 10.0
+START_PROBE_MAX_BYTES = 64 * 1024
+START_STATE_REVISION_MAX = (1 << 63) - 1
+START_STATE_REVISION_TRANSITION_LIMIT = 8
+START_PHASE_ORDER = {
+    "booting": 0,
+    "bootstrap_ready": 1,
+    "warming": 2,
+    "warm": 3,
+    "degraded": 3,
+}
 SELF_DEVIATION_BLOCK_TYPES = frozenset({
     "runtime_memory_ceiling_exceeded",
     "runtime_cpu_sustained_exceeded",
@@ -152,6 +167,143 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def _start_isolated_runtime() -> bool:
+    """Return whether START owns this disposable runtime process group."""
+    return os.getenv("CLEANHOUSE_START_ISOLATED", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def isolated_runtime_evidence(
+    *, role: str, boot_id: str | None = None, challenge: str = "",
+) -> dict[str, Any] | None:
+    """Return nonce-bound process identity only for a disposable START run."""
+    if not _start_isolated_runtime():
+        return None
+    nonce = os.getenv("START_INVOCATION_NONCE", "").strip()
+    run_id = os.getenv("START_RUNTIME_GENERATION", "").strip()
+    source_digest = os.getenv("START_SOURCE_CONTENT_DIGEST", "").strip()
+    secret = os.getenv("FLASK_SECRET_KEY", "")
+    resolved_boot_id = boot_id or os.getenv("CLEANHOUSE_BACKEND_BOOT_ID") or os.getenv("CLEANHOUSE_SUPERVISOR_BOOT_ID") or ""
+    if not nonce or not run_id or not source_digest or not resolved_boot_id or len(secret) < 32:
+        return None
+    if challenge and not START_CHALLENGE_RE.fullmatch(challenge):
+        return None
+    stored = read_state() if "read_state" in globals() else {}
+    # The listener can accept its first health request while the supervisor is
+    # between an atomic state-file replacement and the backend's first
+    # bootstrap marker.  The process is still truthfully in its initial
+    # booting phase; emitting JSON null here makes an otherwise valid signed
+    # observation permanently fail START's finite observer.
+    phase = stored.get("startup_phase")
+    if phase not in START_PHASE_ORDER:
+        phase = "booting"
+    core = {
+        "schema": START_ISOLATION_SCHEMA,
+        "role": role,
+        "invocation_nonce": nonce,
+        "run_id": run_id,
+        "challenge": challenge,
+        "generation": resolved_boot_id,
+        "source_content_digest": source_digest,
+        "source_revision": os.getenv("START_SOURCE_REVISION", "").strip(),
+        "pid": os.getpid(),
+        "parent_pid": os.getppid(),
+        "process_group_id": os.getpgid(0),
+        "session_id": os.getsid(0),
+        "boot_id": resolved_boot_id,
+        "host": os.getenv("CLEANHOUSE_HOST", DEFAULT_HOST),
+        "port": int(os.getenv("CLEANHOUSE_PORT", str(DEFAULT_PORT))),
+        "phase": phase,
+        "state_revision": int(stored.get("state_revision", 0) or 0),
+        "observed_at": _now_iso(),
+    }
+    encoded = json.dumps(core, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {
+        **core,
+        "binding": {
+            "algorithm": "hmac-sha256",
+            "digest": hmac.new(secret.encode("utf-8"), encoded, hashlib.sha256).hexdigest(),
+        },
+    }
+
+
+def _valid_isolated_evidence(
+    value: Any,
+    *,
+    role: str | None = None,
+    challenge: str | None = None,
+    expected: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> bool:
+    if not isinstance(value, dict) or value.get("schema") != START_ISOLATION_SCHEMA:
+        return False
+    if role and value.get("role") != role:
+        return False
+    binding = value.get("binding")
+    if not isinstance(binding, dict) or binding.get("algorithm") != "hmac-sha256":
+        return False
+    core = {key: item for key, item in value.items() if key != "binding"}
+    secret = os.getenv("FLASK_SECRET_KEY", "")
+    expected_digest = hmac.new(
+        secret.encode("utf-8"),
+        json.dumps(core, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    try:
+        observed = datetime.fromisoformat(str(value.get("observed_at") or "").replace("Z", "+00:00"))
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        age = abs((now if now is not None else time.time()) - observed.timestamp())
+    except (TypeError, ValueError):
+        return False
+    expected_fields = expected or {}
+    exact_fields = (
+        "run_id", "invocation_nonce", "generation", "boot_id", "pid",
+        "parent_pid", "process_group_id", "session_id", "source_content_digest",
+        "source_revision", "host", "port",
+    )
+    exact = all(key not in expected_fields or value.get(key) == expected_fields.get(key) for key in exact_fields)
+    revision = value.get("state_revision")
+    phase = value.get("phase")
+    revision_valid = (
+        isinstance(revision, int)
+        and not isinstance(revision, bool)
+        and 0 <= revision <= START_STATE_REVISION_MAX
+    )
+    phase_valid = isinstance(phase, str) and phase in START_PHASE_ORDER
+    captured_revision = expected_fields.get("state_revision")
+    if captured_revision is not None:
+        revision_valid = bool(
+            revision_valid
+            and isinstance(captured_revision, int)
+            and not isinstance(captured_revision, bool)
+            and 0 <= captured_revision <= START_STATE_REVISION_MAX
+            and captured_revision <= revision <= captured_revision + START_STATE_REVISION_TRANSITION_LIMIT
+        )
+    captured_phase = expected_fields.get("phase")
+    if captured_phase is not None:
+        phase_valid = bool(
+            phase_valid
+            and captured_phase in START_PHASE_ORDER
+            and START_PHASE_ORDER[phase] >= START_PHASE_ORDER[captured_phase]
+        )
+    return bool(
+        len(secret) >= 32
+        and hmac.compare_digest(str(binding.get("digest") or ""), expected_digest)
+        and value.get("invocation_nonce") == os.getenv("START_INVOCATION_NONCE")
+        and value.get("run_id") == os.getenv("START_RUNTIME_GENERATION")
+        and value.get("source_content_digest") == os.getenv("START_SOURCE_CONTENT_DIGEST")
+        and value.get("source_revision") == os.getenv("START_SOURCE_REVISION")
+        and value.get("generation") == value.get("boot_id")
+        and (challenge is None or value.get("challenge") == challenge)
+        and age <= START_EVIDENCE_MAX_AGE_SECONDS
+        and exact
+        and revision_valid
+        and phase_valid
+    )
+
+
 def _runtime_dir() -> Path:
     configured = os.getenv("CLEANHOUSE_RUNTIME_DIR", "").strip()
     return Path(configured).expanduser() if configured else Path.home() / ".cleanhouse" / "runtime"
@@ -220,6 +372,27 @@ def write_state(payload: dict[str, Any], runtime_dir: Path | None = None) -> dic
         reasons.append("invalid_runtime_state")
         state["reason_codes"] = sorted({str(reason) for reason in reasons if reason})
     with _FileLock(lock_path(rdir)):
+        # Backend warmup and the supervisor heartbeat update this shared file
+        # from separate processes.  A supervisor iteration may have read the
+        # old "warming" state just before the backend commits "warm".  Keep
+        # startup completion monotonic for the same backend generation so the
+        # stale supervisor write cannot make operator readiness wait forever.
+        current = _read_json(state_path(rdir))
+        current_revision = int(current.get("state_revision", 0) or 0)
+        state["state_revision"] = min(current_revision + 1, (1 << 63) - 1)
+        same_backend = (
+            state.get("backend_pid") is not None
+            and str(state.get("backend_pid")) == str(current.get("backend_pid"))
+        )
+        if (
+            same_backend
+            and current.get("startup_phase") == "warm"
+            and state.get("startup_phase") in {"booting", "bootstrap_ready", "warming"}
+        ):
+            state["startup_phase"] = "warm"
+            state["warmup_ready_at"] = current.get("warmup_ready_at") or state.get("warmup_ready_at")
+            if current.get("startup_details"):
+                state["startup_details"] = current["startup_details"]
         _atomic_write_json(state_path(rdir), state)
     return state
 
@@ -459,7 +632,7 @@ def _self_deviation_runtime_impact(state: dict[str, Any] | None) -> str:
         or resource_guard.get("action") in {"hard_stop", "block_restart"}
     )
     runtime_state = str(state.get("runtime_state") or "")
-    if runtime_active and current_blocking and (listener_pids or runtime_state in {"degraded", "unhealthy"}):
+    if runtime_active and current_blocking and runtime_state in {"degraded", "unhealthy"}:
         return "active_blocking"
     if runtime_active:
         return "monitoring"
@@ -521,6 +694,15 @@ def _startup_self_deviation_classification(state: dict[str, Any]) -> dict[str, A
         return {"status": "none", "reason_codes": []}
     if not _self_deviation_block_active(state):
         return {"status": "none", "reason_codes": []}
+
+    # A live, owned runtime can be healthy again while preserving the original
+    # self-deviation and its blocked-recovery evidence.  In that case the
+    # evidence is monitoring history, not a present port/process hazard.
+    if _self_deviation_runtime_impact(state) == "monitoring":
+        return {
+            "status": "recoverable",
+            "reason_codes": sorted(_active_self_deviation_block_reasons(state)),
+        }
 
     finding = self_deviation.get("finding") if isinstance(self_deviation.get("finding"), dict) else {}
     reason_codes = {
@@ -685,26 +867,109 @@ def _probe_port(host: str, port: int, timeout: float = 0.25) -> bool:
         return sock.connect_ex((host, int(port))) == 0
 
 
-def _probe_ready(host: str, port: int, timeout: float = 1.0) -> dict[str, Any]:
-    url = f"http://{host}:{port}/health"
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, _req, _fp, _code, _msg, _headers, _newurl):
+        return None
+
+
+def _probe_ready(
+    host: str,
+    port: int,
+    timeout: float = 1.0,
+    *,
+    expected: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    challenge = secrets.token_urlsafe(32)
+    url = f"http://{host}:{port}/health?challenge={challenge}"
     started = time.monotonic()
+    if expected is not None and not isinstance(expected, dict):
+        return {
+            "status": "failed", "failure_reason": "expected_identity_invalid",
+            "elapsed_ms": 0.0, "url": url,
+        }
     try:
-        with urlopen(Request(url, headers={"User-Agent": "CleanHouse Runtime Supervisor"}), timeout=timeout) as response:
-            body = response.read()
+        opener = build_opener(_NoRedirectHandler())
+        with opener.open(Request(url, headers={"User-Agent": "CleanHouse Runtime Supervisor"}), timeout=timeout) as response:
+            body = response.read(START_PROBE_MAX_BYTES + 1)
+            if len(body) > START_PROBE_MAX_BYTES:
+                return {
+                    "status": "failed", "failure_reason": "response_too_large",
+                    "elapsed_ms": round((time.monotonic() - started) * 1000.0, 2), "url": url,
+                }
             payload = json.loads(body.decode("utf-8") or "{}")
+            if not isinstance(payload, dict):
+                return {
+                    "status": "failed", "failure_reason": "response_shape_invalid",
+                    "elapsed_ms": round((time.monotonic() - started) * 1000.0, 2), "url": url,
+                }
+            raw_pid = payload.get("pid")
+            pid = raw_pid if isinstance(raw_pid, int) and not isinstance(raw_pid, bool) and raw_pid > 1 else None
+            raw_boot_id = payload.get("boot_id")
+            boot_id = raw_boot_id.strip() if isinstance(raw_boot_id, str) else ""
             ok = (
                 response.getcode() == 200
                 and payload.get("schema") == BACKEND_LIVENESS_SCHEMA
                 and payload.get("status") == "ok"
                 and payload.get("alive") is True
+                and pid is not None
+                and bool(boot_id)
             )
-            return {
+            isolation = payload.get("isolation")
+            if _start_isolated_runtime():
+                state_expected = dict(expected or {})
+                state_expected.update({"host": host, "port": int(port)})
+                isolation_object = isinstance(isolation, dict)
+                ok = ok and isolation_object and _valid_isolated_evidence(
+                    isolation, role="backend", challenge=challenge, expected=state_expected,
+                )
+                for key in (
+                    "run_id", "invocation_nonce", "challenge", "generation", "boot_id", "pid",
+                    "parent_pid", "process_group_id", "session_id", "source_content_digest",
+                    "source_revision", "host", "port", "phase", "state_revision",
+                ):
+                    ok = ok and isolation_object and payload.get(key) == isolation.get(key)
+                # Reconcile the signed observation with a bounded state reread.
+                # A concurrent forward transition is allowed; regression,
+                # excessive drift, or a generation change fails closed.
+                after = read_state()
+                if not isinstance(after, dict):
+                    after = {}
+                signed_revision = isolation.get("state_revision") if isinstance(isolation, dict) else None
+                after_revision = after.get("state_revision")
+                signed_phase = isolation.get("phase") if isinstance(isolation, dict) else None
+                after_phase = after.get("startup_phase")
+                transition_consistent = bool(
+                    isinstance(signed_revision, int)
+                    and not isinstance(signed_revision, bool)
+                    and isinstance(after_revision, int)
+                    and not isinstance(after_revision, bool)
+                    and signed_revision <= after_revision <= signed_revision + START_STATE_REVISION_TRANSITION_LIMIT
+                    and isinstance(signed_phase, str)
+                    and signed_phase in START_PHASE_ORDER
+                    and isinstance(after_phase, str)
+                    and after_phase in START_PHASE_ORDER
+                    and START_PHASE_ORDER[after_phase] >= START_PHASE_ORDER[signed_phase]
+                    and after.get("backend_pid") == isolation.get("pid")
+                    and after.get("backend_boot_id") == isolation.get("generation")
+                )
+                ok = ok and transition_consistent
+            result = {
                 "status": "ok" if ok else "failed",
                 "http_status": response.getcode(),
                 "elapsed_ms": round((time.monotonic() - started) * 1000.0, 2),
                 "url": url,
             }
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
+            if pid is not None:
+                result["pid"] = pid
+            if boot_id:
+                result["boot_id"] = boot_id
+            if _valid_isolated_evidence(isolation, role="backend"):
+                result["isolation"] = isolation
+                result["challenge"] = challenge
+            if not ok:
+                result["failure_reason"] = "invalid_liveness_contract"
+            return result
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError, TypeError, AttributeError) as exc:
         return {
             "status": "failed",
             "error": str(exc) or exc.__class__.__name__,
@@ -735,6 +1000,7 @@ def _base_state(host: str, port: int, previous: dict[str, Any] | None = None) ->
         "port": int(port),
         "supervisor_pid": previous.get("supervisor_pid"),
         "backend_pid": previous.get("backend_pid"),
+        "backend_boot_id": previous.get("backend_boot_id"),
         "boot_id": previous.get("boot_id"),
         "start_time": previous.get("start_time"),
         "startup_phase": previous.get("startup_phase"),
@@ -756,6 +1022,8 @@ def _base_state(host: str, port: int, previous: dict[str, Any] | None = None) ->
         "recent_recovery_receipts": list(previous.get("recent_recovery_receipts") or []),
         "resource_guard": dict(previous.get("resource_guard") or {}),
         "self_deviation": dict(previous.get("self_deviation") or {}),
+        "start_isolation": dict(previous.get("start_isolation") or {}),
+        "state_revision": int(previous.get("state_revision", 0) or 0),
     }
 
 
@@ -813,14 +1081,28 @@ def _operator_readiness_contract(state: dict[str, Any] | None) -> dict[str, Any]
         backend_pid = int(state.get("backend_pid"))
     except (TypeError, ValueError):
         backend_pid = None
-    probe_status = str((state.get("last_probe") or {}).get("status") or "")
+    probe = state.get("last_probe") if isinstance(state.get("last_probe"), dict) else {}
+    probe_status = str(probe.get("status") or "")
+    try:
+        probe_pid = int(probe.get("pid"))
+    except (TypeError, ValueError):
+        probe_pid = None
+    backend_boot_id = str(state.get("backend_boot_id") or "").strip()
+    probe_boot_id = str(probe.get("boot_id") or "").strip()
+    probe_generation_matches = bool(
+        probe_status == "ok"
+        and backend_pid is not None
+        and probe_pid == backend_pid
+        and backend_boot_id
+        and probe_boot_id == backend_boot_id
+    )
     checks = {
         "runtime_healthy": runtime_state == OPERATOR_READY_RUNTIME_STATE,
         "startup_warm": startup_phase in OPERATOR_READY_STARTUP_PHASES,
         "backend_alive": backend_alive,
         "supervisor_alive": supervisor_alive,
         "heartbeat_fresh": heartbeat_fresh,
-        "readiness_probe_ok": probe_status == "ok",
+        "readiness_probe_ok": probe_generation_matches,
         "single_owned_listener": len(owned_listener_pids) == 1,
         "listener_matches_backend": backend_pid is not None and owned_listener_pids == [backend_pid],
         "no_foreign_listener": not foreign_listener_pids,
@@ -840,6 +1122,43 @@ def _operator_readiness_contract(state: dict[str, Any] | None) -> dict[str, Any]
 
 def _launch_ready(state: dict[str, Any] | None) -> bool:
     return bool(_operator_readiness_contract(state).get("satisfied"))
+
+
+def _live_owned_backend_generation(state: dict[str, Any]) -> bool:
+    try:
+        backend_pid = int(state.get("backend_pid"))
+    except (TypeError, ValueError):
+        return False
+    probe = state.get("last_probe") if isinstance(state.get("last_probe"), dict) else {}
+    try:
+        probe_pid = int(probe.get("pid"))
+    except (TypeError, ValueError):
+        return False
+    backend_boot_id = str(state.get("backend_boot_id") or "").strip()
+    probe_boot_id = str(probe.get("boot_id") or "").strip()
+    owned_listener_pids = [int(pid) for pid in state.get("owned_listener_pids", []) if str(pid).isdigit()]
+    return bool(
+        state.get("backend_alive")
+        and state.get("backend_owned") is True
+        and owned_listener_pids == [backend_pid]
+        and not state.get("foreign_listener_pids")
+        and probe.get("status") == "ok"
+        and probe_pid == backend_pid
+        and backend_boot_id
+        and probe_boot_id == backend_boot_id
+    )
+
+
+def _backend_restart_required(state: dict[str, Any], *, backend_dead: bool = False) -> bool:
+    """Restart only when the tracked backend generation is actually gone."""
+    if _start_isolated_runtime() and state.get("backend_alive") and not backend_dead:
+        # A newly spawned isolated backend may not have bound its listener yet.
+        # Keep observing the captured direct child; never create competing
+        # generations merely because the first bounded health probe raced bind.
+        return False
+    if _live_owned_backend_generation(state):
+        return False
+    return bool(backend_dead or not state.get("backend_alive") or state.get("backend_owned") is not True)
 
 
 def _same_blocked_recovery(previous_state: dict[str, Any] | None, action: str) -> bool:
@@ -1107,6 +1426,116 @@ def classify_state(
     reasons: set[str] = set()
     backend_pid = state.get("backend_pid")
     supervisor_pid = state.get("supervisor_pid")
+
+    if _start_isolated_runtime():
+        backend_alive = _pid_alive(backend_pid)
+        supervisor_alive = _pid_alive(supervisor_pid)
+        stored_backend_identity = state.get("start_isolation", {}).get("backend")
+        expected_identity = {
+            key: stored_backend_identity.get(key)
+            for key in (
+                "run_id", "invocation_nonce", "generation", "boot_id", "pid", "parent_pid",
+                "process_group_id", "session_id", "source_content_digest", "source_revision",
+                "phase", "state_revision",
+            )
+            if isinstance(stored_backend_identity, dict) and stored_backend_identity.get(key) is not None
+        }
+        ready_probe = _probe_ready(host, port, expected=expected_identity) if backend_alive else {"status": "skipped"}
+        backend_evidence = ready_probe.get("isolation") if ready_probe.get("status") == "ok" else None
+        supervisor_evidence = isolated_runtime_evidence(
+            role="supervisor", boot_id=str(state.get("boot_id") or ""),
+        ) or state.get("start_isolation", {}).get("supervisor")
+        evidence_valid = bool(
+            _valid_isolated_evidence(
+                backend_evidence, role="backend", challenge=ready_probe.get("challenge"), expected=expected_identity,
+            )
+            and _valid_isolated_evidence(supervisor_evidence, role="supervisor")
+        )
+        direct_child = bool(
+            evidence_valid
+            and int(backend_evidence.get("parent_pid") or -1) == int(supervisor_evidence.get("pid") or -2)
+        )
+        same_group = bool(
+            evidence_valid
+            and int(backend_evidence.get("process_group_id") or -1)
+            == int(supervisor_evidence.get("process_group_id") or -2)
+        )
+        same_session = bool(
+            evidence_valid
+            and int(backend_evidence.get("session_id") or -1)
+            == int(supervisor_evidence.get("session_id") or -2)
+        )
+        generation_matches = bool(
+            evidence_valid
+            and backend_evidence.get("run_id") == supervisor_evidence.get("run_id")
+            and backend_evidence.get("invocation_nonce") == supervisor_evidence.get("invocation_nonce")
+        )
+        listener_bound = bool(
+            generation_matches
+            and ready_probe.get("pid") == backend_pid
+            and ready_probe.get("boot_id") == state.get("backend_boot_id")
+        )
+        heartbeat_fresh = _heartbeat_fresh(state)
+        if backend_alive and supervisor_alive and direct_child and same_group and same_session and listener_bound:
+            runtime_state = "healthy" if heartbeat_fresh or not state.get("heartbeat_at") else "degraded"
+            if runtime_state == "degraded":
+                reasons.add("heartbeat_stale")
+        elif backend_alive:
+            runtime_state = "recovering"
+            reasons.add("start_isolation_binding_incomplete")
+        else:
+            runtime_state = "unhealthy"
+            reasons.add("backend_not_running")
+        owned = [int(backend_pid)] if listener_bound and backend_pid else []
+        state.update({
+            "runtime_state": runtime_state,
+            "status": runtime_state,
+            "reason_codes": sorted(reasons),
+            "backend_alive": backend_alive,
+            "backend_owned": listener_bound,
+            "supervisor_alive": supervisor_alive,
+            "heartbeat_fresh": heartbeat_fresh,
+            "listener_pids": owned,
+            "listeners": ([{
+                "pid": int(backend_pid),
+                "alive": True,
+                "binding": "nonce_generation_health",
+            }] if owned else []),
+            "owned_listener_pids": owned,
+            "foreign_listener_pids": [],
+            "listener_ownership_observation": {
+                "status": "NOT_INDEPENDENTLY_ESTABLISHED",
+                "authority": "start_adapter_required",
+                "product_correlation": "signed_nonce_generation_health",
+            },
+            "last_probe": ready_probe,
+            "resource_guard": {
+                "schema": "cleanhouse.runtime_resource_guard.v1",
+                "status": "not_observed",
+                "action": "none",
+                "reason_codes": [],
+                "usage": {"status": "not_observed", "reason": "start_isolation_no_global_ps"},
+                "thresholds": runtime_guard_config(),
+                "cpu_degraded_samples": 0,
+                "expected_behavior": "START independently owns bounded resource and extinction observation.",
+                "updated_at": _now_iso(),
+            },
+            "start_isolation": {
+                **dict(state.get("start_isolation") or {}),
+                "backend": backend_evidence or {},
+                "checks": {
+                    "evidence_valid": evidence_valid,
+                    "direct_child": direct_child,
+                    "same_process_group": same_group,
+                    "same_session": same_session,
+                    "generation_matches": generation_matches,
+                    "listener_bound": listener_bound,
+                },
+            },
+            "updated_at": _now_iso(),
+        })
+        return state
+
     backend_alive = _pid_alive(backend_pid)
     backend_owned = backend_alive and _pid_owned_by_cleanhouse(backend_pid)
     supervisor_alive = _pid_alive(supervisor_pid)
@@ -1118,6 +1547,7 @@ def classify_state(
     owned_listener_pids = [item["pid"] for item in listeners if _is_cleanhouse_owned_process(item)]
     foreign_listener_pids = [item["pid"] for item in listeners if not _is_cleanhouse_owned_process(item)]
 
+    adopted_backend = False
     if (
         owned_listener_pids
         and not foreign_listener_pids
@@ -1126,9 +1556,24 @@ def classify_state(
     ):
         backend_pid = owned_listener_pids[0]
         state["backend_pid"] = backend_pid
+        adopted_backend = True
         backend_alive = _pid_alive(backend_pid)
         backend_owned = backend_alive and _pid_owned_by_cleanhouse(backend_pid)
     ready_probe = _probe_ready(host, port) if probe and pids else {"status": "skipped"}
+    if ready_probe.get("status") == "ok":
+        probe_pid = ready_probe.get("pid")
+        probe_boot_id = str(ready_probe.get("boot_id") or "").strip()
+        stored_boot_id = str(state.get("backend_boot_id") or "").strip()
+        if probe_pid != backend_pid:
+            ready_probe = dict(ready_probe)
+            ready_probe.update({"status": "failed", "failure_reason": "liveness_pid_mismatch"})
+            reasons.add("liveness_pid_mismatch")
+        elif stored_boot_id and probe_boot_id != stored_boot_id and not adopted_backend:
+            ready_probe = dict(ready_probe)
+            ready_probe.update({"status": "failed", "failure_reason": "liveness_boot_id_mismatch"})
+            reasons.add("liveness_boot_id_mismatch")
+        else:
+            state["backend_boot_id"] = probe_boot_id
     heartbeat_fresh = _heartbeat_fresh(state)
 
     if runtime_state != "stale_pid":
@@ -1189,6 +1634,7 @@ def classify_state(
         "status": runtime_state,
         "reason_codes": sorted(reasons),
         "backend_alive": backend_alive,
+        "backend_owned": backend_owned,
         "supervisor_alive": supervisor_alive,
         "heartbeat_fresh": heartbeat_fresh,
         "listener_pids": pids,
@@ -1392,7 +1838,11 @@ def _start_backend(interpreter: str, host: str, port: int, runtime_dir: Path, bo
         stdin=subprocess.DEVNULL,
         stdout=log,
         stderr=subprocess.STDOUT,
-        start_new_session=True,
+        # Canonical supervision deliberately detaches the backend.  A START
+        # verification runtime must instead remain in START's task-owned
+        # process group so the external adapter can prove descendant
+        # extinction without inspecting or signaling unrelated processes.
+        start_new_session=not _start_isolated_runtime(),
     )
     log.close()
     return process
@@ -1464,6 +1914,15 @@ def supervisor_loop(host: str, port: int, runtime_dir: Path | None = None) -> in
         "interpreter": _resolve_supervisor_boot_interpreter(state),
         "blocked_recovery": {},
     })
+    supervisor_isolation = isolated_runtime_evidence(role="supervisor", boot_id=boot_id)
+    if supervisor_isolation:
+        state["start_isolation"] = {
+            "schema": START_ISOLATION_SCHEMA,
+            "status": "live",
+            "supervisor": supervisor_isolation,
+            "backend": {},
+            "checks": {},
+        }
     write_state(state, rdir)
 
     try:
@@ -1615,7 +2074,7 @@ def supervisor_loop(host: str, port: int, runtime_dir: Path | None = None) -> in
                     "interpreter_path": state["interpreter"].get("path"),
                     "returncode": backend_process.poll(),
                 }
-            needs_start = state["runtime_state"] in {"unhealthy", "stale_pid"} or backend_dead
+            needs_start = _backend_restart_required(state, backend_dead=backend_dead)
             if needs_start:
                 now = time.monotonic()
                 restart_times = [item for item in restart_times if now - item <= RESTART_WINDOW_SECONDS]
@@ -2055,17 +2514,17 @@ def acknowledge_self_deviation(
     runtime_dir: Path | None = None,
 ) -> dict[str, Any]:
     rdir = runtime_dir or _runtime_dir()
-    previous = classify_state(read_state(rdir), host=host, port=port, probe=False)
+    previous = classify_state(read_state(rdir), host=host, port=port, probe=True)
     acknowledged = _acknowledge_self_deviation_for_restart(dict(previous))
-    acknowledged["runtime_state"] = "unhealthy"
-    acknowledged["status"] = "unhealthy"
-    acknowledged["operator_ready"] = False
+    acknowledged["status"] = acknowledged["runtime_state"]
     acknowledged["reason_codes"] = sorted(
         reason
         for reason in set(acknowledged.get("reason_codes", []))
         if reason not in SELF_DEVIATION_BLOCK_TYPES and reason != "runtime_self_deviation_restart_blocked"
     )
     acknowledged["reason_codes"].append("runtime_self_deviation_acknowledged")
+    acknowledged["reason_codes"] = sorted(set(acknowledged["reason_codes"]))
+    acknowledged["operator_ready"] = _launch_ready(acknowledged)
     acknowledged["last_start_attempt"] = {
         "status": "operator_acknowledged_self_deviation",
         "attempted_at": _now_iso(),
@@ -2200,6 +2659,7 @@ def startup_preflight(
             "owned_pids": state.get("owned_listener_pids", []),
             "foreign_pids": state.get("foreign_listener_pids", []),
             "details": state.get("listeners", []),
+            "ownership_observation": state.get("listener_ownership_observation", {}),
         },
         "last_start_attempt": state.get("last_start_attempt", {}),
         "blocked_recovery": state.get("blocked_recovery", {}),
@@ -2292,6 +2752,7 @@ def _runtime_payload_from_state(state: dict[str, Any], resolved_host: str, resol
         "last_start_attempt": state.get("last_start_attempt", {}),
         "blocked_recovery": state.get("blocked_recovery", {}),
         "recovery_receipts": state.get("recent_recovery_receipts", []),
+        "start_isolation": state.get("start_isolation", {}),
         "state_path": str(state_path()),
         "updated_at": state.get("updated_at"),
     }
@@ -2309,6 +2770,48 @@ def _cached_state_for_probe(
     backend_alive = _pid_alive(state.get("backend_pid"))
     supervisor_alive = _pid_alive(state.get("supervisor_pid"))
     heartbeat_fresh = _heartbeat_fresh(state)
+    if _start_isolated_runtime():
+        isolation = dict(state.get("start_isolation") or {})
+        checks = isolation.get("checks") if isinstance(isolation.get("checks"), dict) else {}
+        backend_pid = state.get("backend_pid")
+        listener_bound = bool(checks.get("listener_bound") and backend_alive)
+        owned = [int(backend_pid)] if listener_bound and str(backend_pid).isdigit() else []
+        runtime_state = str(state.get("runtime_state") or "unhealthy")
+        if not backend_alive:
+            runtime_state = "unhealthy"
+            reasons.add("backend_not_running")
+        elif not supervisor_alive:
+            runtime_state = "degraded"
+            reasons.add("supervisor_not_running")
+        elif not listener_bound:
+            runtime_state = "degraded"
+            reasons.add("listener_not_ready")
+        elif not heartbeat_fresh:
+            runtime_state = "degraded"
+            reasons.add("heartbeat_stale")
+        else:
+            runtime_state = "healthy"
+        state.update({
+            "runtime_state": runtime_state,
+            "status": runtime_state,
+            "reason_codes": sorted(reasons),
+            "backend_alive": backend_alive,
+            "backend_owned": listener_bound,
+            "supervisor_alive": supervisor_alive,
+            "heartbeat_fresh": heartbeat_fresh,
+            "listener_pids": owned,
+            "listeners": ([{"pid": int(backend_pid), "alive": True, "binding": "nonce_generation_health"}] if owned else []),
+            "owned_listener_pids": owned,
+            "foreign_listener_pids": [],
+            "listener_ownership_observation": {
+                "status": "NOT_INDEPENDENTLY_ESTABLISHED",
+                "authority": "start_adapter_required",
+                "product_correlation": "signed_nonce_generation_health",
+            },
+            "interpreter": _cached_interpreter_summary(stored),
+            "updated_at": stored.get("updated_at"),
+        })
+        return state, resolved_host, resolved_port
     pids = listener_pids(resolved_port, resolved_host)
     listeners = [_pid_info(pid) for pid in pids]
     owned_listener_pids = [item["pid"] for item in listeners if _is_cleanhouse_owned_process(item)]
@@ -2429,6 +2932,7 @@ def readiness_payload(host: str | None = None, port: int | None = None) -> dict[
         "heartbeat": runtime.get("heartbeat", {}),
         "resource_guard": runtime.get("resource_guard", {}),
         "self_deviation": runtime.get("self_deviation", {}),
+        "start_isolation": runtime.get("start_isolation", {}),
         "state_path": str(state_path()),
         "updated_at": state.get("updated_at"),
     }
@@ -2453,6 +2957,16 @@ def register_backend_start(host: str, port: int) -> dict[str, Any]:
         "heartbeat_sequence": int(previous.get("heartbeat_sequence", 0) or 0) + 1,
         "blocked_recovery": {},
     })
+    backend_isolation = isolated_runtime_evidence(
+        role="backend", boot_id=str(state.get("backend_boot_id") or ""),
+    )
+    if backend_isolation:
+        state["start_isolation"] = {
+            **dict(previous.get("start_isolation") or {}),
+            "schema": START_ISOLATION_SCHEMA,
+            "status": "live",
+            "backend": backend_isolation,
+        }
     state["interpreter"] = _cached_interpreter_summary(previous)
     return write_state(state, rdir)
 

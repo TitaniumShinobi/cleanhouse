@@ -32,10 +32,16 @@ let _lastWorkstationOkAt = null;
 let _pendingDashboardFocus = null;
 let _activeLoginReportId = '';
 let _autoAckedDeepLinkNotifications = new Set();
+let _refreshInFlight = false;
 const OPERATOR_STATE_KEY = 'cleanhouse.operatorState.v1';
 const BROWSER_NOTIFICATION_WINDOW_MS = 30000;
 const BROWSER_NOTIFICATION_MAX_PER_WINDOW = 3;
 const DASHBOARD_DEEP_LINK_TIMEOUT_MS = 20000;
+const DASHBOARD_LOW_PROCESSING_RECEIPT_LIMIT = 5;
+const DASHBOARD_LOW_PROCESSING_EVENT_LIMIT = 20;
+const DASHBOARD_RENDER_ROW_LIMIT = 10;
+const DASHBOARD_INLINE_REF_LIMIT = 5;
+const DASHBOARD_AUTO_REFRESH_INTERVAL_MS = 30000;
 const CLEANHOUSE_REPO_PATH = '/Users/devonwoodson/Documents/GitHub/cleanhouse';
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -44,7 +50,7 @@ document.addEventListener('DOMContentLoaded', () => {
     applyDashboardDeepLinkToInputs();
     initOperatorSessionInput();
     renderRuntimeIndicator('unknown', 'waiting for first runtime poll');
-    loadSessions();
+    loadSessions().finally(() => refreshEmergencySummary());
     if (document.getElementById('auto-refresh').checked) {
         toggleAutoRefresh();
     }
@@ -144,10 +150,10 @@ async function loadSessions() {
         if (restoredSession) {
             ensureSessionOption(restoredSession, restoredSession + ' [operator]');
             sel.value = restoredSession;
-            onSessionChange();
+            selectSessionWithoutRefresh(restoredSession);
         } else if (intents.length > 0) {
             sel.value = intents[0].id;
-            onSessionChange();
+            selectSessionWithoutRefresh(intents[0].id);
         } else {
             currentSessionId = document.getElementById('operator-session-input')?.value || generateSessionId();
             renderSessionBar({ session_id: currentSessionId, status: 'stopped' });
@@ -156,6 +162,19 @@ async function loadSessions() {
         sel.innerHTML = '<option value="">— Failed to load sessions —</option>';
         setStatus('degraded', 'Collector unavailable: could not fetch intents');
     }
+}
+
+function selectSessionWithoutRefresh(sessionId) {
+    currentSessionId = sessionId || '';
+    const sessionInput = document.getElementById('operator-session-input');
+    if (sessionInput && currentSessionId) {
+        sessionInput.value = currentSessionId;
+        persistOperatorState({ session_id: currentSessionId });
+    }
+    const btn = document.getElementById('report-btn');
+    if (btn) btn.disabled = !currentSessionId;
+    renderSessionBar({ session_id: currentSessionId, status: 'selected' });
+    setStatus('clear', currentSessionId ? 'Session selected. Use Refresh to load evidence.' : 'Select a session to begin monitoring.');
 }
 
 function onSessionChange() {
@@ -169,7 +188,7 @@ function onSessionChange() {
     const btn = document.getElementById('report-btn');
     if (currentSessionId) {
         btn.disabled = false;
-        refreshAll();
+        selectSessionWithoutRefresh(currentSessionId);
     } else {
         btn.disabled = true;
         clearPanels();
@@ -177,15 +196,32 @@ function onSessionChange() {
     }
 }
 
-async function refreshAll() {
-    await fetchActiveContext();
-    const tasks = [fetchEvents(), fetchNativeReports(), fetchRuntime()];
-    if (currentSessionId) {
-        tasks.push(fetchTimeline(currentSessionId), fetchAlerts(currentSessionId), fetchReceiptScope(currentSessionId), fetchWorkstation(currentSessionId), fetchTier1Surfaces(currentSessionId));
-    } else {
-        tasks.push(fetchTier1Surfaces(null));
+async function refreshEmergencySummary() {
+    if (_refreshInFlight) return;
+    _refreshInFlight = true;
+    try {
+        await Promise.all([fetchRuntime(), fetchActiveContext(false)]);
+        setStatus('clear', currentSessionId ? 'Runtime pulse loaded. Use Refresh to load evidence.' : 'Runtime pulse loaded. Select a session to load evidence.');
+    } finally {
+        _refreshInFlight = false;
     }
-    await Promise.all(tasks);
+}
+
+async function refreshAll() {
+    if (_refreshInFlight) return;
+    _refreshInFlight = true;
+    try {
+        await fetchActiveContext(true);
+        const tasks = [fetchEvents(), fetchNativeReports(), fetchRuntime()];
+        if (currentSessionId) {
+            tasks.push(fetchTimeline(currentSessionId), fetchAlerts(currentSessionId), fetchReceiptScope(currentSessionId), fetchWorkstation(currentSessionId), fetchTier1Surfaces(currentSessionId));
+        } else {
+            tasks.push(fetchTier1Surfaces(null));
+        }
+        await Promise.all(tasks);
+    } finally {
+        _refreshInFlight = false;
+    }
 }
 
 async function fetchRuntime() {
@@ -203,9 +239,9 @@ async function fetchRuntime() {
     }
 }
 
-async function fetchActiveContext() {
+async function fetchActiveContext(refresh = false) {
     try {
-        const data = await window.CleanHouseAPI.getActiveContext(true);
+        const data = await window.CleanHouseAPI.getActiveContext(Boolean(refresh));
         _lastActiveContextPayload = data || null;
         _lastActiveContext = data?.active_context || null;
         adoptActiveContextSession(_lastActiveContext);
@@ -248,7 +284,7 @@ async function fetchTimeline(sessionId) {
 async function fetchEvents() {
     const body = document.getElementById('fs-events-body');
     try {
-        const events = await window.CleanHouseAPI.getEvents(50);
+        const events = await window.CleanHouseAPI.getEvents(DASHBOARD_LOW_PROCESSING_EVENT_LIMIT);
         _lastFileEvents = Array.isArray(events) ? events : [];
         renderFileEvents(_lastFileEvents);
     } catch (e) {
@@ -274,18 +310,14 @@ async function fetchReceiptScope(sessionId) {
     const body = document.getElementById('receipt-scope-body');
     try {
         const [receiptData, approvalData] = await Promise.all([
-            window.CleanHouseAPI.getReceipts(sessionId),
+            window.CleanHouseAPI.getReceipts(sessionId, DASHBOARD_LOW_PROCESSING_RECEIPT_LIMIT),
             window.CleanHouseAPI.getApprovalQueue(sessionId),
         ]);
-        _lastReceipts = receiptData.receipts || [];
+        _lastReceipts = (receiptData.receipts || []).slice(0, DASHBOARD_LOW_PROCESSING_RECEIPT_LIMIT);
         _lastReceipt = _lastReceipts.length > 0 ? _lastReceipts[0] : null;
         _lastApprovalQueue = approvalData.approval_queue || [];
-        const [replays, bundles] = await Promise.all([
-            fetchReceiptReplays(_lastReceipts),
-            fetchReceiptBundles(_lastReceipts),
-        ]);
-        _lastReceiptReplays = replays;
-        _lastReceiptBundles = bundles;
+        _lastReceiptReplays = {};
+        _lastReceiptBundles = {};
         renderReceiptScope(_lastReceipts, _lastApprovalQueue, _lastReceiptReplays, _lastReceiptBundles);
     } catch (e) {
         _lastReceipt = null;
@@ -517,7 +549,7 @@ function renderRuntime(runtime) {
     const listener = runtime.listener || {};
     const delivery = runtime.notifications || {};
     const visibilitySummary = runtime.visibility_proof_summary || {};
-    const notificationRows = notifications.map(item =>
+    const notificationRows = notifications.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(item =>
         '<div class="runtime-notification-row severity-' + cssToken(item.severity || 'info') + (item.acknowledged ? ' acknowledged' : '') + '" data-notification-id="' + escapeHtml(item.id || '') + '">' +
         '  <div class="workstation-row-head">' +
         '    <strong>' + escapeHtml(item.notification_type || 'runtime_notification') + '</strong>' +
@@ -529,7 +561,7 @@ function renderRuntime(runtime) {
         '  <button class="notification-ack" onclick="ackNotification(\'' + escapeJsString(item.id || '') + '\')" ' + (item.acknowledged ? 'disabled' : '') + '>Ack</button>' +
         '</div>'
     ).join('');
-    const recoveryRows = receipts.map(item =>
+    const recoveryRows = receipts.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(item =>
         '<div class="workstation-row rollback-row">' +
         '  <div class="workstation-row-head">' +
         '    <strong>' + escapeHtml(item.id || 'runtime_recovery') + '</strong>' +
@@ -832,11 +864,18 @@ function renderNativeReportRow(report) {
         '</div>';
 }
 
-function openStoredReport(reportId) {
-    const report = (_lastReports || []).find(item => item.id === reportId);
-    if (!report) return;
+async function openStoredReport(reportId) {
+    const summary = (_lastReports || []).find(item => item.id === reportId);
+    if (!summary) return;
     document.getElementById('report-modal').style.display = 'flex';
-    showReportResult({ status: 'ok', ...report });
+    document.getElementById('report-body').innerHTML = '<div class="report-submitting"><div class="spinner"></div><div>Loading report detail...</div></div>';
+    document.getElementById('report-footer').innerHTML = '';
+    try {
+        const report = await window.CleanHouseAPI.getReport(reportId);
+        showReportResult(report.status ? report : { status: 'ok', ...report });
+    } catch (e) {
+        showReportError(e.message || 'report detail unavailable');
+    }
 }
 
 function renderPresenceIntervention(intervention, clipboardAvailable) {
@@ -974,7 +1013,7 @@ function renderObjectiveFeed(objectives) {
         body.innerHTML = '<div class="empty-state"><div class="icon">◎</div><div>No objective evidence recorded for this session.</div></div>';
         return;
     }
-    body.innerHTML = objectives.map(objective =>
+        body.innerHTML = objectives.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(objective =>
         '<div class="workstation-row objective-row" data-objective-id="' + escapeHtml(objective.id || '') + '">' +
         '  <div class="workstation-row-head">' +
         '    <strong>' + escapeHtml(objective.id || 'objective') + '</strong>' +
@@ -993,7 +1032,7 @@ function renderMutationStream(mutations) {
         body.innerHTML = '<div class="empty-state"><div class="icon">≡</div><div>No local controlled mutations recorded for this session.</div></div>';
         return;
     }
-    body.innerHTML = mutations.map(mutation => {
+    body.innerHTML = mutations.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(mutation => {
         const changes = Array.isArray(mutation.changes)
             ? mutation.changes.map(change => typeof change === 'string' ? change : (change.path || '')).filter(Boolean)
             : [];
@@ -1018,7 +1057,7 @@ function renderTaskManager(snapshot) {
         body.innerHTML = '<div class="empty-state"><div class="icon">⚙</div><div>No process inventory available.</div></div>';
         return;
     }
-    body.innerHTML = tasks.slice(0, 20).map(task =>
+    body.innerHTML = tasks.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(task =>
         '<div class="workstation-row">' +
         '  <div class="workstation-row-head"><strong>' + escapeHtml(valueOrUnavailable(task.command)) + '</strong><span>pid=' + escapeHtml(String(task.pid || '')) + '</span></div>' +
         '  <div class="workstation-meta">cpu=' + escapeHtml(String(task.cpu ?? 0)) + ' · mem=' + escapeHtml(String(task.mem ?? 0)) + ' · user=' + escapeHtml(valueOrUnavailable(task.user)) + '</div>' +
@@ -1034,7 +1073,7 @@ function renderPortMonitor(snapshot) {
         body.innerHTML = '<div class="empty-state"><div class="icon">◍</div><div>No monitored port activity recorded.</div></div>';
         return;
     }
-    body.innerHTML = ports.slice(0, 25).map(port =>
+    body.innerHTML = ports.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(port =>
         '<div class="workstation-row">' +
         '  <div class="workstation-row-head"><strong>' + escapeHtml(valueOrUnavailable(port.host)) + ':' + escapeHtml(String(port.port ?? '')) + '</strong><span>pid=' + escapeHtml(String(port.pid || '')) + '</span></div>' +
         '  <div class="workstation-meta">process=' + escapeHtml(valueOrUnavailable(port.process)) + ' · reason=' + escapeHtml(valueOrUnavailable(port.reason)) + '</div>' +
@@ -1050,7 +1089,7 @@ function renderFileLineage(rows) {
         body.innerHTML = '<div class="empty-state"><div class="icon">⌘</div><div>No file lineage events recorded.</div></div>';
         return;
     }
-    body.innerHTML = lineage.slice(0, 30).map(item =>
+    body.innerHTML = lineage.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(item =>
         '<div class="workstation-row">' +
         '  <div class="workstation-row-head"><strong>' + escapeHtml(valueOrUnavailable(item.where)) + '</strong><span>' + escapeHtml(formatTime(item.when)) + '</span></div>' +
         '  <div class="workstation-meta">who=' + escapeHtml(valueOrUnavailable(item.who)) + ' · what=' + escapeHtml(valueOrUnavailable(item.what)) + '</div>' +
@@ -1162,7 +1201,7 @@ function renderQpbQueue(cases) {
         body.innerHTML = '<div class="empty-state"><div class="icon">⛉</div><div>No QPB actions pending.</div></div>';
         return;
     }
-    body.innerHTML = queue.map(item => {
+    body.innerHTML = queue.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(item => {
         const id = item.id || '';
         const status = item.status || 'unknown';
         const canPurge = status === 'quarantined' || status === 'purge_pending';
@@ -1188,7 +1227,7 @@ function renderMediatorQueue(proposals) {
         body.innerHTML = '<div class="empty-state"><div class="icon">↺</div><div>No mediator proposals recorded.</div></div>';
         return;
     }
-    body.innerHTML = queue.map(item => {
+    body.innerHTML = queue.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(item => {
         const id = item.id || '';
         const state = item.status || 'unknown';
         const pending = state === 'pending';
@@ -1218,7 +1257,7 @@ function renderDeviationPanel(deviationSignals, evidenceSummaries) {
         body.innerHTML = '<div class="empty-state"><div class="icon">⚑</div><div>No deviation summaries recorded for this session.</div></div>';
         return;
     }
-    const summaryHtml = summaries.map(summary =>
+    const summaryHtml = summaries.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(summary =>
         '<div class="why-flagged-row severity-' + cssToken(summary.severity || 'info') + '">' +
         '  <div class="why-title">Why flagged</div>' +
         '  <div class="workstation-summary">' + escapeHtml(summary.summary || '') + '</div>' +
@@ -1228,7 +1267,7 @@ function renderDeviationPanel(deviationSignals, evidenceSummaries) {
         renderInlineRefs(summary.evidence_refs || []) +
         '</div>'
     ).join('');
-    body.innerHTML = summaryHtml || alerts.map(alert =>
+    body.innerHTML = summaryHtml || alerts.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(alert =>
         '<div class="why-flagged-row severity-' + cssToken(alert.severity || 'low') + '">' +
         '  <div class="why-title">' + escapeHtml(alert.alert_type || 'alert') + '</div>' +
         '  <div class="workstation-summary">' + escapeHtml(alert.description || '') + '</div>' +
@@ -1246,7 +1285,7 @@ function renderApprovalRequired(approvals) {
         body.innerHTML = '<div class="empty-state"><div class="icon">✓</div><div>No approval-required records are pending.</div></div>';
         return;
     }
-    body.innerHTML = pending.map(item => {
+    body.innerHTML = pending.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(item => {
         const approvalId = item.id || '';
         const disabled = approvalId ? '' : ' disabled';
         const metadata = item.metadata || {};
@@ -1280,7 +1319,7 @@ function renderWorkstationReplay(receipts, replays) {
         body.innerHTML = '<div class="empty-state"><div class="icon">⌁</div><div>No replayable receipts recorded for this session.</div></div>';
         return;
     }
-    body.innerHTML = receipts.map(receipt => {
+    body.innerHTML = receipts.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(receipt => {
         const replay = replays[receipt.id] || null;
         const replayStatus = replayStatusLabel(replay);
         const state = replay && replayStatus === 'ok' ? replay.state || {} : {};
@@ -1310,7 +1349,7 @@ function renderNotificationTray(notifications) {
         body.innerHTML = '<div class="empty-state"><div class="icon">•</div><div>No live notification-center alerts yet.</div></div>';
         return;
     }
-    body.innerHTML = notifications.map(item =>
+    body.innerHTML = notifications.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(item =>
         (function () {
             const delivery = (item.metadata || {}).native_delivery || {};
             return '<div class="notification-row severity-' + cssToken(item.severity || 'info') + (item.acknowledged ? ' acknowledged' : '') + '" data-notification-id="' + escapeHtml(item.id || '') + '">' +
@@ -1336,7 +1375,7 @@ function renderCollectorManifest(manifest) {
         updateStatus(_lastTimelineEntries);
         return;
     }
-    body.innerHTML = collectors.map(collector => {
+    body.innerHTML = collectors.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(collector => {
         const enabledLabel = collector.enabled === null ? 'configured unknown' : (collector.enabled ? 'enabled' : 'disabled');
         const collectorStatus = collector.collector_status || 'unknown';
         const dependency = collector.dependency_available === undefined ? '' : ' · dependency_available=' + String(Boolean(collector.dependency_available));
@@ -1366,7 +1405,7 @@ function renderLineageGraph(graph) {
         body.innerHTML = '<div class="empty-state"><div class="icon">⌬</div><div>No session evidence links available.</div></div>';
         return;
     }
-    const edgeRows = edges.slice(0, 12).map(edge =>
+    const edgeRows = edges.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(edge =>
         '<div class="lineage-edge">' +
         '  <code>' + escapeHtml(edge.from || '') + '</code>' +
         '  <span>' + escapeHtml(edge.relation || 'links') + '</span>' +
@@ -1375,7 +1414,7 @@ function renderLineageGraph(graph) {
     ).join('');
     body.innerHTML =
         '<div class="tier1-summary">nodes=' + escapeHtml(String(nodes.length)) + ' · edges=' + escapeHtml(String(edges.length)) + '</div>' +
-        nodes.slice(0, 10).map(node =>
+        nodes.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(node =>
             '<div class="tier1-node node-' + cssToken(node.type || 'unknown') + '">' +
             '  <strong>' + escapeHtml(node.type || 'node') + '</strong>' +
             '  <span>' + escapeHtml(node.label || node.id || '') + '</span>' +
@@ -1398,7 +1437,7 @@ function renderRollbackReplayState(state) {
         body.innerHTML = '<div class="empty-state"><div class="icon">↺</div><div>' + escapeHtml(message) + '</div></div>';
         return;
     }
-    const receiptRows = receipts.map(receipt => {
+    const receiptRows = receipts.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(receipt => {
         const replay = replays[receipt.id] || null;
         const manifestInfo = manifests[receipt.id] || {};
         const manifest = manifestInfo.manifest || manifestInfo;
@@ -1424,6 +1463,7 @@ function renderRollbackReplayState(state) {
     }).join('');
     const rollbackOnlyRows = rollbacks
         .filter(rollback => !receipts.some(receipt => findRollbackForReceipt(receipt, state)?.id === rollback.id))
+        .slice(0, DASHBOARD_RENDER_ROW_LIMIT)
         .map(renderRollbackRecordRow)
         .join('');
     body.innerHTML = receiptRows + rollbackOnlyRows;
@@ -1494,9 +1534,11 @@ function renderInlineRefs(refs) {
     if (!refs || refs.length === 0) {
         return '';
     }
-    return '<div class="workstation-refs">' + refs.map(ref =>
+    const visibleRefs = refs.slice(0, DASHBOARD_INLINE_REF_LIMIT);
+    const omitted = refs.length > visibleRefs.length ? '<span>+' + escapeHtml(String(refs.length - visibleRefs.length)) + ' more</span>' : '';
+    return '<div class="workstation-refs">' + visibleRefs.map(ref =>
         '<a href="' + escapeHtml(ref) + '">' + escapeHtml(ref) + '</a>'
-    ).join('') + '</div>';
+    ).join('') + omitted + '</div>';
 }
 
 function renderPathClustersInline(clusters) {
@@ -2401,7 +2443,7 @@ function renderTimeline(entries) {
     }
     const sorted = [...entries].sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
     let html = '';
-    for (const entry of sorted) {
+    for (const entry of sorted.slice(-DASHBOARD_RENDER_ROW_LIMIT)) {
         const ts = formatTime(entry.timestamp);
         const etype = entry.event_type || 'unknown';
         const status = entry.status || 'observed';
@@ -2433,7 +2475,7 @@ function renderFileEvents(entries) {
     }
     const sorted = [...entries].sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
     let html = '';
-    for (const entry of sorted) {
+    for (const entry of sorted.slice(-DASHBOARD_RENDER_ROW_LIMIT)) {
         const ts = formatTime(entry.timestamp);
         const path = entry.path || '';
         const etype = entry.event_type || 'unknown';
@@ -2458,7 +2500,7 @@ function renderAlerts(alerts) {
         return;
     }
     let html = '';
-    for (const alert of alerts) {
+    for (const alert of alerts.slice(0, DASHBOARD_RENDER_ROW_LIMIT)) {
         const atype = alert.alert_type || 'unknown';
         const severity = alert.severity || 'low';
         const hasConfidence = typeof alert.confidence === 'number' && Number.isFinite(alert.confidence);
@@ -2496,14 +2538,15 @@ function renderReceiptScope(receipts, approvals = _lastApprovalQueue, replays = 
         return;
     }
 
-    const clusterCount = receiptList.reduce((total, receipt) => {
+    const visibleReceipts = receiptList.slice(0, DASHBOARD_LOW_PROCESSING_RECEIPT_LIMIT);
+    const clusterCount = visibleReceipts.reduce((total, receipt) => {
         const clusters = receipt.scope_analysis && Array.isArray(receipt.scope_analysis.path_clusters)
             ? receipt.scope_analysis.path_clusters
             : [];
         return total + clusters.length;
     }, 0);
     document.getElementById('scope-cluster-count').textContent = clusterCount;
-    body.innerHTML = receiptList.map(receipt =>
+    body.innerHTML = visibleReceipts.map(receipt =>
         renderReceiptCard(receipt, findReceiptApproval(receipt, approvals), replays[receipt.id] || null, bundles[receipt.id] || null)
     ).join('');
 }
@@ -2534,15 +2577,18 @@ function renderReceiptCard(receipt, approval, replay, bundle) {
     const signatureVerified = bundleSignatureVerifiedLabel(bundle);
     const clipboardAvailable = Boolean(navigator.clipboard && navigator.clipboard.writeText);
 
-    const clustersHtml = clusters.length > 0
-        ? clusters.map(renderScopeCluster).join('')
+    const visibleClusters = clusters.slice(0, DASHBOARD_RENDER_ROW_LIMIT);
+    const visibleChangedPaths = changedPaths.slice(0, DASHBOARD_RENDER_ROW_LIMIT);
+    const visibleEvidenceRows = evidenceRows.slice(0, DASHBOARD_INLINE_REF_LIMIT);
+    const clustersHtml = visibleClusters.length > 0
+        ? visibleClusters.map(renderScopeCluster).join('')
         : '<div class="scope-empty-line">unavailable</div>';
-    const changedPathsHtml = changedPaths.length > 0
-        ? renderPathList(changedPaths)
+    const changedPathsHtml = visibleChangedPaths.length > 0
+        ? renderPathList(visibleChangedPaths)
         : '<div class="scope-empty-line">unavailable</div>';
-    const affectedPathsHtml = renderAffectedPathLinks(metadata.repo_path || '', changedPaths);
-    const refsHtml = evidenceRows.length > 0
-        ? evidenceRows.map(row =>
+    const affectedPathsHtml = renderAffectedPathLinks(metadata.repo_path || '', visibleChangedPaths);
+    const refsHtml = visibleEvidenceRows.length > 0
+        ? visibleEvidenceRows.map(row =>
             '<div class="receipt-evidence-row">' +
             '<a href="' + escapeHtml(row.ref) + '">' + escapeHtml(row.ref) + '</a>' +
             '<span>' + escapeHtml(row.source || 'evidence') + (row.label ? ' · ' + escapeHtml(row.label) : '') + '</span>' +
@@ -2663,7 +2709,7 @@ function renderApprovalHistory(approval) {
     if (history.length === 0) {
         return '<div class="approval-history empty">No approval history recorded.</div>';
     }
-    const rows = history.map(entry =>
+    const rows = history.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(entry =>
         '<div class="approval-history-row">' +
         '  <span>' + escapeHtml(formatTime(entry.timestamp)) + '</span>' +
         '  <strong>' + escapeHtml(entry.status || entry.action || '') + '</strong>' +
@@ -2754,7 +2800,7 @@ function renderAffectedPathLinks(repoPath, changedPaths) {
     if (!repoPath || !Array.isArray(changedPaths) || changedPaths.length === 0) {
         return '<div class="scope-empty-line">unavailable</div>';
     }
-    return '<div class="affected-path-links">' + changedPaths.map(path => {
+    return '<div class="affected-path-links">' + changedPaths.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(path => {
         const href = affectedPathHref(repoPath, path);
         return '<a href="' + escapeHtml(href) + '" target="_blank" rel="noreferrer">' + escapeHtml(path) + '</a>';
     }).join('') + '</div>';
@@ -2811,7 +2857,7 @@ function renderScopeCluster(cluster) {
 }
 
 function renderPathList(paths) {
-    return '<ul class="scope-path-list">' + paths.map(path =>
+    return '<ul class="scope-path-list">' + paths.slice(0, DASHBOARD_RENDER_ROW_LIMIT).map(path =>
         '<li>' + escapeHtml(path) + '</li>'
     ).join('') + '</ul>';
 }
@@ -3328,8 +3374,11 @@ function toggleAutoRefresh() {
         autoRefreshTimer = null;
     }
     if (document.getElementById('auto-refresh').checked) {
-        autoRefreshTimer = setInterval(refreshAll, 2000);
-        refreshAll();
+        autoRefreshTimer = setInterval(() => {
+            if (document.hidden) return;
+            refreshEmergencySummary();
+        }, DASHBOARD_AUTO_REFRESH_INTERVAL_MS);
+        if (!document.hidden) refreshEmergencySummary();
     }
 }
 

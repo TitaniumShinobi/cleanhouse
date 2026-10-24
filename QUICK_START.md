@@ -48,7 +48,10 @@ python3 -m backend.runtime_supervisor start
 
 - **Login Page**: http://localhost:3333/login
 - **Signup Page**: http://localhost:3333/signup
+- **Account Recovery**: http://localhost:3333/account-recovery
 - **API Endpoints**: http://localhost:3333/api/auth/* (only when `CLEANHOUSE_ENABLE_AUTH=1`)
+
+Google sign-in appears only when its client ID, client secret, and registered callback are available. Recovery delivery requires a configured Resend sender or SMTP account. See `docs/auth/AUTHENTICATION_SYSTEM.md`.
 
 ## Troubleshooting
 

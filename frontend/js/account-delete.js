@@ -7,6 +7,7 @@
     const emailReauthButton = document.getElementById('delete-email-reauth');
     const result = document.getElementById('account-delete-result');
     let reauthToken = '';
+    let mfaProof = '';
     const setResult = (message, kind) => { result.textContent = message; result.className = 'account-delete-result ' + (kind || ''); };
 
     if (window.authState) await window.authState.init();
@@ -25,6 +26,32 @@
         const payload = await response.json();
         if (!response.ok || !payload.csrfToken) throw new Error(payload.message || 'Unable to initialize a protected request.');
         return payload.csrfToken;
+    }
+
+    async function verifyMfa(csrfToken) {
+        const factorsResponse = await fetch('/api/auth/mfa/factors', { credentials: 'include', headers: { Accept: 'application/json' } });
+        const factorsPayload = await factorsResponse.json();
+        const factors = factorsPayload.factors || [];
+        if (!factorsResponse.ok || !factors.length) return false;
+        const challengeResponse = await fetch('/api/auth/mfa/challenge', {
+            method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ operation: 'account.delete', target: 'delete' }),
+        });
+        const challenge = await challengeResponse.json();
+        if (!challengeResponse.ok) throw new Error(challenge.message || 'MFA challenge failed.');
+        const entered = window.prompt('Enter your authenticator code, or prefix a recovery code with recovery:');
+        if (!entered) throw new Error('MFA verification was cancelled.');
+        const proof = { challengeId: challenge.challengeId };
+        if (entered.startsWith('recovery:')) proof.recoveryCode = entered.slice(9).trim();
+        else { proof.factorId = factors[0].factor_id; proof.code = entered.trim(); }
+        const verifyResponse = await fetch('/api/auth/mfa/verify', {
+            method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify(proof),
+        });
+        const verified = await verifyResponse.json();
+        if (!verifyResponse.ok || !verified.proof) throw new Error(verified.message || 'MFA verification failed.');
+        mfaProof = verified.proof;
+        return true;
     }
 
     async function verifyEmailFragment() {
@@ -72,7 +99,8 @@
         button.disabled = true; button.textContent = 'Deleting...';
         try {
             const csrfToken = await csrf();
-            if (!reauthToken) {
+            const usedMfa = await verifyMfa(csrfToken);
+            if (!usedMfa && !reauthToken) {
                 if (!passwordInput.value) throw new Error('Enter the current password or confirm by email.');
                 const reauthResponse = await fetch('/api/auth/reauth', {
                     method: 'POST', credentials: 'include',
@@ -84,8 +112,9 @@
                 if (!reauthResponse.ok || !reauth.reauthToken) throw new Error(reauth.message || 'Reauthentication failed');
                 reauthToken = reauth.reauthToken;
             }
-            const response = await fetch('/api/auth/account', { method: 'DELETE', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken, 'X-CleanHouse-Reauth': reauthToken }, body: JSON.stringify({ confirmation }) });
+            const response = await fetch('/api/auth/account', { method: 'DELETE', credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken, 'X-CleanHouse-Reauth': reauthToken, 'X-CleanHouse-MFA': mfaProof, 'X-CleanHouse-MFA-Target': 'delete' }, body: JSON.stringify({ confirmation }) });
             reauthToken = '';
+            mfaProof = '';
             const payload = await response.json();
             if (!response.ok || !payload.success) throw new Error(payload.message || 'Account deletion failed');
             window.authState?.clear(); form.style.display = 'none'; setResult(payload.message || 'Account deleted.', 'success');

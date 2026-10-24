@@ -60,6 +60,45 @@ cannot perform sensitive browser-auth administration. Sensitive changes require
 recent session-bound reauthentication. Other Settings tabs report unavailability
 explicitly. Existing Help and Advanced navigation remain present.
 
+### OAuth profile thumbnail runtime
+
+The sidebar requests `/api/auth/me` and displays the current device session's
+validated Google or GitHub avatar URL, with the existing fallback icon while no
+image is available or the provider image fails to load. A provider photo refresh
+starts with same-origin CSRF-protected `POST /api/auth/oauth/{provider}?intent=photo`
+from Settings → Providers. The authorization request uses state and S256 PKCE;
+the callback consumes that state once and requires the original device session,
+the same owner, and an existing binding to the returned provider subject. Only
+bounded HTTPS image URLs on the expected provider image host are accepted.
+
+A successful callback updates the initiating active device session in place,
+including a password or magic-email session, and active sessions authenticated
+through that provider for the same owner. Other password sessions, other users,
+revoked sessions, and expired sessions are not changed. The callback redirects
+to `/settings?settings=providers&photo_refreshed={provider}` without replacing
+the device cookie; the new `/api/auth/me` response supplies the thumbnail after
+navigation. A missing provider image or mismatched session/subject leaves avatar
+metadata untouched and returns a visible Settings error route.
+Provider cancellation, exchange failure, and unavailable profile data also
+return to Settings → Providers with a bounded result message while preserving
+the existing session. The result query parameters are cleared after display.
+
+Focused product validation uses the OAuth avatar and photo-refresh cases in
+`tests.test_auth_endpoints`, the Settings shell checks in
+`tests.test_auth_settings_ui`, `node --test tests/settings_oauth_photo_node.test.mjs`,
+and the protected-surface verifier. These use mocked provider responses and
+isolated SQLite; live Google/GitHub authorization requires provider registration
+and an actual owner browser session.
+
+The 2026-10-23 source gate passed with the managed Python interpreter and
+`scripts/build-check.py`; the focused OAuth and Settings tests and the product
+surface baseline passed. The canonical launcher staged the Git-indexed source
+and reached `/cleanhouse/status?ready=1` with `ready=true`, a healthy runtime,
+and every operator-readiness check satisfied. The served `settings.js?v=5`
+matched the staged/worktree bytes. Public provider configuration reported Google
+available and GitHub unavailable. No interactive provider login or real image
+fetch was exercised, so live provider acceptance remains unverified.
+
 Normal local/CI command: `python -B scripts/build-check.py`. On this Mac select
 `~/.cleanhouse/runtime/python/bin/python3`; no automatic iCloud interpreter.
 The gate runs isolated auth/logout and store/provider/magic/Settings tests,

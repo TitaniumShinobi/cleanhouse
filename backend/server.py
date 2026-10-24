@@ -5,6 +5,8 @@ Serves static files and provides API endpoints.
 
 from pathlib import Path
 import atexit
+import html
+import re
 import socket
 import time
 from flask import Flask, send_from_directory, jsonify, request, session, redirect
@@ -13,6 +15,8 @@ import sys
 import os
 import secrets
 import logging
+import hashlib
+import types
 import threading
 from urllib.parse import quote
 
@@ -91,7 +95,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
     from dotenv import load_dotenv
     env_path = Path(__file__).parent.parent / '.env'
-    if env_path.exists():
+    if os.getenv("CLEANHOUSE_START_ISOLATED", "").strip().lower() in {"1", "true", "yes", "on"}:
+        logging.info("START isolated runtime: repository dotenv loading disabled")
+    elif env_path.exists():
         env_stat = env_path.stat()
         if getattr(env_stat, "st_blocks", 1) == 0 and env_stat.st_size > 0:
             logging.warning(
@@ -123,10 +129,6 @@ os.environ.setdefault("CLEANHOUSE_ACTIVE_CONTEXT_FOLLOW", "1")
 
 from backend.api.cleanhouse import (
     bp as cleanhouse_bp,
-    start_network_collector_service,
-    start_network_history_service,
-    stop_network_collector_service,
-    stop_network_history_service,
 )
 from backend import events as cleanhouse_events
 from backend import runtime_supervisor
@@ -186,6 +188,24 @@ def _has_cleanhouse_session():
     if not _auth_enabled():
         return True
     try:
+        if runtime_supervisor._start_isolated_runtime():
+            from backend.auth_context import resolve_identity
+
+            expected = "start-acceptance-" + hashlib.sha256(
+                os.environ["START_INVOCATION_NONCE"].encode("utf-8")
+            ).hexdigest()[:16]
+            return resolve_identity(
+                lambda user_id: types.SimpleNamespace(
+                    user_id=expected,
+                    id=expected,
+                    email=f"{expected}@start.invalid",
+                    full_name="START Acceptance",
+                    role="owner",
+                    is_active=True,
+                ) if str(user_id) == expected else None,
+                lambda user_id: str(user_id) == expected,
+                allow_legacy_migration=False,
+            )
         from backend.api import auth as auth_api
         from backend.auth_context import resolve_identity
 
@@ -201,8 +221,11 @@ def _has_cleanhouse_session():
 if _auth_enabled():
     try:
         from backend.api import auth
+        auth.get_mfa().validate_configuration()
         app.register_blueprint(auth.bp, url_prefix='/api')
     except Exception as exc:
+        if getattr(exc, 'code', '') == 'MFA_CONFIGURATION_INVALID':
+            raise
         logging.warning("Auth API disabled; CleanHouse monitoring endpoints remain available: %s", exc)
 else:
     logging.info("Auth API disabled; set CLEANHOUSE_ENABLE_AUTH=1 or unset it to enable auth routes.")
@@ -241,23 +264,104 @@ def account_delete():
     """Serve official account deletion page."""
     return send_from_directory(str(FRONTEND_DIR), 'account-delete.html')
 
+
+def _legal_inline(value: str) -> str:
+    escaped = html.escape(value, quote=False)
+    escaped = re.sub(
+        r"\[([^\]\r\n]+)\]\(mailto:([A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+)\)",
+        lambda match: (
+            f'<a href="mailto:{html.escape(match.group(2), quote=True)}">'
+            f'{match.group(1)}</a>'
+        ),
+        escaped,
+    )
+    return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+
+
+def _render_legal_document(path: Path, document_kind: str):
+    """Render trusted local legal Markdown in an isolated CleanHouse shell."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    title = lines[0].strip() if lines else "CleanHouse Legal"
+    updated = next((line.strip() for line in lines[1:] if line.strip().lower().startswith("last updated:")), "")
+    body_lines = [line for line in lines[1:] if line.strip() != updated]
+    blocks: list[str] = []
+    paragraph: list[str] = []
+    list_items: list[str] = []
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            blocks.append(f"<p>{_legal_inline(' '.join(paragraph))}</p>")
+            paragraph.clear()
+
+    def flush_list() -> None:
+        if list_items:
+            blocks.append("<ul>" + "".join(f"<li>{_legal_inline(item)}</li>" for item in list_items) + "</ul>")
+            list_items.clear()
+
+    for raw in body_lines:
+        line = raw.strip()
+        if not line:
+            flush_paragraph()
+            flush_list()
+        elif line in {"---", "⸻"}:
+            flush_paragraph()
+            flush_list()
+            blocks.append("<hr>")
+        elif line.startswith("### "):
+            flush_paragraph()
+            flush_list()
+            blocks.append(f"<h2>{_legal_inline(line[4:])}</h2>")
+        elif line.startswith(('* ', '- ')):
+            flush_paragraph()
+            list_items.append(line[2:])
+        else:
+            flush_list()
+            paragraph.append(line)
+    flush_paragraph()
+    flush_list()
+
+    page = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)} · CleanHouse</title>
+  <link rel="stylesheet" href="/css/legal.css?v=1">
+</head>
+<body class="legal-page legal-page--{html.escape(document_kind)}">
+  <main class="legal-document">
+    <header class="legal-header">
+      <a class="legal-wordmark" href="/overview" aria-label="Return to CleanHouse">CleanHouse</a>
+      <button class="legal-utility" type="button" onclick="window.print()" aria-label="Print this document">Print</button>
+    </header>
+    <article>
+      <p class="legal-updated">{html.escape(updated)}</p>
+      <h1>{html.escape(title)}</h1>
+      <div class="legal-copy">{''.join(blocks)}</div>
+    </article>
+  </main>
+</body>
+</html>"""
+    return page, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
 @app.route('/legal/terms')
 def legal_terms():
     """Serve CleanHouse Terms of Service."""
     path = BASE_DIR / "docs" / "legal" / "CLEANHOUSE_TERMS_OF_SERVICE.md"
-    return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+    return _render_legal_document(path, "terms")
 
 @app.route('/legal/privacy')
 def legal_privacy():
     """Serve CleanHouse Privacy Notice."""
     path = BASE_DIR / "docs" / "legal" / "CLEANHOUSE_PRIVACY_NOTICE.md"
-    return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+    return _render_legal_document(path, "privacy")
 
 @app.route('/legal/eeccd')
 def legal_eeccd():
     """Serve CleanHouse European Electronic Communications Code Disclosure."""
     path = BASE_DIR / "docs" / "legal" / "CLEANHOUSE_EUROPEAN_ELECTRONIC_COMMUNICATIONS_CODE_DISCLOSURE.md"
-    return path.read_text(encoding="utf-8"), 200, {"Content-Type": "text/markdown; charset=utf-8"}
+    return _render_legal_document(path, "eeccd")
 
 @app.route('/dashboard')
 def dashboard_redirect():
@@ -370,13 +474,43 @@ def _require_auth_for_app_pages():
     }
     if request.path == '/cleanhouse/status' and request.args.get('ready') == '1':
         return None
+    if (
+        runtime_supervisor._start_isolated_runtime()
+        and request.path == '/cleanhouse/start/acceptance/session'
+        and _start_acceptance_challenge()
+    ):
+        return None
     if request.path in public_paths or any(request.path.startswith(prefix) for prefix in public_prefixes):
         return None
     identity = _has_cleanhouse_session()
     if identity:
         if request.path == '/settings':
             return None
+        if identity.kind == 'session':
+            try:
+                from backend.api import auth as auth_api
+                mfa_authorized = auth_api.get_mfa().admitted(identity.user_id, identity.credential_id)
+            except Exception:
+                logging.exception("MFA admission unavailable while protecting CleanHouse")
+                return jsonify({'success': False, 'code': 'mfa_unavailable', 'message': 'MFA admission is temporarily unavailable.'}), 503
+            if not mfa_authorized:
+                if request.path.startswith('/cleanhouse/') or request.path.startswith('/api/') or request.path.startswith('/events'):
+                    return jsonify({'success': False, 'code': 'mfa_required', 'message': 'MFA verification is required before protected access.'}), 403
+                requested_path = request.full_path[:-1] if request.full_path.endswith('?') else request.full_path
+                bounded_return = auth_api.validate_local_return(requested_path)
+                if bounded_return:
+                    session['pending_mfa_return'] = bounded_return
+                return redirect('/settings?settings=security&mfa=required&return_to=' + quote(bounded_return or '/overview', safe=''), code=302)
         if not identity.consent_current:
+            try:
+                from backend.api import auth as auth_api
+            except Exception:
+                logging.exception("Auth API unavailable while enforcing current consent")
+                return jsonify({
+                    'success': False,
+                    'code': 'authentication_unavailable',
+                    'message': 'Authentication is temporarily unavailable.',
+                }), 503
             if request.path.startswith('/cleanhouse/') or request.path.startswith('/api/') or request.path.startswith('/events'):
                 return jsonify({
                     'success': False,
@@ -384,8 +518,14 @@ def _require_auth_for_app_pages():
                     'message': 'Current legal consent is required before antivirus access.',
                 }), 428
             requested_path = request.full_path[:-1] if request.full_path.endswith('?') else request.full_path
+            bounded_return = auth_api.validate_local_return(requested_path)
+            if bounded_return:
+                session['pending_consent_return'] = bounded_return
+            if request.method == 'GET' and request.args.get('consent') == 'required':
+                return None
+            separator = '&' if '?' in requested_path else '?'
             return redirect(
-                '/settings?tab=account&consent=required&return_to=' + quote(requested_path, safe=''),
+                requested_path + separator + 'consent=required&return_to=' + quote(requested_path, safe=''),
                 code=302,
             )
         if request.method in {'POST', 'PUT', 'PATCH', 'DELETE'} and identity.kind == 'session':
@@ -404,7 +544,76 @@ def _require_auth_for_app_pages():
             'code': 'authentication_required',
             'message': 'Authentication is required.',
         }), 401
+    raw_pending_return = session.get('pending_consent_return')
+    pending_return = ''
+    if raw_pending_return:
+        try:
+            from backend.api import auth as auth_api
+            pending_return = auth_api.validate_local_return(raw_pending_return)
+        except Exception:
+            logging.exception("Auth API unavailable while validating pending consent return")
+    if pending_return:
+        session['pending_consent_return'] = pending_return
+        return redirect('/login?consent=required', code=302)
+    session.pop('pending_consent_return', None)
     return redirect('/login', code=302)
+
+
+def _start_acceptance_challenge():
+    if not runtime_supervisor._start_isolated_runtime():
+        return False
+    payload = request.get_json(silent=True) if request.method == 'POST' else None
+    supplied = (payload or {}).get('challenge', '') if isinstance(payload, dict) else request.args.get('challenge', '')
+    expected = os.getenv('START_INVOCATION_NONCE', '')
+    return bool(runtime_supervisor.START_CHALLENGE_RE.fullmatch(str(supplied)) and supplied == expected)
+
+
+@app.post('/cleanhouse/start/acceptance/session')
+def _start_acceptance_session():
+    if not _start_acceptance_challenge():
+        return jsonify({'status': 'not_found'}), 404
+    from backend.auth_context import apply_session_cookie, csrf_token, get_store
+
+    user_id = "start-acceptance-" + hashlib.sha256(
+        os.environ['START_INVOCATION_NONCE'].encode('utf-8')
+    ).hexdigest()[:16]
+    issued = get_store().issue_session(
+        user_id,
+        auth_method='start_isolated_acceptance',
+        metadata={'role': 'owner'},
+    )
+    response = jsonify({
+        'status': 'issued',
+        'auth_kind': 'session',
+        'csrf_token': csrf_token(),
+    })
+    apply_session_cookie(response, issued.secret)
+    return response
+
+
+@app.get('/cleanhouse/start/acceptance/me')
+def _start_acceptance_me():
+    if not _start_acceptance_challenge():
+        return jsonify({'status': 'not_found'}), 404
+    identity = _has_cleanhouse_session()
+    if not identity:
+        return jsonify({'status': 'unauthenticated'}), 401
+    return jsonify({'status': 'ok', 'auth_kind': identity.kind, 'user_id': identity.user_id})
+
+
+@app.post('/cleanhouse/start/acceptance/logout')
+def _start_acceptance_logout():
+    if not _start_acceptance_challenge():
+        return jsonify({'status': 'not_found'}), 404
+    from backend.auth_context import clear_session_cookie, get_store
+
+    identity = _has_cleanhouse_session()
+    if not identity or identity.kind != 'session':
+        return jsonify({'status': 'unauthenticated'}), 401
+    revoked = get_store().revoke_session(identity.credential_id, identity.user_id)
+    response = jsonify({'status': 'revoked' if revoked else 'failed'})
+    clear_session_cookie(response)
+    return (response, 200) if revoked else (response, 409)
 
 
 @app.after_request
@@ -537,6 +746,42 @@ def _start_events_services():
     except Exception as exc:
         logging.warning("cleanhouse warmup start state could not be recorded: %s", exc)
 
+    if runtime_supervisor._start_isolated_runtime():
+        for name in (
+            "events_db",
+            "event_writer",
+            "filesystem_watcher",
+            "wazuh_files",
+            "files_preservation",
+            "network_collector",
+            "network_history",
+        ):
+            warmup_details[name] = {
+                "status": "isolated",
+                "reason_code": "start_disposable_runtime",
+                "runtime_impact": "none",
+            }
+        try:
+            _start_runtime_heartbeat()
+            warmup_details["heartbeat"] = {"status": "ok"}
+        except Exception as exc:
+            failure_reasons.append("heartbeat_start_failed")
+            warmup_details["heartbeat"] = {
+                "status": "failed",
+                "error": str(exc) or exc.__class__.__name__,
+            }
+        try:
+            runtime_supervisor.mark_backend_warmup_complete(
+                host,
+                port,
+                runtime_state="degraded" if failure_reasons else "healthy",
+                reason_codes=failure_reasons,
+                details=warmup_details,
+            )
+        except Exception as exc:
+            logging.warning("cleanhouse isolated warmup completion could not be recorded: %s", exc)
+        return
+
     try:
         cleanhouse_events.init_db()
         warmup_details["events_db"] = {"status": "ok"}
@@ -582,41 +827,16 @@ def _start_events_services():
             "error": exc.__class__.__name__,
         }
         logging.warning("cleanhouse Files OVVAULTS sync not started: %s", exc.__class__.__name__)
-    if not _network_collector_autostart_enabled():
-        warmup_details["network_collector"] = {
-            "status": "deferred",
-            "reason_code": "startup_capture_deferred",
-            "runtime_impact": "none",
-        }
-    else:
-        try:
-            collector_status = _bounded_warmup_step("network-collector", start_network_collector_service)
-            if collector_status.get("status") != "running":
-                collector_status = {
-                    **collector_status,
-                    "runtime_impact": "subsystem_degraded",
-                }
-            warmup_details["network_collector"] = collector_status
-        except Exception as exc:
-            failure_reasons.append("network_collector_start_failed")
-            warmup_details["network_collector"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
-            logging.warning("cleanhouse network collector not started: %s", exc)
-    if not _network_history_autostart_enabled():
-        warmup_details["network_history"] = {
-            "status": "deferred",
-            "reason_code": "startup_history_deferred",
-            "runtime_impact": "none",
-        }
-    else:
-        try:
-            warmup_details["network_history"] = _bounded_warmup_step(
-                "network-history",
-                start_network_history_service,
-            ) or {"status": "ok"}
-        except Exception as exc:
-            failure_reasons.append("network_history_start_failed")
-            warmup_details["network_history"] = {"status": "failed", "error": str(exc) or exc.__class__.__name__}
-            logging.warning("cleanhouse network history not started: %s", exc)
+    warmup_details["network_collector"] = {
+        "status": "deferred",
+        "reason_code": "startup_capture_deferred",
+        "runtime_impact": "none",
+    }
+    warmup_details["network_history"] = {
+        "status": "deferred",
+        "reason_code": "startup_history_deferred",
+        "runtime_impact": "none",
+    }
     try:
         _start_runtime_heartbeat()
         warmup_details["heartbeat"] = {"status": "ok"}
@@ -660,14 +880,6 @@ def _stop_events_services() -> None:
         vvault_sync.stop_service(timeout=5.0)
     except Exception as exc:  # pragma: no cover
         logging.warning("cleanhouse Files preservation not stopped cleanly: %s", exc.__class__.__name__)
-    try:
-        stop_network_collector_service(timeout=5.0)
-    except Exception as exc:  # pragma: no cover
-        logging.warning("cleanhouse network collector not stopped cleanly: %s", exc)
-    try:
-        stop_network_history_service()
-    except Exception as exc:  # pragma: no cover
-        logging.warning("cleanhouse network history service not stopped cleanly: %s", exc)
     try:
         cleanhouse_events.stop_events_services()
     except Exception as exc:  # pragma: no cover

@@ -242,9 +242,11 @@ class AuthStore:
                 BEFORE UPDATE ON consent_receipts BEGIN SELECT RAISE(ABORT, 'consent receipts are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS consent_receipts_no_delete
                 BEFORE DELETE ON consent_receipts BEGIN SELECT RAISE(ABORT, 'consent receipts are append-only'); END;
-                PRAGMA user_version = 1;
                 """
             )
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version < 1:
+                connection.execute("PRAGMA user_version = 1")
         if self.path.exists():
             try:
                 self.path.chmod(0o600)
@@ -305,6 +307,33 @@ class AuthStore:
             "replaced_by_session_id": row["replaced_by_session_id"],
             "legacy_migrated": bool(row["legacy_migrated"]), "metadata": json.loads(row["metadata_json"]),
         }
+
+    def refresh_provider_session_avatar(
+        self, user_id: str, provider: str, avatar_url: str, *, current_session_id: str = ""
+    ) -> int:
+        """Update the current device and this provider's active sessions in place."""
+        if not user_id or provider not in {"google", "github"} or not avatar_url or len(avatar_url) > 2048:
+            raise ValueError("provider avatar update is invalid")
+        updated = 0
+        now = _iso(_utcnow())
+        with self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT id,metadata_json FROM device_sessions WHERE user_id = ? "
+                "AND (auth_method = ? OR id = ?) "
+                "AND revoked_at IS NULL AND absolute_expires_at > ? AND idle_expires_at > ?",
+                (user_id, f"oauth:{provider}", current_session_id, now, now),
+            ).fetchall()
+            for row in rows:
+                metadata = json.loads(row["metadata_json"])
+                if metadata.get("avatar_url") == avatar_url:
+                    continue
+                metadata["avatar_url"] = avatar_url
+                connection.execute(
+                    "UPDATE device_sessions SET metadata_json = ? WHERE id = ? AND revoked_at IS NULL",
+                    (_json(metadata), row["id"]),
+                )
+                updated += 1
+        return updated
 
     def validate_session(
         self, raw: str, *, now: datetime | None = None, rotate_if_due: bool = True
@@ -380,7 +409,9 @@ class AuthStore:
         self._event(connection, user_id=old["user_id"], event_type="session_rotated", occurred_at=now,
                     session_id=old["id"], data={"replacement_session_id": new_id})
         new_row = connection.execute("SELECT * FROM device_sessions WHERE id = ?", (new_id,)).fetchone()
-        return CredentialResult("rotated", self._session_record(new_row), IssuedCredential(new_id, raw, _iso(absolute)))
+        record = self._session_record(new_row)
+        record["previous_session_id"] = old["id"]
+        return CredentialResult("rotated", record, IssuedCredential(new_id, raw, _iso(absolute)))
 
     def revoke_session(self, session_id: str, user_id: str, *, now: datetime | None = None) -> bool:
         now = _as_utc(now)

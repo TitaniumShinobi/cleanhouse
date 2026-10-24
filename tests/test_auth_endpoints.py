@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import importlib
 import tempfile
 import unittest
 import urllib.parse
@@ -63,6 +64,18 @@ class AuthEndpointTests(unittest.TestCase):
         self.app = Flask(__name__)
         self.app.secret_key = "focused-auth-endpoints"
         self.app.register_blueprint(auth_api.bp, url_prefix="/api")
+
+        with patch("atexit.register"):
+            self.server = importlib.import_module("backend.server")
+
+        @self.app.before_request
+        def protect_product_page():
+            if auth_api.request.path == "/network":
+                return self.server._require_auth_for_app_pages()
+
+        @self.app.get("/network")
+        def network_page():
+            return "network"
 
         @self.app.get("/product")
         def product():
@@ -135,6 +148,26 @@ class AuthEndpointTests(unittest.TestCase):
         response = self._post("/api/auth/consent", {"accept_current": True})
         self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
 
+    def _use_session(self, auth_method: str):
+        issued = auth_api.get_store().issue_session(self.service.user.user_id, auth_method=auth_method)
+        self.client.set_cookie(auth_context.DEVICE_COOKIE, issued.secret, domain="localhost")
+        return issued
+
+    def _prime_stale_consent_return(self, path: str = "/network?range=30m"):
+        issued = self._use_session("oauth:google")
+        gated = self.client.get(path, base_url="http://localhost:3333")
+        self.assertEqual(gated.status_code, 302)
+        self.assertIn("consent=required", gated.location)
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            self.assertEqual(state["pending_consent_return"], path)
+        self.assertTrue(auth_api.get_store().revoke_session(issued.id, self.service.user.user_id))
+        return issued
+
+    def _reauth_capabilities(self):
+        response = self.client.get("/api/auth/reauth", base_url="http://localhost:3333")
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        return response.get_json()["reauthentication"]
+
     def test_password_login_issues_opaque_cookie_without_browser_token(self):
         response = self._login()
         payload = response.get_json()
@@ -145,6 +178,53 @@ class AuthEndpointTests(unittest.TestCase):
         self.assertIn("cleanhouse_device_session=chs_", cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
+
+    def test_reauthentication_capabilities_are_provider_aware(self):
+        with patch.dict(os.environ, {"EMAIL_SERVICE": "resend", "FROM_EMAIL": "auth@example.test", "RESEND_API_KEY": "configured"}):
+            self._login()
+            password_only = self._reauth_capabilities()
+            self.assertTrue(password_only["password"]["available"])
+            self.assertEqual(password_only["providers"], [])
+
+            auth_api.get_store().bind_external_identity(
+                self.service.user.user_id, "google", "google-subject", verified_email=self.service.user.email,
+            )
+            self._use_session("oauth:google")
+            mixed = self._reauth_capabilities()
+            self.assertTrue(mixed["password"]["available"])
+            self.assertTrue(mixed["verified_email"]["available"])
+            self.assertEqual(mixed["providers"][0]["id"], "google")
+            self.assertFalse(mixed["providers"][0]["available"])
+
+    def test_google_only_identity_never_offers_or_accepts_password_reauthentication(self):
+        with patch.dict(os.environ, {"EMAIL_SERVICE": "resend", "FROM_EMAIL": "auth@example.test", "RESEND_API_KEY": "configured"}):
+            auth_api.get_store().bind_external_identity(
+                self.service.user.user_id, "google", "google-only-subject", verified_email=self.service.user.email,
+            )
+            self._use_session("oauth:google")
+            capabilities = self._reauth_capabilities()
+            self.assertFalse(capabilities["password"]["available"])
+            self.assertTrue(capabilities["verified_email"]["available"])
+            rejected = self._post(
+                "/api/auth/reauth",
+                {"method": "password", "password": "correct-password", "scope": "account"},
+            )
+            self.assertEqual(rejected.status_code, 409)
+            self.assertEqual(rejected.get_json()["code"], "REAUTHENTICATION_METHOD_UNAVAILABLE")
+
+    def test_unavailable_provider_and_email_delivery_are_reported_without_fake_method(self):
+        auth_api.get_store().bind_external_identity(
+            self.service.user.user_id, "google", "unavailable-subject", verified_email=self.service.user.email,
+        )
+        self._use_session("oauth:google")
+        with patch.dict(os.environ, {"FROM_EMAIL": "", "RESEND_API_KEY": "", "EMAIL_HOST": ""}), patch.object(
+            auth_api.auth_runtime_config, "provider_config", return_value={"available": False}
+        ):
+            capabilities = self._reauth_capabilities()
+        self.assertFalse(capabilities["password"]["available"])
+        self.assertFalse(capabilities["verified_email"]["available"])
+        self.assertFalse(capabilities["providers"][0]["configured"])
+        self.assertFalse(capabilities["providers"][0]["available"])
 
     def test_password_login_rejects_missing_and_forged_csrf(self):
         payload = {"email": self.service.user.email, "password": "correct-password"}
@@ -203,6 +283,359 @@ class AuthEndpointTests(unittest.TestCase):
             ).status_code,
             401,
         )
+
+    def test_stale_consent_uses_valid_session_without_step_up_and_is_idempotent(self):
+        self._use_session("oauth:google")
+        before = self.client.get("/api/auth/consent", base_url="http://localhost:3333")
+        self.assertEqual(before.status_code, 200)
+        self.assertFalse(before.get_json()["current"])
+        first = self._post("/api/auth/consent", {"accept_current": True})
+        self.assertEqual(first.status_code, 200)
+        with auth_api.get_store()._connection() as connection:
+            first_count = connection.execute("SELECT COUNT(*) FROM consent_receipts").fetchone()[0]
+        self.assertEqual(first_count, len(auth_api._required_consent_digests()))
+        duplicate = self._post("/api/auth/consent", {"accept_current": True})
+        self.assertEqual(duplicate.status_code, 200)
+        with auth_api.get_store()._connection() as connection:
+            duplicate_count = connection.execute("SELECT COUNT(*) FROM consent_receipts").fetchone()[0]
+        self.assertEqual(duplicate_count, first_count)
+
+    def test_expired_session_and_signed_pending_return_are_bounded(self):
+        expired = self._post("/api/auth/consent", {"accept_current": True})
+        self.assertEqual(expired.status_code, 401)
+        with auth_api.get_store()._connection() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM consent_receipts").fetchone()[0], 0)
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            state["pending_consent_return"] = "/network?range=30m"
+        resumed = self._login().get_json()
+        self.assertEqual(resumed["return_to"], "/network?range=30m")
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            self.assertNotIn("pending_consent_return", state)
+        clean_client = self.app.test_client()
+        with clean_client.session_transaction(base_url="http://localhost:3333") as state:
+            state["pending_consent_return"] = "//attacker.example/consent"
+        rejected = self._post(
+            "/api/auth/login",
+            {"email": self.service.user.email, "password": "correct-password"},
+            client=clean_client,
+        ).get_json()
+        self.assertNotIn("return_to", rejected)
+
+    def test_protected_stale_consent_return_resumes_once_after_password_login(self):
+        self._prime_stale_consent_return()
+        expired = self.client.get("/network?range=30m", base_url="http://localhost:3333")
+        self.assertEqual(expired.location, "/login?consent=required")
+        resumed = self._login().get_json()
+        self.assertEqual(resumed["return_to"], "/network?range=30m")
+        again = self._login().get_json()
+        self.assertNotIn("return_to", again)
+
+    def test_protected_stale_consent_return_resumes_once_after_magic_login(self):
+        self._prime_stale_consent_return()
+        challenge = auth_api.get_store().issue_magic_challenge(
+            self.service.user.email,
+            intent="signin",
+            purpose="auth_magic:signin",
+            origin="http://localhost:3333",
+            user_id=self.service.user.user_id,
+        )
+        resumed = self._post(
+            "/api/auth/magic/verify",
+            {"token": challenge.secret, "intent": "signin"},
+        ).get_json()
+        self.assertEqual(resumed["return_to"], "/network?range=30m")
+        self.assertEqual(
+            auth_api.get_store().consume_magic_challenge(
+                challenge.secret,
+                purpose="auth_magic:signin",
+                origin="http://localhost:3333",
+            ).status,
+            "replayed",
+        )
+
+    def test_protected_stale_consent_return_resumes_once_after_oauth_callback(self):
+        self._prime_stale_consent_return()
+        now = int(auth_api.datetime.now(auth_api.timezone.utc).timestamp())
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            state["oauth_states"] = {"state-once": {
+                "provider": "google",
+                "intent": "login",
+                "code_verifier": "verified-pkce",
+                "created_at": now,
+            }}
+        with (
+            patch.object(auth_api, "exchange_oauth_token", return_value={"access_token": "bounded"}),
+            patch.object(auth_api, "get_oauth_user_info", return_value={
+                "id": "google-subject", "email": self.service.user.email, "name": self.service.user.full_name,
+            }),
+        ):
+            resumed = self.client.get(
+                "/api/auth/google/callback?code=once&state=state-once",
+                base_url="http://localhost:3333",
+            )
+        self.assertEqual(resumed.location, "/network?range=30m")
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            self.assertNotIn("pending_consent_return", state)
+
+    def test_oauth_avatar_reaches_authenticated_profile_response(self):
+        for provider in ("google", "github"):
+            with self.subTest(provider=provider):
+                subject = f"{provider}-avatar-subject"
+                avatar = (f"https://lh3.googleusercontent.com/a/{subject}" if provider == "google"
+                          else f"https://avatars.githubusercontent.com/u/{subject}")
+                auth_api.get_store().bind_external_identity(
+                    self.service.user.user_id, provider, subject,
+                    verified_email=self.service.user.email,
+                )
+                with self.client.session_transaction(base_url="http://localhost:3333") as state:
+                    state["oauth_states"] = {f"{provider}-avatar-state": {
+                        "provider": provider,
+                        "intent": "login",
+                        "code_verifier": "verified-pkce",
+                        "created_at": int(auth_api.datetime.now(auth_api.timezone.utc).timestamp()),
+                    }}
+                with (
+                    patch.object(auth_api, "exchange_oauth_token", return_value={"access_token": "fixture-token"}),
+                    patch.object(auth_api, "get_oauth_user_info", return_value={
+                        "id": subject, "email": self.service.user.email,
+                        "name": self.service.user.full_name, "avatar_url": avatar,
+                    }),
+                ):
+                    callback = self.client.get(
+                        f"/api/auth/{provider}/callback?code=once&state={provider}-avatar-state",
+                        base_url="http://localhost:3333",
+                    )
+                self.assertEqual(callback.status_code, 302)
+                self.assertIn("cleanhouse_device_session=chs_", callback.headers.get("Set-Cookie", ""))
+                profile = self.client.get("/api/auth/me", base_url="http://localhost:3333")
+                self.assertEqual(profile.status_code, 200)
+                self.assertEqual(profile.get_json()["user"]["avatar_url"], avatar)
+                self.assertEqual(profile.headers["Cache-Control"], "no-store")
+                refreshed = self._post("/api/auth/session/refresh", {})
+                self.assertEqual(refreshed.status_code, 200)
+                after_refresh = self.client.get("/api/auth/me", base_url="http://localhost:3333")
+                self.assertEqual(after_refresh.get_json()["user"]["avatar_url"], avatar)
+
+    def test_provider_photo_refresh_updates_existing_session_without_relogin(self):
+        issued = self._use_session("oauth:google")
+        auth_api.get_store().bind_external_identity(
+            self.service.user.user_id, "google", "existing-google-subject",
+            verified_email=self.service.user.email,
+        )
+        before = self.client.get("/api/auth/me", base_url="http://localhost:3333")
+        self.assertEqual(before.get_json()["user"]["avatar_url"], "")
+        with patch.object(auth_api.auth_runtime_config, "provider_config", return_value={
+            "enabled": True, "available": True, "client_id": "fixture-client",
+        }):
+            started = self._post("/api/auth/oauth/google?intent=photo", {})
+        self.assertEqual(started.status_code, 200)
+        self.assertTrue(started.get_json()["authorization_url"].startswith("https://accounts.google.com/"))
+        self.assertNotIn("access_type=offline", started.get_json()["authorization_url"])
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            [(oauth_state, pending)] = state["oauth_states"].items()
+            self.assertEqual(pending["intent"], "photo")
+            self.assertEqual(pending["user_id"], self.service.user.user_id)
+            self.assertEqual(pending["session_id"], issued.id)
+        avatar = "https://lh3.googleusercontent.com/a/existing-google-subject"
+        with (
+            patch.object(auth_api, "exchange_oauth_token", return_value={"access_token": "fixture-token"}),
+            patch.object(auth_api, "get_oauth_user_info", return_value={
+                "id": "existing-google-subject", "email": self.service.user.email,
+                "name": self.service.user.full_name, "avatar_url": avatar,
+            }),
+        ):
+            callback = self.client.get(
+                f"/api/auth/google/callback?code=once&state={oauth_state}",
+                base_url="http://localhost:3333",
+            )
+        self.assertEqual(callback.status_code, 302)
+        self.assertIn("/settings?settings=providers&photo_refreshed=google", callback.location)
+        self.assertNotIn("cleanhouse_device_session", callback.headers.get("Set-Cookie", ""))
+        original = auth_api.get_store().validate_session(issued.secret, rotate_if_due=False)
+        self.assertEqual(original.status, "valid")
+        self.assertEqual(original.record["metadata"]["avatar_url"], avatar)
+        profile = self.client.get("/api/auth/me", base_url="http://localhost:3333")
+        self.assertEqual(profile.get_json()["user"]["avatar_url"], avatar)
+
+        refreshed = self._post("/api/auth/session/refresh", {})
+        self.assertEqual(refreshed.status_code, 200)
+        after_refresh = self.client.get("/api/auth/me", base_url="http://localhost:3333")
+        self.assertEqual(after_refresh.get_json()["user"]["avatar_url"], avatar)
+
+    def test_provider_photo_refresh_updates_only_the_current_password_session(self):
+        current = self._use_session("password")
+        other_device = auth_api.get_store().issue_session(self.service.user.user_id, auth_method="password")
+        other_user = auth_api.get_store().issue_session("another-user", auth_method="oauth:google")
+        auth_api.get_store().bind_external_identity(
+            self.service.user.user_id, "google", "existing-google-subject",
+            verified_email=self.service.user.email,
+        )
+        with patch.object(auth_api.auth_runtime_config, "provider_config", return_value={
+            "enabled": True, "available": True, "client_id": "fixture-client",
+        }):
+            started = self._post("/api/auth/oauth/google?intent=photo", {})
+        self.assertEqual(started.status_code, 200)
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            [(oauth_state, pending)] = state["oauth_states"].items()
+            self.assertEqual(pending["session_id"], current.id)
+        avatar = "https://lh3.googleusercontent.com/a/existing-google-subject"
+        with (
+            patch.object(auth_api, "exchange_oauth_token", return_value={"access_token": "fixture-token"}),
+            patch.object(auth_api, "get_oauth_user_info", return_value={
+                "id": "existing-google-subject", "email": self.service.user.email,
+                "avatar_url": avatar,
+            }),
+        ):
+            callback = self.client.get(
+                f"/api/auth/google/callback?code=once&state={oauth_state}",
+                base_url="http://localhost:3333",
+            )
+        self.assertIn("photo_refreshed=google", callback.location)
+        self.assertNotIn("cleanhouse_device_session", callback.headers.get("Set-Cookie", ""))
+        store = auth_api.get_store()
+        self.assertEqual(store.validate_session(current.secret, rotate_if_due=False).record["metadata"]["avatar_url"], avatar)
+        self.assertNotIn("avatar_url", store.validate_session(other_device.secret, rotate_if_due=False).record["metadata"])
+        self.assertNotIn("avatar_url", store.validate_session(other_user.secret, rotate_if_due=False).record["metadata"])
+        profile = self.client.get("/api/auth/me", base_url="http://localhost:3333")
+        self.assertEqual(profile.get_json()["user"]["avatar_url"], avatar)
+        refreshed = self._post("/api/auth/session/refresh", {})
+        self.assertEqual(refreshed.status_code, 200)
+        after_refresh = self.client.get("/api/auth/me", base_url="http://localhost:3333")
+        self.assertEqual(after_refresh.get_json()["user"]["avatar_url"], avatar)
+
+    def test_cancelled_photo_refresh_keeps_session_and_returns_to_settings(self):
+        current = self._use_session("password")
+        auth_api.get_store().bind_external_identity(
+            self.service.user.user_id, "google", "existing-google-subject",
+            verified_email=self.service.user.email,
+        )
+        with patch.object(auth_api.auth_runtime_config, "provider_config", return_value={
+            "enabled": True, "available": True, "client_id": "fixture-client",
+        }):
+            self.assertEqual(self._post("/api/auth/oauth/google?intent=photo", {}).status_code, 200)
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            [(oauth_state, _)] = state["oauth_states"].items()
+        with patch.object(auth_api, "exchange_oauth_token") as exchange:
+            cancelled = self.client.get(
+                f"/api/auth/google/callback?error=access_denied&state={oauth_state}",
+                base_url="http://localhost:3333",
+            )
+            replay = self.client.get(
+                f"/api/auth/google/callback?code=once&state={oauth_state}",
+                base_url="http://localhost:3333",
+            )
+            exchange.assert_not_called()
+        self.assertEqual(cancelled.location, "/settings?settings=providers&error=photo_denied")
+        self.assertEqual(replay.location, "/login?error=invalid_state")
+        self.assertEqual(auth_api.get_store().validate_session(current.secret, rotate_if_due=False).status, "valid")
+
+    def test_photo_refresh_cannot_connect_or_use_a_different_provider_identity(self):
+        issued = self._use_session("oauth:google")
+        missing = self._post("/api/auth/oauth/google?intent=photo", {})
+        self.assertEqual(missing.status_code, 409)
+        self.assertEqual(missing.get_json()["code"], "PROVIDER_NOT_CONNECTED")
+        auth_api.get_store().bind_external_identity(
+            self.service.user.user_id, "google", "original-subject",
+            verified_email=self.service.user.email,
+        )
+        with patch.object(auth_api.auth_runtime_config, "provider_config", return_value={
+            "enabled": True, "available": True, "client_id": "fixture-client",
+        }):
+            started = self._post("/api/auth/oauth/google?intent=photo", {})
+        self.assertEqual(started.status_code, 200)
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            [(oauth_state, _)] = state["oauth_states"].items()
+        with (
+            patch.object(auth_api, "exchange_oauth_token", return_value={"access_token": "fixture-token"}),
+            patch.object(auth_api, "get_oauth_user_info", return_value={
+                "id": "different-subject", "email": self.service.user.email,
+                "avatar_url": "https://lh3.googleusercontent.com/a/different-subject",
+            }),
+        ):
+            callback = self.client.get(
+                f"/api/auth/google/callback?code=once&state={oauth_state}",
+                base_url="http://localhost:3333",
+            )
+        self.assertIn("error=photo_identity_mismatch", callback.location)
+        self.assertIsNone(auth_api.get_store().external_identity("google", "different-subject"))
+        self.assertEqual(auth_api.get_store().validate_session(issued.secret, rotate_if_due=False).status, "valid")
+        self.assertEqual(self.client.get("/api/auth/me", base_url="http://localhost:3333").get_json()["user"]["avatar_url"], "")
+
+    def test_photo_refresh_callback_requires_the_original_device_session(self):
+        original = self._use_session("oauth:google")
+        auth_api.get_store().bind_external_identity(
+            self.service.user.user_id, "google", "same-subject",
+            verified_email=self.service.user.email,
+        )
+        with patch.object(auth_api.auth_runtime_config, "provider_config", return_value={
+            "enabled": True, "available": True, "client_id": "fixture-client",
+        }):
+            started = self._post("/api/auth/oauth/google?intent=photo", {})
+        self.assertEqual(started.status_code, 200)
+        with self.client.session_transaction(base_url="http://localhost:3333") as state:
+            [(oauth_state, _)] = state["oauth_states"].items()
+        replacement = auth_api.get_store().issue_session(self.service.user.user_id, auth_method="oauth:google")
+        self.client.set_cookie(auth_context.DEVICE_COOKIE, replacement.secret, domain="localhost")
+        with (
+            patch.object(auth_api, "exchange_oauth_token", return_value={"access_token": "fixture-token"}),
+            patch.object(auth_api, "get_oauth_user_info", return_value={
+                "id": "same-subject", "email": self.service.user.email,
+                "avatar_url": "https://lh3.googleusercontent.com/a/same-subject",
+            }),
+        ):
+            callback = self.client.get(
+                f"/api/auth/google/callback?code=once&state={oauth_state}",
+                base_url="http://localhost:3333",
+            )
+        self.assertIn("error=photo_identity_mismatch", callback.location)
+        self.assertEqual(auth_api.get_store().validate_session(original.secret, rotate_if_due=False).record["metadata"].get("avatar_url"), None)
+        self.assertEqual(auth_api.get_store().validate_session(replacement.secret, rotate_if_due=False).record["metadata"].get("avatar_url"), None)
+
+    def test_untrusted_avatar_url_is_not_added_to_sessions(self):
+        self.assertEqual(auth_api._oauth_avatar_url("google", "http://lh3.googleusercontent.com/a/a"), "")
+        self.assertEqual(auth_api._oauth_avatar_url("google", "https://localhost/private"), "")
+        self.assertEqual(auth_api._oauth_avatar_url("github", "https://lh3.googleusercontent.com/a/a"), "")
+
+    def test_local_return_validator_rejects_unsafe_and_loop_targets(self):
+        unsafe = [
+            "//attacker.example/path",
+            "/\\attacker.example/path",
+            "/%2fattacker.example/path",
+            "/%5cattacker.example/path",
+            "/safe%0apath",
+            "/login",
+            "/login/",
+            "/login/?next=/network",
+            "/login%2f?next=/network",
+            "/signup?next=/network",
+            "/signup/",
+            "/signup%2f",
+            "/safe/../login",
+            "/" + ("a" * 2048),
+        ]
+        for candidate in unsafe:
+            with self.subTest(candidate=candidate[:80]):
+                self.assertEqual(auth_api.validate_local_return(candidate), "")
+        self.assertEqual(
+            auth_api.validate_local_return("/network?range=30m#active"),
+            "/network?range=30m#active",
+        )
+
+    def test_consent_never_invokes_reauth_for_magic_or_mfa_sessions(self):
+        for method in ("magic_email", "mfa"):
+            client = self.app.test_client()
+            issued = auth_api.get_store().issue_session(self.service.user.user_id, auth_method=method)
+            client.set_cookie(auth_context.DEVICE_COOKIE, issued.secret, domain="localhost")
+            with patch.object(auth_api, "_require_sensitive") as sensitive:
+                accepted = self._post("/api/auth/consent", {"accept_current": True}, client=client)
+                self.assertEqual(accepted.status_code, 200)
+                sensitive.assert_not_called()
+
+    def test_mfa_auth_method_does_not_override_independent_password_capability(self):
+        auth_api.get_store().issue_session(self.service.user.user_id, auth_method="password")
+        self._use_session("mfa")
+        capabilities = self._reauth_capabilities()
+        self.assertTrue(capabilities["password"]["available"])
 
     def test_refresh_is_atomic_and_replayed_old_cookie_fails(self):
         self._login()
@@ -424,13 +857,27 @@ class AuthEndpointTests(unittest.TestCase):
             self.assertIsNone(auth_api.get_oauth_user_info("github", "provider-token"))
 
         verified = [
-            _Response({"id": 7, "login": "owner"}),
+            _Response({"id": 7, "login": "owner", "avatar_url": "https://images.example.test/github.png"}),
             _Response([{"email": "owner@example.test", "primary": True, "verified": True}]),
         ]
         with patch.object(auth_api.requests, "get", side_effect=verified):
             result = auth_api.get_oauth_user_info("github", "provider-token")
         self.assertEqual(result["id"], "7")
         self.assertEqual(result["email"], "owner@example.test")
+        self.assertEqual(result["avatar_url"], "https://images.example.test/github.png")
+
+    def test_google_picture_is_mapped_to_oauth_avatar(self):
+        class _Response:
+            status_code = 200
+            content = b"{}"
+
+            def json(self):
+                return {"id": "google-subject", "email": "owner@example.test",
+                        "picture": "https://images.example.test/google.png"}
+
+        with patch.object(auth_api.requests, "get", return_value=_Response()):
+            result = auth_api.get_oauth_user_info("google", "provider-token")
+        self.assertEqual(result["avatar_url"], "https://images.example.test/google.png")
 
 
 if __name__ == "__main__":

@@ -5,19 +5,31 @@ set -euo pipefail
 SCRIPT_REF="${BASH_SOURCE[0]-$0}"
 SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_REF}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-HOST="${CLEANHOUSE_HOST:-localhost}"
+HOST="${CLEANHOUSE_HOST:-127.0.0.1}"
 PORT="${CLEANHOUSE_PORT:-3333}"
-URL="http://${HOST}:${PORT}/overview"
+BROWSER_HOST="${CLEANHOUSE_BROWSER_HOST:-localhost}"
+URL="http://${BROWSER_HOST}:${PORT}/overview"
 READY_ENDPOINT="http://${HOST}:${PORT}/cleanhouse/status?ready=1"
-RUNTIME_ENDPOINT="http://${HOST}:${PORT}/cleanhouse/runtime"
-STARTUP_TIMEOUT_SECONDS="${CLEANHOUSE_STARTUP_TIMEOUT_SECONDS:-5}"
+# Full operator readiness includes the bounded collectors and preservation
+# warmup. A cold managed runtime can legitimately need around two minutes;
+# stopping it after 30 seconds creates a false restart loop while it is healthy.
+STARTUP_TIMEOUT_SECONDS="${CLEANHOUSE_STARTUP_TIMEOUT_SECONDS:-180}"
 RUNTIME_DIR="${CLEANHOUSE_RUNTIME_DIR:-$HOME/.cleanhouse/runtime}"
+WATCH_DIR="${CLEANHOUSE_WATCH_DIR:-${REPO_ROOT}}"
 LAUNCH_LOG="${RUNTIME_DIR}/launcher.log"
 CLEANHOUSE_OPEN_BROWSER="${CLEANHOUSE_OPEN_BROWSER:-1}"
+# Running this operator command is the explicit manual confirmation required
+# after a preserved self-deviation. Port/process safety is still enforced by
+# preflight before any restart is attempted.
 ACKNOWLEDGE_SELF_DEVIATION=0
 
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONUNBUFFERED=1
+export CLEANHOUSE_RUNTIME_DIR="${RUNTIME_DIR}"
+# Source-side preflight and the staged LaunchAgent must persist receipts under
+# the same macOS-safe application-data root. Without this export, an
+# acknowledgement falls back to Documents and fails under background privacy.
+export CLEANHOUSE_DATA_ROOT="${CLEANHOUSE_DATA_ROOT:-${RUNTIME_DIR}/data}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -81,77 +93,88 @@ fi
 cd "${REPO_ROOT}"
 mkdir -p "${RUNTIME_DIR}"
 
-probe_json() {
+probe_readiness() {
   local target="$1"
   local timeout="${2:-2}"
-  "${CLEANHOUSE_PYTHON}" - "$target" "$timeout" <<'PY'
+  local diagnostic="${3:-0}"
+  "${CLEANHOUSE_PYTHON}" - "$target" "$timeout" "$diagnostic" <<'PY'
 import json
 import sys
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 url = sys.argv[1]
 timeout = float(sys.argv[2])
+diagnostic = sys.argv[3] == "1"
+max_response_bytes = 64 * 1024
+max_diagnostic_items = 8
+max_diagnostic_text = 160
+required_checks = {
+    "runtime_healthy",
+    "startup_warm",
+    "backend_alive",
+    "supervisor_alive",
+    "heartbeat_fresh",
+    "readiness_probe_ok",
+    "single_owned_listener",
+    "listener_matches_backend",
+    "no_foreign_listener",
+    "no_self_deviation_block",
+    "no_resource_guard_block",
+}
 try:
     with urlopen(url, timeout=timeout) as response:
         if response.getcode() != 200:
             raise SystemExit(1)
-        json.loads(response.read().decode("utf-8") or "{}")
-except (OSError, URLError, json.JSONDecodeError):
+        raw = response.read(max_response_bytes + 1)
+        if len(raw) > max_response_bytes:
+            if diagnostic:
+                print("Readiness probe failed: response exceeded 65536 bytes", file=sys.stderr)
+            raise SystemExit(1)
+        payload = json.loads(raw.decode("utf-8") or "{}")
+except (HTTPError, OSError, URLError, UnicodeDecodeError, json.JSONDecodeError) as exc:
     # Connection refusal is expected for a bounded moment after launchd
     # replaces the supervised process. Keep readiness retries quiet; the
     # launcher emits a concise diagnostic only if the deadline expires.
+    if diagnostic:
+        print(f"Readiness probe failed: {exc.__class__.__name__}", file=sys.stderr)
     raise SystemExit(1)
-PY
-}
-
-probe_runtime_safe() {
-  local target="$1"
-  local timeout="${2:-4}"
-  "${CLEANHOUSE_PYTHON}" - "$target" "$timeout" <<'PY'
-import json
-import sys
-from urllib.request import urlopen
-
-url = sys.argv[1]
-timeout = float(sys.argv[2])
-with urlopen(url, timeout=timeout) as response:
-    if response.getcode() != 200:
-        print(f"runtime endpoint returned HTTP {response.getcode()}", file=sys.stderr)
-        raise SystemExit(1)
-    payload = json.loads(response.read().decode("utf-8") or "{}")
-
-resource_guard = payload.get("resource_guard") if isinstance(payload.get("resource_guard"), dict) else {}
-self_deviation = payload.get("self_deviation") if isinstance(payload.get("self_deviation"), dict) else {}
-finding = self_deviation.get("finding") if isinstance(self_deviation.get("finding"), dict) else {}
-runtime_state = payload.get("runtime_state") or payload.get("status")
-guard_status = resource_guard.get("status") or "unknown"
-operator_ready = bool(payload.get("operator_ready"))
-unsafe_runtime_states = {"unhealthy", "stale_pid", "orphaned_listener"}
-if operator_ready and runtime_state not in unsafe_runtime_states and guard_status == "ok":
+if not isinstance(payload, dict):
+    raise SystemExit(1)
+contract = payload.get("readiness_contract")
+checks = contract.get("checks") if isinstance(contract, dict) else None
+failed_checks = contract.get("failed_checks") if isinstance(contract, dict) else None
+reason_codes = payload.get("reason_codes")
+valid = (
+    payload.get("status") == "ok"
+    and payload.get("ready") is True
+    and payload.get("bootstrap_ready") is True
+    and payload.get("runtime_state") == "healthy"
+    and isinstance(reason_codes, list)
+    and all(isinstance(reason, str) for reason in reason_codes)
+    and isinstance(contract, dict)
+    and contract.get("schema") == "cleanhouse.runtime_operator_readiness.v1"
+    and contract.get("satisfied") is True
+    and contract.get("required_runtime_state") == "healthy"
+    and contract.get("required_startup_phases") == ["warm"]
+    and isinstance(checks, dict)
+    and set(checks) == required_checks
+    and all(checks.get(name) is True for name in required_checks)
+    and failed_checks == []
+)
+if valid:
     raise SystemExit(0)
+if diagnostic:
+    def bounded_items(value):
+        if not isinstance(value, list):
+            return ["invalid"]
+        return [str(item)[:max_diagnostic_text] for item in value[:max_diagnostic_items]]
 
-print("Runtime safety check failed.", file=sys.stderr)
-print(f"Runtime state: {runtime_state or 'unknown'}", file=sys.stderr)
-print(f"Operator ready: {operator_ready}", file=sys.stderr)
-print(f"Resource guard: {guard_status}", file=sys.stderr)
-reason_codes = payload.get("reason_codes") or resource_guard.get("reason_codes") or []
-if reason_codes:
-    print(f"Reason codes: {', '.join(str(reason) for reason in reason_codes)}", file=sys.stderr)
-usage = resource_guard.get("usage") if isinstance(resource_guard.get("usage"), dict) else {}
-if usage:
-    rss = usage.get("rss_mb")
-    cpu = usage.get("cpu_percent")
-    pid = usage.get("pid")
-    print(f"Usage: pid={pid or 'unknown'} rss_mb={rss if rss is not None else 'unknown'} cpu_percent={cpu if cpu is not None else 'unknown'}", file=sys.stderr)
-if finding.get("title") or self_deviation.get("title"):
-    print(f"Finding: {finding.get('title') or self_deviation.get('title')}", file=sys.stderr)
-if self_deviation.get("next_action") or finding.get("next_action"):
-    print(f"Next action: {self_deviation.get('next_action') or finding.get('next_action')}", file=sys.stderr)
-if self_deviation.get("evidence_artifact_path"):
-    print(f"Evidence: {self_deviation['evidence_artifact_path']}", file=sys.stderr)
-if self_deviation.get("receipt_artifact_path"):
-    print(f"Receipt: {self_deviation['receipt_artifact_path']}", file=sys.stderr)
+    print("Canonical readiness contract was not satisfied.", file=sys.stderr)
+    print(f"Runtime state: {str(payload.get('runtime_state') or 'unknown')[:max_diagnostic_text]}", file=sys.stderr)
+    print(f"Failed checks: {bounded_items(failed_checks)}", file=sys.stderr)
+    if reason_codes:
+        print(f"Reason codes: {bounded_items(reason_codes)}", file=sys.stderr)
 raise SystemExit(1)
 PY
 }
@@ -298,7 +321,8 @@ if [ "$(uname -s)" = "Darwin" ] && [ -x /bin/launchctl ]; then
   START_JSON="$("${CLEANHOUSE_PYTHON}" -m backend.launch_agent install \
     --interpreter "${CLEANHOUSE_PYTHON}" \
     --host "${HOST}" \
-    --port "${PORT}" 2>>"${LAUNCH_LOG}")"
+    --port "${PORT}" \
+    --watch-root "${WATCH_DIR}" 2>>"${LAUNCH_LOG}")"
 else
   START_JSON="$("${CLEANHOUSE_PYTHON}" -m backend.runtime_supervisor start \
     --host "${HOST}" \
@@ -310,49 +334,29 @@ set -e
 printf '%s\n' "${START_JSON}" >>"${LAUNCH_LOG}"
 if [ "${START_STATUS}" -ne 0 ]; then
   echo "cleanhouse-up: supervised runtime did not become authoritative." >&2
-  echo "Runtime endpoint: ${RUNTIME_ENDPOINT}" >&2
+  echo "Readiness endpoint: ${READY_ENDPOINT}" >&2
   render_runtime_failure_payload "${START_JSON}" || true
-  if [ "$(uname -s)" = "Darwin" ] && [ -x /bin/launchctl ]; then
-    "${CLEANHOUSE_PYTHON}" -m backend.launch_agent stop >>"${LAUNCH_LOG}" 2>&1 || true
-  else
-    "${CLEANHOUSE_PYTHON}" -m backend.runtime_supervisor stop --host "${HOST}" --port "${PORT}" >>"${LAUNCH_LOG}" 2>&1 || true
-  fi
+  # The start command did not establish ownership of a new generation.  It may
+  # have observed or rolled back to a pre-existing runtime, so do not stop it.
   echo "Last 60 lines of ${LAUNCH_LOG}:" >&2
   tail -n 60 "${LAUNCH_LOG}" >&2 || true
   exit 1
 fi
 
 READY_DEADLINE=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
-while ! probe_json "${READY_ENDPOINT}" 2; do
+while ! probe_readiness "${READY_ENDPOINT}" 2; do
   if [ "${SECONDS}" -ge "${READY_DEADLINE}" ]; then
     break
   fi
   sleep 0.2
 done
-if ! probe_json "${READY_ENDPOINT}" 2; then
+if ! probe_readiness "${READY_ENDPOINT}" 2; then
   echo "cleanhouse-up: readiness endpoint unavailable after supervisor start: ${READY_ENDPOINT}" >&2
-  if [ "$(uname -s)" = "Darwin" ] && [ -x /bin/launchctl ]; then
-    "${CLEANHOUSE_PYTHON}" -m backend.launch_agent stop >>"${LAUNCH_LOG}" 2>&1 || true
-  else
-    "${CLEANHOUSE_PYTHON}" -m backend.runtime_supervisor stop --host "${HOST}" --port "${PORT}" >>"${LAUNCH_LOG}" 2>&1 || true
-  fi
+  probe_readiness "${READY_ENDPOINT}" 2 1 || true
+  # Readiness failure is observational. The launcher has no atomic,
+  # generation-conditional stop API, so leave lifecycle decisions to the
+  # existing supervisor rather than risk stopping a replacement generation.
   tail -n 60 "${LAUNCH_LOG}" >&2 || true
-  exit 1
-fi
-
-SAFETY_OUTPUT=""
-set +e
-SAFETY_OUTPUT="$(probe_runtime_safe "${RUNTIME_ENDPOINT}" 4 2>&1)"
-SAFETY_STATUS=$?
-set -e
-if [ "${SAFETY_STATUS}" -ne 0 ]; then
-  echo "cleanhouse-up: runtime failed safety check after supervisor start." >&2
-  if [ -n "${SAFETY_OUTPUT}" ]; then
-    printf '%s\n' "${SAFETY_OUTPUT}" >&2
-  else
-    echo "Runtime endpoint: ${RUNTIME_ENDPOINT}" >&2
-  fi
-  "${CLEANHOUSE_PYTHON}" -m backend.runtime_supervisor stop --host "${HOST}" --port "${PORT}" >>"${LAUNCH_LOG}" 2>&1 || true
   exit 1
 fi
 

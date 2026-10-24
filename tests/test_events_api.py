@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import queue
 import sqlite3
+import threading
 from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
@@ -79,6 +80,31 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         self.assertIn("collector_status", row)
         self.assertEqual(row["evidence_refs"], [])
         self.assertEqual(row["data"], {})
+
+    def test_list_events_applies_bounded_timestamp_window(self):
+        for timestamp, path in (
+            ("2026-10-15T10:00:00Z", "/network/before"),
+            ("2026-10-15T10:05:00Z", "/network/in-window"),
+            ("2026-10-15T10:10:00Z", "/network/after"),
+        ):
+            events.insert_event(
+                event_type="network_observation",
+                path=path,
+                summary=path,
+                session_id="network-window",
+                timestamp=timestamp,
+                source_surface="network",
+            )
+
+        rows = events.list_events(
+            limit=10,
+            event_type="network_observation",
+            source_surface="network",
+            start_timestamp="2026-10-15T10:01:00Z",
+            end_timestamp="2026-10-15T10:09:00Z",
+        )
+
+        self.assertEqual([row["path"] for row in rows], ["/network/in-window"])
 
     def test_invalid_configured_events_db_falls_back_to_default_path(self):
         blocked_parent = Path(self._tmp.name) / "not-a-directory"
@@ -655,6 +681,28 @@ class CleanHouseEventStorageTests(unittest.TestCase):
         self.assertIn("degradation", status["writer"])
         self.assertIn("last_event_at", status)
         self.assertIn("last_event_type", status)
+
+    def test_event_writer_starts_without_waiting_for_first_event(self):
+        events._stop_db_writer()
+
+        first = events.start_event_writer()
+        second = events.start_event_writer()
+
+        self.assertEqual(first["status"], "running")
+        self.assertEqual(first["collector_status"], "ok")
+        self.assertEqual(second["status"], "running")
+        self.assertEqual(second["collector_status"], "ok")
+
+    def test_event_writer_start_failure_remains_visible(self):
+        events._stop_db_writer()
+
+        with patch.object(threading.Thread, "start", side_effect=RuntimeError("start failed")):
+            health = events.start_event_writer()
+
+        self.assertEqual(health["status"], "stopped")
+        self.assertEqual(health["collector_status"], "failure")
+        self.assertEqual(health["last_error"]["source"], "writer_start")
+        self.assertTrue(health["degradation"]["degraded"])
 
     def test_dead_watcher_observer_is_reported_as_an_error(self):
         class DeadObserver:

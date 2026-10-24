@@ -5,32 +5,58 @@ CleanHouse monitoring API endpoints.
 from __future__ import annotations
 
 import os
+import queue
 import re
+import sys
+import threading
+import time
 import uuid
 import hashlib
+import ipaddress
 import json
+import logging
 import plistlib
-import shutil
 import subprocess
-import time
+import urllib.error
+import urllib.request
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
 from flask import Blueprint, Response, jsonify, request, send_file, session, stream_with_context
-from backend import events, file_integrity, vvault_sync, wazuh_files
+from backend import events
+from backend import vvault_preservation
+from backend import file_integrity, vvault_sync, wazuh_files, wazuh_runtime
+from backend.apple_intelligence import AppleIntelligenceInsightService
 from backend.utils.jwt_utils import get_user_from_token
+from backend.evidence_context import EvidenceActionResolver, EvidenceContext, network_distribution_owner_id
+from backend.network_collector import CaptureEngineUnavailable, NetworkCollectorSupervisor
+from backend.security_assessments import (
+    ASSESSMENT_TRANSITION_EVENT_TYPE,
+    SUPPORTED_TREND_METRICS,
+    active_assessment_series,
+    add_assessment_contract,
+    assess_network_event,
+    persist_network_assessment_transitions,
+)
 
 from backend.api.cleanhouse_monitoring import CleanHouseMonitoringAdapter, LOGIN_REPORT_WAIT_SECONDS
 
 bp = Blueprint("cleanhouse", __name__)
+_LOG = logging.getLogger(__name__)
 LOCAL_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$")
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 MAX_SESSION_ID_LENGTH = 128
 MAX_PATH_LENGTH = 4096
 
 _adapter: CleanHouseMonitoringAdapter | None = None
+_evidence_context_resolver: EvidenceActionResolver | None = None
+_apple_intelligence_insight_service: AppleIntelligenceInsightService | None = None
+_EVIDENCE_ACTION_REQUESTS: dict[str, dict[str, Any]] = {}
+_EVIDENCE_ACTION_REQUEST_FINGERPRINTS: dict[str, str] = {}
+_EVIDENCE_ACTION_REQUESTS_LOCK = threading.Lock()
 DEFAULT_SESSION_ID = "default-session"
 APPLICATION_TARGETS = {
     "terminal": Path("/System/Applications/Utilities/Terminal.app"),
@@ -44,11 +70,191 @@ APPLICATION_SEARCH_ROOTS = (
     Path("/System/Applications/Utilities"),
     Path.home() / "Applications",
 )
+LOW_PROCESSING_RECEIPT_LIMIT = 5
+LOW_PROCESSING_RECEIPT_MAX_LIMIT = 50
+LOW_PROCESSING_EVENT_LIMIT = 20
+LOW_PROCESSING_EVENT_MAX_LIMIT = 200
+LOW_PROCESSING_DOMAIN_EVENT_LIMIT = 50
+LOW_PROCESSING_DOMAIN_EVENT_MAX_LIMIT = 200
+LOW_PROCESSING_REPORT_LIMIT = 10
+LOW_PROCESSING_REPORT_MAX_LIMIT = 50
+LOW_PROCESSING_INTENT_LIMIT = 10
+LOW_PROCESSING_INTENT_MAX_LIMIT = 50
+LOW_PROCESSING_APPROVAL_LIMIT = 5
+LOW_PROCESSING_APPROVAL_MAX_LIMIT = 50
+WIRESHARK_CAPTURE_DEFAULT_SECONDS = 3
+WIRESHARK_CAPTURE_MAX_SECONDS = 10
+WIRESHARK_CAPTURE_TIMEOUT_GRACE_SECONDS = 5
+WIRESHARK_MAX_EVENTS = 200
+NETWORK_EVIDENCE_RETENTION_DAYS = 365
+NETWORK_EVIDENCE_LOOKBACK = int(os.environ.get("CLEANHOUSE_NETWORK_EVIDENCE_LOOKBACK", "50000"))
+NETWORK_SERVER_BOOT_ID = os.getenv("CLEANHOUSE_BACKEND_BOOT_ID") or uuid.uuid4().hex
+NETWORK_PROJECTION_LIMIT = 500
+NETWORK_FINDINGS_CACHE_SECONDS = 15.0
+NETWORK_FINDINGS_LOOKBACK = int(os.environ.get("CLEANHOUSE_NETWORK_FINDINGS_LOOKBACK", "10000"))
+NETWORK_FINDINGS_RELATED_ID_LIMIT = 8
+NETWORK_FINDINGS_DESTINATION_LIMIT = 8
+NETWORK_TREND_BUCKET_EVENT_TYPE = "network_trend_bucket"
+NETWORK_TREND_TICK_EVENT_TYPE = "network_trend_tick"
+NETWORK_OBSERVATION_EVENT_TYPE = "network_observation"
+NETWORK_TIMELINE_NOTABLE_EVENT_TYPE = "network_timeline_notable"
+NETWORK_TIMELINE_GAP_EVENT_TYPE = "network_timeline_gap"
+NETWORK_SYNC_EVENT_TYPE = "network_vvault_sync_status"
+NETWORK_COLLECTOR_RECEIPT_EVENT_TYPE = "network_collector_receipt"
+NETWORK_RUNTIME_WARMUP_SECONDS = float(os.environ.get("CLEANHOUSE_NETWORK_RUNTIME_WARMUP_SECONDS", "30"))
+NETWORK_VVAULT_OUTBOX_MAXSIZE = 2000
+NETWORK_VVAULT_BATCH_SIZE = 50
+NETWORK_VVAULT_RETRY_SECONDS = 15
+NETWORK_UI_STATES = {"READY", "CAPTURING", "NO_DATA", "WARMING", "ERROR", "CAPTURE_BLOCKED"}
+NETWORK_PROJECTION_VIEWS = {"findings", "trend", "distribution", "timeline"}
+NETWORK_TIME_RANGES_MS = {
+    "5s": 5 * 1000,
+    "1m": 60 * 1000,
+    "30m": 30 * 60 * 1000,
+    "1h": 60 * 60 * 1000,
+    "24h": 24 * 60 * 60 * 1000,
+    "7d": 7 * 24 * 60 * 60 * 1000,
+    "1mo": 30 * 24 * 60 * 60 * 1000,
+    "3mo": 90 * 24 * 60 * 60 * 1000,
+    "12mo": 365 * 24 * 60 * 60 * 1000,
+}
+NETWORK_TREND_BUCKETS = {
+    "5s": 12,
+    "1m": 18,
+    "30m": 24,
+    "1h": 24,
+    "24h": 30,
+    "7d": 32,
+    "1mo": 36,
+    "3mo": 36,
+    "12mo": 40,
+}
+NETWORK_SEVERITY_RANK = {"critical": 4, "high": 3, "warning": 2, "medium": 2, "low": 1, "info": 0}
+NETWORK_CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
+_NETWORK_VVAULT_OUTBOX: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=NETWORK_VVAULT_OUTBOX_MAXSIZE)
+_NETWORK_VVAULT_WORKER_LOCK = threading.Lock()
+_NETWORK_VVAULT_WORKER_STARTED = False
+_NETWORK_VVAULT_WORKER_THREAD: threading.Thread | None = None
+_NETWORK_VVAULT_WORKER_STOP = threading.Event()
+_NETWORK_VVAULT_STATE_LOCK = threading.Lock()
+_NETWORK_VVAULT_SYNCED_IDS: set[str] = set()
+_NETWORK_VVAULT_LAST_SUCCESS_AT = ""
+_NETWORK_VVAULT_LAST_ERROR = ""
+_NETWORK_STARTUP_RECONCILIATION_LOCK = threading.Lock()
+_NETWORK_STARTUP_OPERATOR_RECORDS: dict[str, int] = {}
+_NETWORK_STARTUP_OPERATOR_RECORDS_CREATED = 0
+_NETWORK_STARTUP_OPERATOR_RECORDS_UPDATED = 0
+
+
+def _network_startup_operator_identity(event: dict[str, Any]) -> str:
+    values = (
+        event.get("process") or event.get("app") or "Unknown app",
+        event.get("source_display") or _network_endpoint(event.get("src_ip"), event.get("src_port")) or "Unknown source",
+        event.get("destination_display") or _network_endpoint(event.get("dst_ip"), event.get("dst_port")) or "Unknown destination",
+        event.get("protocol") or "Network connection",
+        event.get("dst_port") or event.get("port") or "Unavailable",
+    )
+    return "|".join(str(value).strip().lower() for value in values)
+
+
+def _log_network_startup_reconciliation(stage: str, **details: Any) -> None:
+    message = json.dumps({"stage": stage, **details}, sort_keys=True, default=str)
+    if stage in {"operator_record_reconciled", "snapshot_operator_record"}:
+        _LOG.debug("network_startup_reconciliation %s", message)
+    else:
+        _LOG.info("network_startup_reconciliation %s", message)
+
+
+def _log_network_history_io(stage: str, **details: Any) -> None:
+    _LOG.info("network_history_io %s", json.dumps({"stage": stage, **details}, sort_keys=True, default=str))
+
+
+def _log_network_vvault_save_result(
+    artifact: str,
+    artifact_id: Any,
+    timestamp: Any,
+    result: dict[str, Any],
+) -> None:
+    details = {
+        "stage": "vvault_save",
+        "artifact": artifact,
+        "artifact_id": artifact_id,
+        "timestamp": timestamp,
+        "status": result.get("status"),
+        "reason": result.get("reason") or result.get("message") or "",
+    }
+    message = json.dumps(details, sort_keys=True, default=str)
+    if result.get("status") == "error":
+        _LOG.warning("network_history_io %s", message)
+    else:
+        _LOG.debug("network_history_io %s", message)
+_NETWORK_VVAULT_LAST_ERROR_AT = ""
+_NETWORK_VVAULT_PENDING_COUNT = 0
+_NETWORK_VVAULT_OLDEST_PENDING_AT = ""
+_NETWORK_VVAULT_QUEUE_DROPS = 0
+_NETWORK_LIVE_PERSIST_QUEUE: "queue.Queue[dict[str, Any]]" = queue.Queue(maxsize=2000)
+_NETWORK_LIVE_PERSIST_LOCK = threading.Lock()
+_NETWORK_LIVE_PERSIST_WORKER_STARTED = False
+_NETWORK_LIVE_PERSIST_WORKER_THREAD: threading.Thread | None = None
+_NETWORK_LIVE_PERSIST_WORKER_STOP = threading.Event()
+_NETWORK_LIVE_PERSIST_QUEUE_DROPS = 0
+_NETWORK_LIVE_PERSIST_FAILURES = 0
+_NETWORK_LIVE_PERSIST_LAST_ERROR = ""
+_NETWORK_HISTORY_SERVICE_LOCK = threading.Lock()
+_NETWORK_HISTORY_SERVICE_STOP = threading.Event()
+_NETWORK_HISTORY_SERVICE_THREAD: threading.Thread | None = None
+_NETWORK_COLLECTOR_LOCK = threading.Lock()
+_NETWORK_COLLECTOR: NetworkCollectorSupervisor | None = None
+_NETWORK_COLLECTOR_ENRICHMENT_LOCK = threading.Lock()
+_NETWORK_COLLECTOR_ENRICHMENT: dict[str, dict[str, Any]] = {}
+_NETWORK_COLLECTOR_ENRICHMENT_AT = 0.0
+NETWORK_COLLECTOR_ENRICHMENT_INTERVAL_SECONDS = 15.0
+NETWORK_CAPTURE_STALE_AFTER_MS = 15_000.0
+_NETWORK_RUNNING_APPS_LOCK = threading.Lock()
+_NETWORK_RUNNING_APPS: list[dict[str, Any]] = []
+_NETWORK_RUNNING_APPS_AT = 0.0
+_NETWORK_CANONICAL_EVENT_IDS_LOCK = threading.Lock()
+_NETWORK_CANONICAL_EVENT_IDS: dict[str, None] = {}
+_NETWORK_CANONICAL_EVENT_IDS_INITIALIZED = False
+_NETWORK_CANONICAL_EVENT_IDS_LIMIT = 100000
+_NETWORK_FINDINGS_CACHE_LOCK = threading.Lock()
+_NETWORK_FINDINGS_CACHE: dict[str, Any] = {"payload": None, "cached_at": 0.0}
+_NETWORK_PROJECTION_CACHE_LOCK = threading.Lock()
+_NETWORK_PROJECTION_CACHE: dict[str, dict[str, Any]] = {}
+_NETWORK_RECENT_OBSERVATIONS_LOCK = threading.Lock()
+_NETWORK_RECENT_OBSERVATIONS: "deque[dict[str, Any]]" = deque(maxlen=5000)
+_NETWORK_BACKEND_STARTED_AT = time.monotonic()
 APPLICATION_CATEGORY_RULES = {
-    "communications": ("messages", "facetime", "mail", "slack", "discord", "zoom", "teams", "telegram", "signal", "whatsapp"),
-    "developer": ("terminal", "codex", "cursor", "xcode", "visual studio", "code", "kiro", "github", "docker"),
-    "files": ("finder", "preview", "textedit", "pages", "numbers", "keynote", "word", "excel", "pdf", "cleanmymac"),
-    "network": ("safari", "chrome", "firefox", "arc", "atlas", "vpn", "wireshark"),
+    "communications": (
+        "messages", "facetime", "mail", "outlook", "phone", "contacts", "slack", "discord", "zoom", "teams",
+        "telegram", "signal", "whatsapp",
+    ),
+    "developer": (
+        "terminal", "codex", "cursor", "xcode", "visual studio", "code", "kiro", "github", "docker",
+        "opencode", "script editor",
+    ),
+    "files": (
+        "finder", "preview", "textedit", "pages", "numbers", "keynote", "word", "excel", "pdf", "cleanmymac",
+        "dictionary", "font book", "print center",
+    ),
+    "network": (
+        "safari", "chrome", "firefox", "arc", "atlas", "vpn", "wireshark", "warp", "airport utility",
+        "screen sharing", "iphone mirroring",
+    ),
+    "creative": (
+        "canva", "compressor", "creator studio", "final cut", "motion", "logic pro", "pixelmator", "photo booth",
+        "photos", "image capture", "image playground", "quicktime", "digital color meter", "colorsync", "audio midi",
+    ),
+    "productivity": (
+        "books", "calendar", "clock", "freeform", "home", "journal", "maps", "news", "notes", "podcasts",
+        "reminders", "stocks", "music",
+    ),
+    "system": (
+        "activity monitor", "app store", "apps", "automator", "bluetooth file exchange", "boot camp",
+        "calculator", "console", "disk utility", "findmy", "games", "grapher", "magnifier", "migration assistant",
+        "mission control", "passwords", "shortcuts", "siri", "stickies",
+    ),
+    "ai": ("chatgpt", "copilot"),
 }
 
 
@@ -57,6 +263,20 @@ def get_cleanhouse_monitoring_adapter() -> CleanHouseMonitoringAdapter:
     if _adapter is None:
         _adapter = CleanHouseMonitoringAdapter()
     return _adapter
+
+
+def get_evidence_context_resolver() -> EvidenceActionResolver:
+    global _evidence_context_resolver
+    if _evidence_context_resolver is None:
+        _evidence_context_resolver = EvidenceActionResolver()
+    return _evidence_context_resolver
+
+
+def get_apple_intelligence_insight_service() -> AppleIntelligenceInsightService:
+    global _apple_intelligence_insight_service
+    if _apple_intelligence_insight_service is None:
+        _apple_intelligence_insight_service = AppleIntelligenceInsightService()
+    return _apple_intelligence_insight_service
 
 
 def _parse_json_payload():
@@ -159,6 +379,35 @@ def _require_allowed_origin(origin: str | None) -> tuple[dict, bool]:
     return {"status": "error", "message": "Origin not allowed"}, False
 
 
+def _require_privileged_files_request(intent: str, *, allow_same_origin_get: bool = False):
+    origin = request.headers.get("Origin")
+    if origin:
+        origin_error, allowed = _require_allowed_origin(origin)
+        if not allowed:
+            return origin_error, 403
+    elif allow_same_origin_get:
+        raw_host = str(getattr(request, "host", "") or "").lower()
+        host = "::1" if raw_host.startswith("[::1]") else raw_host.split(":", 1)[0]
+        if host not in {"localhost", "127.0.0.1", "::1"}:
+            return {"status": "error", "message": "Same-origin local host required"}, 403
+    else:
+        return {"status": "error", "message": "Origin missing"}, 403
+    fetch_site = str(request.headers.get("Sec-Fetch-Site") or "same-origin").lower()
+    if fetch_site not in {"same-origin", "same-site", "none"}:
+        return {"status": "error", "message": "Cross-site request rejected"}, 403
+    if request.headers.get("X-CleanHouse-Intent") != intent:
+        return {"status": "error", "message": "Missing privileged intent header"}, 403
+    auth_enabled = os.getenv("CLEANHOUSE_ENABLE_AUTH", "1").lower() not in {"0", "false", "no", "off"}
+    require_login = os.getenv("CLEANHOUSE_REQUIRE_LOGIN", "1").lower() not in {"0", "false", "no", "off"}
+    if auth_enabled and require_login:
+        identity = _resolve_request_identity(allow_api_token=True)
+        if identity is None:
+            return {"status": "error", "message": "Authentication required"}, 401
+        if not identity.consent_current:
+            return {"status": "error", "code": "consent_required", "message": "Current legal consent is required"}, 428
+    return None
+
+
 def _require_files_read_request():
     """Protect path-bearing Files evidence without creating another auth model."""
     origin = request.headers.get("Origin")
@@ -176,8 +425,12 @@ def _require_files_read_request():
         return {"status": "error", "message": "Cross-site request rejected"}, 403
     auth_enabled = os.getenv("CLEANHOUSE_ENABLE_AUTH", "1").lower() not in {"0", "false", "no", "off"}
     require_login = os.getenv("CLEANHOUSE_REQUIRE_LOGIN", "1").lower() not in {"0", "false", "no", "off"}
-    if auth_enabled and require_login and not (session.get("user_id") or session.get("oauth_user")):
-        return {"status": "error", "message": "Authentication required"}, 401
+    if auth_enabled and require_login:
+        identity = _resolve_request_identity(allow_api_token=True)
+        if identity is None:
+            return {"status": "error", "message": "Authentication required"}, 401
+        if not identity.consent_current:
+            return {"status": "error", "code": "consent_required", "message": "Current legal consent is required"}, 428
     return None
 
 
@@ -251,6 +504,44 @@ def _artifact_id(*parts: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def _app_inventory_state_path() -> Path:
+    return Path(
+        os.getenv(
+            "CLEANHOUSE_APP_INVENTORY_PATH",
+            Path.home() / "Documents" / "CleanHouse" / "Data" / "app_inventory.json",
+        )
+    )
+
+
+def _capture_duration() -> tuple[int | None, tuple[dict[str, Any], int] | None]:
+    raw_duration = request.args.get("duration", "").strip()
+    if not raw_duration:
+        return WIRESHARK_CAPTURE_DEFAULT_SECONDS, None
+    try:
+        duration = int(raw_duration)
+    except ValueError:
+        return None, _bundled_wireshark_error("invalid_capture_duration", "Capture duration is invalid.")
+    if duration < 1:
+        return None, _bundled_wireshark_error("invalid_capture_duration", "Capture duration is invalid.")
+    return min(duration, WIRESHARK_CAPTURE_MAX_SECONDS), None
+
+
+def _network_runtime_probe_state(events_payload: list[dict[str, Any]]) -> str:
+    # Data availability is not capture health. The collector lifecycle applied
+    # by _network_apply_collector_truth is the sole authority for warming,
+    # blocked, degraded, and operational capture states.
+    return "CAPTURING" if events_payload else "NO_DATA"
+
+
+def _app_icon_cache_dir() -> Path:
+    return Path(
+        os.getenv(
+            "CLEANHOUSE_APP_ICON_CACHE_DIR",
+            Path.home() / "Documents" / "CleanHouse" / "Data" / "app_icons",
+        )
+    )
+
+
 def _allowed_threats_path() -> Path:
     return Path(
         os.getenv(
@@ -258,6 +549,23 @@ def _allowed_threats_path() -> Path:
             Path.home() / "Documents" / "CleanHouse" / "Data" / "allowed_threats" / "allowed_threats.json",
         )
     )
+
+
+def _read_app_inventory_state() -> dict[str, Any]:
+    path = _app_inventory_state_path()
+    try:
+        if path.exists():
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+
+def _write_app_inventory_state(payload: dict[str, Any]) -> None:
+    path = _app_inventory_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _read_allowed_threats_state() -> dict[str, Any]:
@@ -327,39 +635,34 @@ def _allowed_threat_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _app_inventory_state_path() -> Path:
-    return Path(
-        os.getenv(
-            "CLEANHOUSE_APP_INVENTORY_PATH",
-            Path.home() / "Documents" / "CleanHouse" / "Data" / "app_inventory.json",
-        )
-    )
+def _finding_text(payload: dict[str, Any], keys: tuple[str, ...], default: str = "Unavailable") -> str:
+    for key in keys:
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return default
 
 
-def _app_icon_cache_dir() -> Path:
-    return Path(
-        os.getenv(
-            "CLEANHOUSE_APP_ICON_CACHE_DIR",
-            Path.home() / "Documents" / "CleanHouse" / "Data" / "app_icons",
-        )
-    )
-
-
-def _read_app_inventory_state() -> dict[str, Any]:
-    path = _app_inventory_state_path()
-    try:
-        if path.exists():
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            return payload if isinstance(payload, dict) else {}
-    except Exception:
-        return {}
-    return {}
-
-
-def _write_app_inventory_state(payload: dict[str, Any]) -> None:
-    path = _app_inventory_state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+def _scan_finding_from_issue(issue: Any, *, source: str, fallback_name: str) -> dict[str, Any]:
+    issue_payload = issue if isinstance(issue, dict) else {"summary": str(issue)}
+    target_path = _finding_text(issue_payload, ("target_path", "path", "file_path", "process_path"), "")
+    target_name = _finding_text(issue_payload, ("target_name", "app_name", "process_name", "name", "command", "host", "domain"), "")
+    evidence_refs = issue_payload.get("evidence_refs", [])
+    if not isinstance(evidence_refs, list):
+        evidence_refs = []
+    return {
+        "threat_name": _finding_text(issue_payload, ("threat_name", "title", "label", "summary", "name"), fallback_name),
+        "severity": _finding_text(issue_payload, ("severity", "level", "status"), "Unavailable"),
+        "target_type": _finding_text(issue_payload, ("target_type", "surface", "type"), source),
+        "target_name": target_name,
+        "target_path": target_path,
+        "source": source,
+        "reason": _finding_text(issue_payload, ("reason", "summary", "message", "description"), "Detected by CleanHouse scan."),
+        "recommended_action": _finding_text(issue_payload, ("recommended_action", "next_action"), "Inspect details before taking action."),
+        "evidence_refs": [str(ref) for ref in evidence_refs if str(ref).strip()],
+        "receipt_ref": _finding_text(issue_payload, ("receipt_ref",), ""),
+        "allowable": True,
+    }
 
 
 def _app_info_plist(app_path: Path) -> dict[str, Any]:
@@ -398,6 +701,33 @@ def _application_category(name: str, bundle_id: str, path: str) -> str:
     return "other"
 
 
+APPLICATION_INVENTORY_LIMIT = int(os.environ.get("CLEANHOUSE_APPLICATION_INVENTORY_LIMIT", "500"))
+APPLICATION_PROCESS_MATCH_FIELDS = (
+    "command",
+    "args",
+    "source_command",
+    "process",
+    "name",
+    "path",
+    "bundle_id",
+)
+APPLICATION_PROCESS_PAYLOAD_FIELDS = (
+    "pid",
+    "user",
+    "cpu",
+    "cpu_percent",
+    "mem",
+    "rss_bytes",
+    "rss_kb",
+    "command",
+    "process",
+    "name",
+    "platform",
+    "agent",
+    "system",
+)
+
+
 def _discover_application_paths() -> list[Path]:
     apps: dict[str, Path] = {}
     for root in APPLICATION_SEARCH_ROOTS:
@@ -421,30 +751,203 @@ def _discover_application_paths() -> list[Path]:
     return sorted(apps.values(), key=lambda item: item.stem.lower())
 
 
-def _running_application_keys(process_rows: list[dict[str, Any]]) -> set[str]:
+def _application_match_values(app: dict[str, Any]) -> list[str]:
+    values = [
+        str(app.get("path", "")),
+        str(app.get("name", "")),
+        str(app.get("bundle_id", "")),
+    ]
+    return [value.lower() for value in values if value]
+
+
+def _running_gui_app_candidates() -> dict[str, dict[str, Any]]:
+    if sys.platform != "darwin":
+        return {}
+    candidates: dict[str, dict[str, Any]] = {}
+
+    def add_candidate(name: Any = "", bundle_id: Any = "", path: Any = "", pid: Any = None, source: str = "") -> None:
+        record = {
+            "name": str(name or "").strip(),
+            "bundle_id": str(bundle_id or "").strip(),
+            "path": str(path or "").strip(),
+            "pid": str(pid or "").strip(),
+            "source": source,
+        }
+        if not (record["name"] or record["bundle_id"] or record["path"]):
+            return
+        for key in (record["bundle_id"].lower(), record["path"].lower(), record["name"].lower()):
+            if key:
+                candidates[key] = record
+
+    try:
+        from AppKit import NSWorkspace  # type: ignore
+
+        for app in NSWorkspace.sharedWorkspace().runningApplications():
+            try:
+                if int(app.activationPolicy()) != 0:
+                    continue
+                bundle_url = app.bundleURL()
+                add_candidate(
+                    app.localizedName(),
+                    app.bundleIdentifier(),
+                    bundle_url.path() if bundle_url else "",
+                    app.processIdentifier(),
+                    "nsworkspace",
+                )
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if candidates:
+        return candidates
+
+    try:
+        script = (
+            'set AppleScript\'s text item delimiters to linefeed\n'
+            'set rows to {}\n'
+            'tell application "System Events"\n'
+            '  repeat with proc in (application processes whose background only is false)\n'
+            '    set procName to name of proc as text\n'
+            '    set procBundle to ""\n'
+            '    set procPid to ""\n'
+            '    try\n'
+            '      set procBundle to bundle identifier of proc as text\n'
+            '    end try\n'
+            '    try\n'
+            '      set procPid to unix id of proc as text\n'
+            '    end try\n'
+            '    set end of rows to procName & tab & procBundle & tab & procPid\n'
+            '  end repeat\n'
+            'end tell\n'
+            'return rows as text\n'
+        )
+        completed = subprocess.run(
+            ["/usr/bin/osascript", "-e", script],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+        if completed.returncode == 0:
+            for line in completed.stdout.splitlines():
+                parts = line.split("\t")
+                if parts:
+                    add_candidate(
+                        parts[0] if len(parts) > 0 else "",
+                        parts[1] if len(parts) > 1 else "",
+                        "",
+                        parts[2] if len(parts) > 2 else "",
+                        "system_events",
+                    )
+    except Exception:
+        pass
+    return candidates
+
+
+def _application_matches_process_text(app: dict[str, Any], text: str) -> bool:
+    haystack = str(text or "").lower()
+    if not haystack:
+        return False
+    path = str(app.get("path") or "").strip().lower()
+    bundle_id = str(app.get("bundle_id") or "").strip().lower()
+    name = str(app.get("name") or "").strip().lower()
+    if path and path in haystack:
+        return True
+    if bundle_id and bundle_id in haystack:
+        return True
+    if name:
+        escaped = re.escape(name)
+        if re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", haystack):
+            return True
+        if f"/{name}.app/" in haystack or f"/{name}.app " in haystack:
+            return True
+    return False
+
+
+def _application_matches_gui_candidate(app: dict[str, Any], candidates: dict[str, dict[str, Any]]) -> bool:
+    if not candidates:
+        return False
+    for value in (app.get("bundle_id"), app.get("path"), app.get("name")):
+        key = str(value or "").strip().lower()
+        if key and key in candidates:
+            return True
+    return False
+
+
+def _process_match_text(row: dict[str, Any]) -> str:
+    parts: list[str] = []
+    for key in APPLICATION_PROCESS_MATCH_FIELDS:
+        value = row.get(key)
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            continue
+        if isinstance(value, (list, tuple, set)):
+            text = " ".join(str(item) for item in value)
+        else:
+            text = str(value)
+        text = text.strip().lower()
+        if text:
+            parts.append(text[:2048])
+    return "\n".join(parts)[:8192]
+
+
+def _process_match_index(process_rows: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
+    index: list[tuple[str, dict[str, Any]]] = []
+    for row in process_rows:
+        if not isinstance(row, dict):
+            continue
+        text = _process_match_text(row)
+        if text:
+            index.append((text, row))
+    return index
+
+
+def _compact_application_process(row: dict[str, Any]) -> dict[str, Any]:
+    compact = {}
+    for key in APPLICATION_PROCESS_PAYLOAD_FIELDS:
+        value = row.get(key)
+        if value is None or value == "":
+            continue
+        compact[key] = value
+    if "process" not in compact and compact.get("command"):
+        compact["process"] = compact["command"]
+    return compact
+
+
+def _running_application_keys(
+    process_rows: list[dict[str, Any]],
+    apps: list[dict[str, Any]] | None = None,
+    process_index: list[tuple[str, dict[str, Any]]] | None = None,
+) -> set[str]:
     running: set[str] = set()
-    apps = [_application_identity_from_path(path) for path in _discover_application_paths()]
+    apps = apps if apps is not None else [_application_identity_from_path(path) for path in _discover_application_paths()]
+    gui_candidates = _running_gui_app_candidates()
+    if gui_candidates:
+        for app in apps:
+            if _application_matches_gui_candidate(app, gui_candidates):
+                running.add(str(app["id"]))
+        return running
+    process_index = process_index if process_index is not None else _process_match_index(process_rows)
     for app in apps:
-        app_path = str(app.get("path", "")).lower()
-        app_name = str(app.get("name", "")).lower()
-        bundle_id = str(app.get("bundle_id", "")).lower()
-        for row in process_rows:
-            text = json.dumps(row, default=str).lower()
-            if app_path and app_path in text or app_name and app_name in text or bundle_id and bundle_id in text:
+        for text, _row in process_index:
+            if _application_matches_process_text(app, text):
                 running.add(str(app["id"]))
                 break
     return running
 
 
-def _application_processes(app: dict[str, Any], process_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    app_path = str(app.get("path", "")).lower()
-    app_name = str(app.get("name", "")).lower()
-    bundle_id = str(app.get("bundle_id", "")).lower()
+def _application_processes(
+    app: dict[str, Any],
+    process_rows: list[dict[str, Any]],
+    process_index: list[tuple[str, dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
+    process_index = process_index if process_index is not None else _process_match_index(process_rows)
     matched = []
-    for row in process_rows:
-        text = json.dumps(row, default=str).lower()
-        if app_path and app_path in text or app_name and app_name in text or bundle_id and bundle_id in text:
-            matched.append(row)
+    for text, row in process_index:
+        if _application_matches_process_text(app, text):
+            matched.append(_compact_application_process(row))
     return matched[:20]
 
 
@@ -461,12 +964,14 @@ def _load_process_rows(refresh: bool = False) -> list[dict[str, Any]]:
 def list_applications_payload(refresh: bool = False) -> dict[str, Any]:
     discovered_at = _now_iso()
     process_rows = _load_process_rows(refresh=refresh)
-    running_ids = _running_application_keys(process_rows)
+    process_index = _process_match_index(process_rows)
+    discovered_apps = [_application_identity_from_path(path) for path in _discover_application_paths()]
+    running_ids = _running_application_keys(process_rows, discovered_apps, process_index)
     state = _read_app_inventory_state()
     known = state.get("apps", {}) if isinstance(state.get("apps"), dict) else {}
     apps = []
-    for app_path in _discover_application_paths():
-        app = _application_identity_from_path(app_path)
+    inventory_limit = max(1, APPLICATION_INVENTORY_LIMIT)
+    for app in discovered_apps[:inventory_limit]:
         previous = known.get(app["id"]) if isinstance(known.get(app["id"]), dict) else None
         first_seen = str(previous.get("first_seen_at")) if previous else discovered_at
         app["first_seen_at"] = first_seen
@@ -476,7 +981,7 @@ def list_applications_payload(refresh: bool = False) -> dict[str, Any]:
         app["badge_count"] = 0 if previous else 1
         app["running"] = app["id"] in running_ids
         app["audit_status"] = "new" if not previous else "adopted"
-        app["processes"] = _application_processes(app, process_rows)
+        app["processes"] = _application_processes(app, process_rows, process_index)
         apps.append(app)
         known[app["id"]] = {
             "name": app["name"],
@@ -492,6 +997,9 @@ def list_applications_payload(refresh: bool = False) -> dict[str, Any]:
         "schema": "cleanhouse.applications.v1",
         "discovered_at": discovered_at,
         "count": len(apps),
+        "total_count": len(discovered_apps),
+        "limit": inventory_limit,
+        "truncated": len(discovered_apps) > len(apps),
         "new_count": sum(1 for app in apps if app.get("badge")),
         "apps": apps,
         "sources": [str(path) for path in APPLICATION_SEARCH_ROOTS],
@@ -1136,9 +1644,12 @@ def run_application_investigation_with_timeout(payload: dict[str, Any] | None = 
     runtime = runtime_supervisor.current_runtime_payload(probe=False)
     self_deviation = runtime.get("self_deviation") if isinstance(runtime.get("self_deviation"), dict) else {}
     blocked = runtime.get("blocked_recovery") if isinstance(runtime.get("blocked_recovery"), dict) else {}
+    backend_payload = runtime.get("backend") if isinstance(runtime.get("backend"), dict) else {}
+    supervisor_payload = runtime.get("supervisor") if isinstance(runtime.get("supervisor"), dict) else {}
+    runtime_active = bool(backend_payload.get("alive")) or bool(supervisor_payload.get("alive"))
     if (
-        str(self_deviation.get("status") or "") == "open"
-        or str(blocked.get("type") or "") in runtime_supervisor.SELF_DEVIATION_BLOCK_TYPES
+        bool(self_deviation.get("blocks_investigations"))
+        or (runtime_active and str(blocked.get("type") or "") in runtime_supervisor.SELF_DEVIATION_BLOCK_TYPES)
     ):
         return _application_investigation_paused_payload(request_payload, runtime)
 
@@ -1161,9 +1672,33 @@ def _fast_operator_api_enabled() -> bool:
     return os.getenv("CLEANHOUSE_FAST_OPERATOR_API", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _event_spine_payload() -> dict[str, Any]:
+def _event_spine_payload(*, include_latest: bool = False) -> dict[str, Any]:
     try:
-        payload = events.get_runtime_status()
+        if include_latest:
+            payload = events.get_runtime_status()
+        else:
+            watcher = events.get_watcher_status()
+            writer = events.get_writer_health()
+            reasons = []
+            for name, state in (("watcher", watcher), ("writer", writer)):
+                degradation = state.get("degradation") if isinstance(state, dict) else {}
+                if isinstance(degradation, dict) and degradation.get("degraded"):
+                    reasons.append({
+                        "surface": name,
+                        "collector_status": state.get("collector_status", "unknown"),
+                        "reasons": list(degradation.get("reasons", [])),
+                    })
+            payload = {
+                "status": "degraded" if reasons else "ok",
+                "watcher": watcher,
+                "writer": writer,
+                "queue": writer.get("queue", {}) if isinstance(writer, dict) else {},
+                "last_event_at": None,
+                "last_event_id": None,
+                "last_event_type": None,
+                "last_event_error": None,
+                "degradation": {"degraded": bool(reasons), "reasons": reasons},
+            }
     except Exception as exc:
         return {
             "status": "degraded",
@@ -1267,11 +1802,11 @@ def _notification_policy_contract() -> dict[str, Any]:
     }
 
 
-def _fast_runtime_payload() -> dict[str, Any]:
+def _fast_runtime_payload(*, probe: bool = False, write: bool = False) -> dict[str, Any]:
     try:
         from backend import runtime_supervisor
 
-        payload = runtime_supervisor.current_runtime_payload()
+        payload = runtime_supervisor.current_runtime_payload(probe=probe, write=write)
     except Exception as exc:
         payload = {
             "status": "unhealthy",
@@ -1334,7 +1869,7 @@ def _fast_runtime_payload() -> dict[str, Any]:
     payload.setdefault("presence_mode", {"enabled": False, "loop_started": False, "last_domain_health_count": 0})
     payload.setdefault("domain_observer_matrix", {"generated_at": payload.get("updated_at", ""), "domains": {}})
     payload.setdefault("connected_accounts", {"status": "unknown", "count": 0, "entries": []})
-    event_spine = _event_spine_payload()
+    event_spine = _event_spine_payload(include_latest=False)
     payload["event_spine"] = event_spine
     payload["event_writer"] = event_spine.get("writer", {})
     payload["filesystem_watcher"] = event_spine.get("watcher", {})
@@ -1343,8 +1878,54 @@ def _fast_runtime_payload() -> dict[str, Any]:
     return payload
 
 
+def _runtime_readiness_payload() -> dict[str, Any]:
+    try:
+        from backend import runtime_supervisor
+
+        payload = runtime_supervisor.readiness_payload()
+        if not isinstance(payload, dict):
+            raise ValueError("runtime readiness payload is not an object")
+        contract = payload.get("readiness_contract")
+        if not isinstance(contract, dict):
+            raise ValueError("runtime readiness contract is missing")
+        if contract.get("schema") != "cleanhouse.runtime_operator_readiness.v1":
+            raise ValueError("runtime readiness contract schema is invalid")
+        if not isinstance(contract.get("satisfied"), bool):
+            raise ValueError("runtime readiness contract result is invalid")
+        if not isinstance(payload.get("ready"), bool):
+            raise ValueError("runtime readiness result is invalid")
+        if payload["ready"] is not contract["satisfied"]:
+            raise ValueError("runtime readiness result disagrees with its contract")
+    except Exception as exc:
+        return {
+            "status": "degraded",
+            "ready": False,
+            "bootstrap_ready": False,
+            "runtime_state": "unavailable",
+            "reason_codes": ["runtime_supervisor_unavailable"],
+            "readiness_contract": {
+                "schema": "cleanhouse.runtime_operator_readiness.v1",
+                "satisfied": False,
+                "checks": {"evaluation_available": False},
+                "failed_checks": ["evaluation_available"],
+            },
+            "runtime": {
+                "status": "unavailable",
+                "runtime_state": "unavailable",
+                "operator_ready": False,
+                "reason_codes": ["runtime_supervisor_unavailable"],
+            },
+            "error": exc.__class__.__name__,
+        }
+    # Startup readiness must stay a bounded supervisor-only probe. Network and
+    # preservation status can scan large evidence stores and previously held
+    # this endpoint open long enough for the launcher to manufacture a restart
+    # loop. Those subsystem details remain available from their own APIs.
+    return dict(payload)
+
+
 def _fast_status_payload() -> dict[str, Any]:
-    runtime = _fast_runtime_payload()
+    runtime = _fast_runtime_payload(probe=False, write=False)
     runtime_state = str(runtime.get("runtime_state", "unknown") or "unknown")
     reason_codes = [str(code) for code in runtime.get("reason_codes", []) if str(code)]
     issues: list[dict[str, Any]] = []
@@ -1454,9 +2035,9 @@ def _fast_scope_evidence_payload(session_id: str | None) -> dict[str, Any]:
 
     try:
         adapter = get_cleanhouse_monitoring_adapter()
-        receipts = adapter.get_receipts(session_id=session_id).get("receipts", [])
+        receipts = adapter.get_receipts(session_id=session_id, max_records=LOW_PROCESSING_RECEIPT_LIMIT).get("receipts", [])
         alerts = adapter.get_alerts(session_id=session_id).get("alerts", [])
-        approvals = adapter.get_approval_queue(session_id=session_id).get("approval_queue", [])
+        approvals = adapter.get_approval_queue(session_id=session_id, max_records=LOW_PROCESSING_APPROVAL_LIMIT).get("approval_queue", [])
         summaries = []
         summary_builder = getattr(adapter, "_build_workstation_evidence_summaries", None)
         if callable(summary_builder):
@@ -1487,7 +2068,7 @@ def _fast_scope_evidence_payload(session_id: str | None) -> dict[str, Any]:
 
 def _fast_workstation_payload(session_id: str | None, *, include_scope_evidence: bool = False) -> dict[str, Any]:
     resolved_session_id = session_id or os.getenv("CLEANHOUSE_SESSION_ID", DEFAULT_SESSION_ID)
-    runtime = _fast_runtime_payload()
+    runtime = _fast_runtime_payload(probe=False, write=False)
     runtime_state = str(runtime.get("runtime_state", "unknown") or "unknown")
     degraded = runtime_state != "healthy"
     scope_evidence = (
@@ -1527,19 +2108,23 @@ def _fast_workstation_payload(session_id: str | None, *, include_scope_evidence:
     }
 
 
+def _resolve_request_identity(*, allow_api_token: bool):
+    """Delegate to the single CleanHouse device-session/PAT authority."""
+    try:
+        from backend.api import auth as auth_api
+
+        return auth_api._current_identity(allow_api_token=allow_api_token)
+    except Exception:
+        return None
+
+
 def _extract_authenticated_user_id():
-    auth_header = str(request.headers.get("Authorization", "") or "").strip()
-    match = re.fullmatch(r"Bearer\s+(\S+)", auth_header)
-    if not match:
-        return None, _auth_error_response("Authorization header must be in the format: Bearer <token>")
-    token = match.group(1).strip()
-    user = get_user_from_token(token)
-    if not isinstance(user, dict):
-        return None, _auth_error_response("Invalid or expired token")
-    user_id = str(user.get("user_id", "") or "").strip()
-    if not user_id:
-        return None, _auth_error_response("Token does not include user_id")
-    return user_id, None
+    # Connected-account enrollment and provider management are human-session
+    # operations. Personal automation tokens deliberately cannot perform them.
+    identity = _resolve_request_identity(allow_api_token=False)
+    if identity is None:
+        return None, _auth_error_response("A current device session is required")
+    return identity.user_id, None
 
 
 def _optional_positive_int_arg(name: str, *, max_value: int = 500):
@@ -1555,6 +2140,199 @@ def _optional_positive_int_arg(name: str, *, max_value: int = 500):
     if value > max_value:
         return None, _error_response(f"{name} exceeds maximum")
     return value, None
+
+
+def _extract_evidence_request(payload: dict[str, Any] | None = None):
+    if payload is None:
+        get_param = lambda key: request.args.get(key)
+    else:
+        get_param = lambda key: payload.get(key)
+
+    ref_raw = get_param("ref")
+    ref, error = _require_string(ref_raw, "ref", required=False, allow_empty=True, max_len=2048)
+    if error:
+        return None, error
+
+    source_view_raw = get_param("source_view")
+    source_view, error = _require_string(source_view_raw, "source_view", required=False, allow_empty=True, max_len=64)
+    if error:
+        return None, error
+
+    if ref:
+        return {
+            "mode": "ref",
+            "surface": "network",
+            "source_view": source_view or "",
+            "ref": ref,
+        }, None
+
+    surface_raw = get_param("surface")
+    surface, error = _require_string(surface_raw, "surface", max_len=64)
+    if error:
+        return None, _error_response("Either ref, or surface and entity_id are required")
+
+    entity_id, error = _require_string(get_param("entity_id"), "entity_id", max_len=512)
+    if error:
+        return None, error
+
+    return {
+        "mode": "pair",
+        "surface": surface,
+        "entity_id": entity_id,
+        "source_view": source_view or "",
+    }, None
+
+
+def _resolve_evidence_context(data: dict[str, Any]):
+    resolver = get_evidence_context_resolver()
+    source_view = data.get("source_view")
+    if data.get("mode") == "ref":
+        return resolver.resolve_from_ref(data["ref"], source_view=source_view)
+    return resolver.resolve(data["surface"], data["entity_id"], source_view=source_view)
+
+
+def _find_evidence_action(context, action_id: str):
+    actions = get_evidence_context_resolver().actions(context)
+    for action in actions:
+        if action.get("id") == action_id:
+            return action
+    return None
+
+
+_REPORTABLE_CTRL_ACTION_IDS = {
+    "mark_read",
+    "mark_unread",
+    "observe",
+    "restrict",
+    "block",
+    "quarantine",
+    "terminate",
+    "export",
+    "copy",
+    "allow",
+}
+
+
+def _normalize_action_origin(value: Any) -> str:
+    candidate = (str(value or "") or "").strip().lower()
+    return candidate if candidate in {"ctrl", "scan"} else ""
+
+
+def _normalize_subject_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    name = str(value.get("name") or value.get("display_name") or value.get("displayName") or "").strip()
+    subject_type = str(value.get("type") or value.get("subject_type") or value.get("subjectType") or "").strip()
+    return {
+        "name": name,
+        "type": subject_type,
+    }
+
+
+def _normalize_optional_dict(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    return {str(k): v for k, v in value.items()}
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    normalized = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        item_text = item.strip()
+        if item_text and item_text not in normalized:
+            normalized.append(item_text)
+    return normalized
+
+
+def _normalize_boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _bounded_text(value: Any, *, max_len: int = 512) -> str:
+    text = str(value or "").strip()
+    return text[:max_len] if text else ""
+
+
+def _normalize_network_tags_override(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    tags: dict[str, Any] = {}
+    for key in ("status", "state", "explanation"):
+        text = _bounded_text(value.get(key), max_len=160)
+        if text:
+            tags[key] = text
+    reasons = _normalize_string_list(value.get("reasons"))[:8]
+    if reasons:
+        tags["reasons"] = reasons
+    return tags or None
+
+
+def _merge_evidence_context_override(context: EvidenceContext, override: dict[str, Any] | None) -> EvidenceContext:
+    if not override or context.source_surface != "network":
+        return context
+    source_entity_id = _bounded_text(override.get("source_entity_id"), max_len=512) or context.source_entity_id
+    evidence_key = _bounded_text(override.get("evidence_key"), max_len=512)
+    if not evidence_key and source_entity_id.startswith("network:"):
+        evidence_key = source_entity_id
+    if not evidence_key:
+        evidence_key = context.evidence_key
+    evidence_refs = _normalize_string_list(override.get("evidence_refs")) or list(context.evidence_refs)
+    assessment_refs = _normalize_string_list(override.get("assessment_refs")) or list(context.assessment_refs)
+    summary = _bounded_text(override.get("summary"), max_len=900) or context.summary
+    severity = _bounded_text(override.get("severity"), max_len=64) or context.severity
+    validation_state = _bounded_text(override.get("validation_state"), max_len=64) or context.validation_state
+    timeline_event_id = _bounded_text(override.get("timeline_event_id"), max_len=512) or context.timeline_event_id
+    network_reasons = _normalize_string_list(override.get("network_reasons"))[:8] or list(context.network_reasons)
+    network_tags = _normalize_network_tags_override(override.get("network_tags")) or context.network_tags
+    origin = _bounded_text(override.get("origin"), max_len=2048) or context.origin
+    return EvidenceContext(
+        evidence_key=evidence_key,
+        source_surface=context.source_surface,
+        source_view=_bounded_text(override.get("source_view"), max_len=64) or context.source_view,
+        source_entity_id=source_entity_id,
+        evidence_refs=evidence_refs,
+        assessment_refs=assessment_refs,
+        summary=summary,
+        severity=severity,
+        validation_state=validation_state,
+        open_back_route=context.open_back_route,
+        timeline_event_id=timeline_event_id,
+        network_tags=network_tags,
+        network_reasons=network_reasons,
+        origin=origin,
+        trace_id=context.trace_id,
+    )
+
+
+def _should_create_evidence_action_report(*, action_id: str, action_origin: str, create_report: bool) -> bool:
+    normalized_origin = _normalize_action_origin(action_origin)
+    normalized_action = str(action_id or "").strip()
+    if not bool(create_report) or not normalized_action:
+        return False
+    return normalized_origin in {"ctrl", "scan"} and normalized_action in _REPORTABLE_CTRL_ACTION_IDS
+
+
+def _persist_evidence_insight_audit(context, selected_action: dict[str, Any], result: dict[str, Any], *, invoker: str, role: str) -> dict[str, Any]:
+    resolver = get_evidence_context_resolver()
+    audit_entry = resolver.audit_entry(context, action_id="ask_insight", invoker=invoker, role=role)
+    service = get_apple_intelligence_insight_service()
+    audit_entry["outcome_type"] = "apple_intelligence_evidence_insight"
+    audit_entry["voice_role"] = selected_action.get("voice_role") or "Insight"
+    audit_entry["backend_roles"] = selected_action.get("backend_roles") or []
+    audit_entry["capability_source"] = "apple_intelligence_foundation_models"
+    audit_entry["apple_intelligence"] = result.get("apple_intelligence") or {}
+    audit_entry["request_context"] = result.get("evidence_context") or {}
+    audit_entry["response_summary"] = service.audit_summary(result)
+    get_cleanhouse_monitoring_adapter()._persist_action_outcome(audit_entry)
+    return audit_entry
 
 
 def _validate_events_rows_payload(rows: Any):
@@ -1625,48 +2403,6 @@ def _login_report_http_status(payload: dict[str, Any]) -> int:
     return 200
 
 
-def _runtime_readiness_payload() -> dict[str, Any]:
-    try:
-        from backend import runtime_supervisor
-
-        payload = runtime_supervisor.readiness_payload()
-        if not isinstance(payload, dict):
-            raise ValueError("runtime readiness payload is not an object")
-        contract = payload.get("readiness_contract")
-        if not isinstance(contract, dict):
-            raise ValueError("runtime readiness contract is missing")
-        if contract.get("schema") != "cleanhouse.runtime_operator_readiness.v1":
-            raise ValueError("runtime readiness contract schema is invalid")
-        if not isinstance(contract.get("satisfied"), bool):
-            raise ValueError("runtime readiness contract result is invalid")
-        if not isinstance(payload.get("ready"), bool):
-            raise ValueError("runtime readiness result is invalid")
-        if payload["ready"] is not contract["satisfied"]:
-            raise ValueError("runtime readiness result disagrees with its contract")
-        return dict(payload)
-    except Exception as exc:
-        return {
-            "status": "degraded",
-            "ready": False,
-            "bootstrap_ready": False,
-            "runtime_state": "unavailable",
-            "reason_codes": ["runtime_supervisor_unavailable"],
-            "readiness_contract": {
-                "schema": "cleanhouse.runtime_operator_readiness.v1",
-                "satisfied": False,
-                "checks": {"evaluation_available": False},
-                "failed_checks": ["evaluation_available"],
-            },
-            "runtime": {
-                "status": "unavailable",
-                "runtime_state": "unavailable",
-                "operator_ready": False,
-                "reason_codes": ["runtime_supervisor_unavailable"],
-            },
-            "error": exc.__class__.__name__,
-        }
-
-
 @bp.after_request
 def _add_local_cors_headers(response):
     origin = request.headers.get("Origin")
@@ -1683,40 +2419,124 @@ def _add_local_cors_headers(response):
 def health():
     from backend import runtime_supervisor
 
-    return jsonify({
+    challenge = request.args.get("challenge", "")
+    if runtime_supervisor._start_isolated_runtime() and not runtime_supervisor.START_CHALLENGE_RE.fullmatch(challenge):
+        response = jsonify({"status": "error", "reason_code": "start_challenge_required"})
+        response.headers["Cache-Control"] = "no-store"
+        return response, 400
+    payload = {
         "schema": runtime_supervisor.BACKEND_LIVENESS_SCHEMA,
         "status": "ok",
         "alive": True,
         "pid": os.getpid(),
         "boot_id": os.getenv("CLEANHOUSE_BACKEND_BOOT_ID") or None,
+    }
+    isolation = runtime_supervisor.isolated_runtime_evidence(
+        role="backend", boot_id=str(payload["boot_id"] or ""), challenge=challenge,
+    )
+    if isolation:
+        payload["isolation"] = isolation
+        payload.update({key: value for key, value in isolation.items() if key not in {"schema", "role", "binding", "observed_at"}})
+        payload["observed_at"] = isolation["observed_at"]
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@bp.route("/cleanhouse/start/transform", methods=["GET"])
+def start_isolated_transform():
+    """Finite challenge transform available only to START's disposable run."""
+    from backend import runtime_supervisor
+
+    if not runtime_supervisor._start_isolated_runtime():
+        return jsonify({"status": "not_found"}), 404
+    challenge = request.args.get("challenge", "")
+    if not runtime_supervisor.START_CHALLENGE_RE.fullmatch(challenge):
+        response = jsonify({"status": "denied", "reason_code": "start_challenge_required"})
+        response.headers["Cache-Control"] = "no-store"
+        return response, 403
+    response = jsonify({
+        "status": "ok",
+        "challenge_transform": hashlib.sha256(challenge.encode("utf-8")).hexdigest(),
     })
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _start_integration_path() -> Path:
+    return Path(os.environ["CLEANHOUSE_DATA_ROOT"]) / "start-integration" / "single-use.json"
+
+
+@bp.route("/cleanhouse/start/integration/write", methods=["POST"])
+def start_isolated_integration_write():
+    """Producer boundary for START's task-owned single-use integration probe."""
+    from backend import runtime_supervisor
+
+    if not runtime_supervisor._start_isolated_runtime():
+        return jsonify({"status": "not_found"}), 404
+    value = request.get_json(silent=True)
+    nonce = value.get("nonce", "") if isinstance(value, dict) else ""
+    if not runtime_supervisor.START_CHALLENGE_RE.fullmatch(nonce):
+        return jsonify({"status": "denied"}), 403
+    path = _start_integration_path()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"nonce": nonce}, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+    return jsonify({"status": "stored", "component": "cleanhouse.integration.writer"})
+
+
+@bp.route("/cleanhouse/start/integration/read", methods=["GET"])
+def start_isolated_integration_read():
+    """Consumer boundary; successful reads consume the task-owned nonce."""
+    from backend import runtime_supervisor
+
+    if not runtime_supervisor._start_isolated_runtime():
+        return jsonify({"status": "not_found"}), 404
+    nonce = request.args.get("nonce", "")
+    if not runtime_supervisor.START_CHALLENGE_RE.fullmatch(nonce):
+        return jsonify({"status": "denied"}), 403
+    path = _start_integration_path()
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return jsonify({"status": "missing"}), 404
+    if stored.get("nonce") != nonce:
+        return jsonify({"status": "mismatch"}), 409
+    path.unlink()
+    return jsonify({"status": "read", "nonce": nonce, "component": "cleanhouse.integration.reader"})
 
 
 @bp.route("/cleanhouse/status", methods=["GET"])
 def status():
     if request.args.get("ready", "").lower() in {"1", "true", "yes", "on"}:
+        from backend import runtime_supervisor
+
+        challenge = request.args.get("challenge", "")
+        if runtime_supervisor._start_isolated_runtime() and not runtime_supervisor.START_CHALLENGE_RE.fullmatch(challenge):
+            response = jsonify({"status": "error", "ready": False, "reason_code": "start_challenge_required"})
+            response.headers["Cache-Control"] = "no-store"
+            return response, 400
         payload = _runtime_readiness_payload()
         runtime_payload = payload.get("runtime") if isinstance(payload.get("runtime"), dict) else {}
-        event_spine = _event_spine_payload()
-        event_surfaces = _event_spine_surfaces(event_spine)
-        collector_health = _event_spine_collector_health(event_surfaces)
+        payload.setdefault("reason_codes", [str(code) for code in runtime_payload.get("reason_codes", []) if str(code)])
         payload["operator_warning"] = (
             "CleanHouse is unhealthy: runtime memory ceiling exceeded. Backend stopped. Evidence and receipt available."
             if "runtime_memory_ceiling_exceeded" in set(runtime_payload.get("reason_codes", []))
             else ""
         )
-        payload["event_spine"] = {
-            "status": event_spine.get("status", "unknown"),
-            "queue": event_spine.get("queue", {}),
-            "last_event_at": event_spine.get("last_event_at"),
-            "last_event_id": event_spine.get("last_event_id"),
-            "last_event_type": event_spine.get("last_event_type"),
-            "surfaces": event_surfaces,
-            "collector_health": collector_health,
-            "degradation": event_spine.get("degradation", {"degraded": False, "reasons": []}),
-        }
-        payload["notification_policy_contract"] = _notification_policy_contract()
-        return jsonify(payload)
+        isolation = runtime_supervisor.isolated_runtime_evidence(
+            role="backend",
+            boot_id=str((payload.get("backend") or {}).get("boot_id") or ""),
+            challenge=challenge,
+        )
+        if isolation:
+            payload["isolation"] = isolation
+            payload.update({key: value for key, value in isolation.items() if key not in {"schema", "role", "binding", "observed_at"}})
+            payload["observed_at"] = isolation["observed_at"]
+        response = jsonify(payload)
+        response.headers["Cache-Control"] = "no-store"
+        return response, (200 if payload.get("ready") is True else 503)
     if _fast_operator_api_enabled() and not _truthy_arg("full"):
         return jsonify(_fast_status_payload())
 
@@ -1727,7 +2547,7 @@ def status():
 @bp.route("/cleanhouse/runtime", methods=["GET"])
 def runtime():
     if _fast_operator_api_enabled() and not _truthy_arg("full"):
-        return jsonify(_fast_runtime_payload())
+        return jsonify(_fast_runtime_payload(probe=False, write=False))
     return jsonify(get_cleanhouse_monitoring_adapter().get_runtime())
 
 
@@ -1747,6 +2567,59 @@ def application_icon(app_id: str):
     return application_icon_response(app_id)
 
 
+@bp.route("/cleanhouse/allowed-threats", methods=["GET"])
+def allowed_threats_list():
+    state = _read_allowed_threats_state()
+    items = state.get("allowed_threats", [])
+    if not isinstance(items, list):
+        items = []
+    return jsonify({
+        "status": "ok",
+        "allowed_threats": items,
+        "count": len(items),
+    })
+
+
+@bp.route("/cleanhouse/allowed-threats", methods=["POST"])
+def allowed_threats_create():
+    payload, error = _parse_json_payload()
+    if error:
+        return error
+    state = _read_allowed_threats_state()
+    items = state.get("allowed_threats", [])
+    if not isinstance(items, list):
+        items = []
+    item = _allowed_threat_from_payload(payload)
+    items.insert(0, item)
+    state["allowed_threats"] = items
+    state["updated_at"] = item["updated_at"]
+    _write_allowed_threats_state(state)
+    return jsonify({
+        "status": "ok",
+        "allowed_threat": item,
+        "count": len(items),
+    })
+
+
+@bp.route("/cleanhouse/allowed-threats/<allowed_id>", methods=["DELETE"])
+def allowed_threats_delete(allowed_id: str):
+    state = _read_allowed_threats_state()
+    items = state.get("allowed_threats", [])
+    if not isinstance(items, list):
+        items = []
+    remaining = [item for item in items if not isinstance(item, dict) or str(item.get("id", "")) != allowed_id]
+    if len(remaining) == len(items):
+        return jsonify({"status": "error", "message": "Allowed threat not found"}), 404
+    state["allowed_threats"] = remaining
+    state["updated_at"] = _now_iso()
+    _write_allowed_threats_state(state)
+    return jsonify({
+        "status": "ok",
+        "allowed_threats": remaining,
+        "count": len(remaining),
+    })
+
+
 @bp.route("/cleanhouse/scan/system", methods=["POST"])
 def system_scan():
     apps = list_applications_payload(refresh=True)
@@ -1754,9 +2627,28 @@ def system_scan():
     network_payload = get_cleanhouse_monitoring_adapter().get_network(refresh=True)
     process_data = processes_payload.get("data", {}) if isinstance(processes_payload, dict) else {}
     network_data = network_payload.get("data", {}) if isinstance(network_payload, dict) else {}
-    finding_count = int(apps.get("new_count", 0) or 0)
-    finding_count += len(process_data.get("issues", []) if isinstance(process_data.get("issues"), list) else [])
-    finding_count += len(network_data.get("issues", []) if isinstance(network_data.get("issues"), list) else [])
+    findings: list[dict[str, Any]] = []
+    for app in apps.get("apps", []) if isinstance(apps.get("apps"), list) else []:
+        if not isinstance(app, dict) or not app.get("badge"):
+            continue
+        findings.append({
+            "threat_name": "New Application Detected",
+            "severity": "info",
+            "target_type": "application",
+            "target_name": str(app.get("name", "") or "Unavailable"),
+            "target_path": str(app.get("path", "") or ""),
+            "source": "applications",
+            "reason": "Application has not been previously adopted by CleanHouse.",
+            "recommended_action": "Inspect application identity and activity.",
+            "evidence_refs": [],
+            "receipt_ref": "",
+            "allowable": True,
+        })
+    for issue in process_data.get("issues", []) if isinstance(process_data.get("issues"), list) else []:
+        findings.append(_scan_finding_from_issue(issue, source="processes", fallback_name="Process Finding"))
+    for issue in network_data.get("issues", []) if isinstance(network_data.get("issues"), list) else []:
+        findings.append(_scan_finding_from_issue(issue, source="network", fallback_name="Network Finding"))
+    finding_count = len(findings)
     scan_id = "system-scan-" + _artifact_id(_now_iso(), str(apps.get("count", 0)), str(finding_count))
     return jsonify({
         "status": "ok",
@@ -1764,6 +2656,8 @@ def system_scan():
         "scope": "whole_system",
         "summary": "Whole system scan completed with app inventory, process, and network evidence.",
         "finding_count": finding_count,
+        "findings": findings,
+        "threats": findings,
         "evidence_ref": f"local://cleanhouse/system-scan/evidence/{scan_id}",
         "receipt_ref": f"local://cleanhouse/system-scan/receipt/{scan_id}",
         "next_action": "Review applications with badges or attention states first.",
@@ -1777,33 +2671,4144 @@ def system_scan():
     })
 
 
-def _wireshark_status_payload() -> dict[str, Any]:
-    tshark = shutil.which("tshark")
-    wireshark = shutil.which("wireshark") or shutil.which("Wireshark")
-    dumpcap = shutil.which("dumpcap")
-    status = "available" if tshark else "missing"
-    message = "Wireshark/tshark capture support is available." if tshark else "tshark is not available; install Wireshark CLI tools to enable packet-backed network evidence."
+def _cleanhouse_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _bundled_wireshark_root() -> Path:
+    return _cleanhouse_root() / "bundled" / "wireshark" / "darwin-arm64"
+
+
+def _bundled_wireshark_paths() -> dict[str, Path]:
+    root = _bundled_wireshark_root()
+    return {
+        "root": root,
+        "manifest": root / "manifest.json",
+        "tshark": root / "bin" / "tshark",
+        "dumpcap": root / "bin" / "dumpcap",
+    }
+
+
+NETWORK_STATUS_TAGS = {"OBSERVING", "QUIET", "LOCAL ONLY", "OFFLINE"}
+NETWORK_STATE_TAGS = {"HEALTHY", "DEGRADED", "CRITICAL", "UNKNOWN"}
+NETWORK_DEGRADED_REASONS = {
+    "Destination name missing",
+    "Unknown app active",
+    "New destination seen",
+    "Many destinations contacted",
+    "High connection volume",
+    "Unusual port used",
+    "Unencrypted web request",
+    "Capture engine limited",
+    "Permission blocks capture",
+    "Fallback mode active",
+    "Interface changed",
+    "Connection attempts failed",
+    "Local traffic only",
+}
+NETWORK_CRITICAL_REASONS = {
+    "Known malicious endpoint",
+    "Blocked threat active",
+    "Data exfiltration suspected",
+    "Malware process active",
+    "Suspicious listener exposed",
+    "Repeated failed connections",
+    "Unsigned app communicating",
+    "Unexpected inbound access",
+    "Privilege process online",
+    "Quarantine bypass suspected",
+}
+
+
+def _network_tag_reason_from_summary(reason: str) -> str:
+    mapping = {
+        "permission_blocked": "Permission blocks capture",
+        "capture_failed": "Capture engine limited",
+        "engine_unavailable": "Capture engine limited",
+        "capture_backlog": "Capture engine limited",
+        "timeout": "Connection attempts failed",
+        "fallback_mode": "Fallback mode active",
+        "local_only": "Local traffic only",
+    }
+    return mapping.get(str(reason or ""), "")
+
+
+def _network_event_critical_reason(event: dict[str, Any]) -> str:
+    text = " ".join(str(event.get(key) or "") for key in ("reason", "severity", "category", "meaning", "summary")).lower()
+    if event.get("known_malicious") or "known malicious" in text:
+        return "Known malicious endpoint"
+    if "blocked threat" in text:
+        return "Blocked threat active"
+    if "exfil" in text:
+        return "Data exfiltration suspected"
+    if "malware" in text:
+        return "Malware process active"
+    if "suspicious listener" in text:
+        return "Suspicious listener exposed"
+    if "unexpected inbound" in text:
+        return "Unexpected inbound access"
+    if "quarantine bypass" in text:
+        return "Quarantine bypass suspected"
+    return ""
+
+
+def _network_event_degraded_reason(event: dict[str, Any]) -> str:
+    if str(event.get("event_type") or "") == NETWORK_TIMELINE_GAP_EVENT_TYPE:
+        return "Capture engine limited"
+    external = bool(event.get("dst_ip")) and not _is_local_network_host(str(event.get("dst_ip") or ""))
+    if event.get("suspicious") and _network_event_app(event) == "Unknown app":
+        return "Unknown app active"
+    if external and _network_event_app(event) == "Unknown app":
+        return "Unknown app active"
+    if external and not (event.get("dns_query") or event.get("http_host") or event.get("tls_sni")):
+        return "Destination name missing"
+    if external and str(event.get("dst_port") or "") == "80":
+        return "Unencrypted web request"
+    common_ports = {"", "22", "25", "53", "80", "123", "443", "465", "587", "993", "995", "5223", "5228", "5353"}
+    if external and str(event.get("dst_port") or "") not in common_ports:
+        return "Unusual port used"
+    return ""
+
+
+def _network_fixed_tags(ui_state: str, events_payload: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, Any]:
+    """Describe capture operation only; posture lives in assessment_summary."""
+    reason = _network_tag_reason_from_summary(str(summary.get("reason") or ""))
+    if ui_state in {"ERROR", "CAPTURE_BLOCKED"}:
+        return _network_tags("OFFLINE", "DEGRADED", [reason or "Capture engine limited"], reason or "Capture engine limited")
+    if ui_state == "WARMING":
+        return _network_tags("QUIET", "DEGRADED", ["Restarting"], "Waiting for network capture after restart.")
+    if not events_payload:
+        if ui_state == "READY":
+            return _network_tags("OBSERVING", "HEALTHY", [], "Capture is running and awaiting network traffic.")
+        return _network_tags("QUIET", "HEALTHY", [], "No recent network activity is visible.")
+    if any(
+        str(item.get("event_type") or "") == NETWORK_TIMELINE_GAP_EVENT_TYPE
+        or bool(item.get("gap"))
+        or str(item.get("coverage_state") or "").lower() in {"gap", "unknown", "missing", "unavailable"}
+        for item in events_payload
+    ):
+        return _network_tags(
+            "OBSERVING",
+            "DEGRADED",
+            ["Evidence continuity gap"],
+            "Retained Network evidence has an explicit continuity gap.",
+        )
+    external = [
+        item for item in events_payload
+        if (item.get("dst_ip") and not _is_local_network_host(str(item.get("dst_ip") or "")))
+        or int(item.get("externalOnlyCount") or 0) > 0
+    ]
+    status = "LOCAL ONLY" if not external else "OBSERVING"
+    return _network_tags(status, "HEALTHY", [], "Network activity is being observed.")
+
+
+def _network_ui_contract(
+    state: str,
+    *,
+    events: list[dict[str, Any]] | None = None,
+    summary: dict[str, Any] | None = None,
+    status_code: int = 200,
+) -> tuple[dict[str, Any], int]:
+    ui_state = state if state in NETWORK_UI_STATES else "ERROR"
+    safe_events = events if isinstance(events, list) else []
+    safe_summary = summary.copy() if isinstance(summary, dict) else {}
+    if ui_state != "ERROR":
+        safe_summary.setdefault("event_count", len(safe_events))
+    return {
+        "state": ui_state,
+        "server_boot_id": NETWORK_SERVER_BOOT_ID,
+        "vvault": _network_vvault_readiness(),
+        "tags": _network_fixed_tags(ui_state, safe_events, safe_summary),
+        "events": safe_events,
+        "summary": safe_summary,
+    }, status_code
+
+
+def _network_collector_contract(health: dict[str, Any] | None) -> tuple[str, str]:
+    """Map collector evidence onto the existing Network UI vocabulary."""
+    safe_health = health if isinstance(health, dict) else {}
+    collector_state = str(safe_health.get("state") or safe_health.get("status") or "stopped").lower()
+    reason_code = str(safe_health.get("reason_code") or "").lower()
+    last_error = str(safe_health.get("last_error") or "").lower()
+    evidence = f"{reason_code} {last_error}"
+    if collector_state == "running":
+        return "CAPTURING", "events_observed" if int(safe_health.get("last_packet_sequence") or 0) > 0 else "no_data"
+    if collector_state == "starting":
+        return "WARMING", "waiting_for_capture"
+    if collector_state == "blocked" or "permission" in evidence or "operation not permitted" in evidence:
+        return "CAPTURE_BLOCKED", "permission_blocked"
+    if "engine_unavailable" in evidence or "capture_engine_unavailable" in evidence:
+        return "ERROR", "engine_unavailable"
+    if collector_state in {"degraded", "stopped", "stopping"}:
+        return "ERROR", "capture_failed"
+    return "ERROR", "capture_failed"
+
+
+def _network_apply_collector_truth(payload: dict[str, Any], health: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep request/data success separate from capture-engine health."""
+    safe_health = dict(health) if isinstance(health, dict) else {}
+    capture_state, capture_reason = _network_collector_contract(safe_health)
+    events_payload = payload.get("events") if isinstance(payload.get("events"), list) else []
+    summary = dict(payload.get("summary")) if isinstance(payload.get("summary"), dict) else {}
+    summary["capture_state"] = str(safe_health.get("state") or safe_health.get("status") or "stopped").lower()
+    covered_events = [
+        item for item in events_payload
+        if not bool(item.get("gap"))
+        and str(item.get("coverage_state") or "").lower() not in {"gap", "unknown", "missing", "unavailable"}
+    ]
+    ingestion_latency_ms = safe_health.get("ingestion_latency_ms")
+    try:
+        capture_backlogged = (
+            capture_state == "CAPTURING"
+            and ingestion_latency_ms is not None
+            and float(ingestion_latency_ms) > NETWORK_CAPTURE_STALE_AFTER_MS
+        )
+    except (TypeError, ValueError):
+        capture_backlogged = False
+    if capture_backlogged:
+        capture_reason = "capture_backlog"
+    summary["capture_reason"] = capture_reason
+    summary["data_state"] = "stale" if capture_backlogged else ("available" if covered_events else "no_data")
+    if capture_state in {"ERROR", "CAPTURE_BLOCKED", "WARMING"}:
+        summary["reason"] = capture_reason
+    elif capture_backlogged:
+        summary["reason"] = capture_reason
+    elif covered_events:
+        summary.setdefault("reason", "events_observed")
+    else:
+        summary["reason"] = "no_data"
+    payload["state"] = capture_state
+    payload["summary"] = summary
+    payload["tags"] = _network_fixed_tags(capture_state, events_payload, summary)
+    if capture_backlogged:
+        payload["tags"] = _network_tags(
+            payload["tags"].get("status") or "OBSERVING",
+            "DEGRADED",
+            ["Capture engine limited"],
+            "Captured evidence is delayed while the bounded ingestion pipeline catches up.",
+        )
+    payload["collector"] = safe_health
+    payload["powered_by_wireshark"] = bool(
+        capture_state == "CAPTURING"
+        and int(safe_health.get("last_packet_sequence") or 0) > 0
+    )
+    return payload
+
+
+def _network_error_contract(reason: str, *, status_code: int = 400) -> tuple[dict[str, Any], int]:
+    return _network_ui_contract(
+        "ERROR",
+        events=[],
+        summary={"reason": reason},
+        status_code=status_code,
+    )
+
+
+def _network_vvault_readiness(*, allow_keychain_read: bool = True) -> dict[str, Any]:
+    return vvault_sync.status(surface="network", allow_keychain_read=allow_keychain_read)
+
+
+def _network_vvault_required_error() -> tuple[dict[str, Any], int] | None:
+    if not _truthy_arg("require_vvault") or _network_vvault_readiness()["ready"]:
+        return None
+    return _network_error_contract("vvault_persistence_unavailable", status_code=503)
+
+
+def _network_capture_blocked_contract() -> tuple[dict[str, Any], int]:
+    return _network_ui_contract(
+        "CAPTURE_BLOCKED",
+        events=[],
+        summary={"reason": "permission_blocked"},
+        status_code=200,
+    )
+
+
+def _bundled_wireshark_error(
+    code: str,
+    public_message: str,
+    *,
+    engine_state: str = "failed",
+    reason: str = "Capture engine limited",
+    explanation: str | None = None,
+) -> tuple[dict[str, Any], int]:
+    reason_map = {
+        "engine_not_initialized": "engine_unavailable",
+        "engine_failed": "capture_failed",
+        "invalid_capture_duration": "capture_failed",
+        "capture_timeout": "timeout",
+        "capture_permission_denied": "permission_blocked",
+        "capture_failed": "capture_failed",
+    }
+    safe_reason = reason_map.get(code, "capture_failed")
+    if safe_reason == "permission_blocked":
+        return _network_capture_blocked_contract()
+    return _network_error_contract(safe_reason)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_bundled_wireshark_manifest(manifest_path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    if not manifest_path.exists():
+        return None, "missing_manifest"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, "invalid_manifest"
+    if not isinstance(payload, dict):
+        return None, "invalid_manifest"
+    return payload, None
+
+
+def _manifest_hash(manifest: dict[str, Any], relative_path: str) -> str | None:
+    for section_name in ("components", "files"):
+        section = manifest.get(section_name)
+        if not isinstance(section, dict) or relative_path not in section:
+            continue
+        entry = section[relative_path]
+        if isinstance(entry, str):
+            return entry
+        if isinstance(entry, dict) and isinstance(entry.get("sha256"), str):
+            return entry["sha256"]
+    return None
+
+
+def _parse_dumpcap_interfaces(output: str) -> list[dict[str, str]]:
+    interfaces = []
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.match(r"^(\d+)\.\s+([^\s]+)(?:\s+\((.*)\))?$", line)
+        if match:
+            interface_id, name, label = match.groups()
+            interfaces.append({
+                "id": interface_id,
+                "name": name,
+                "label": label or name,
+            })
+        else:
+            interfaces.append({
+                "id": str(len(interfaces) + 1),
+                "name": line,
+                "label": line,
+            })
+    return interfaces
+
+
+def _wireshark_permission_denied(stderr: str) -> bool:
+    text = str(stderr or "").lower()
+    return (
+        "operation not permitted" in text
+        or "permission denied" in text
+        or "cannot open bpf" in text
+        or "/dev/bpf" in text
+    )
+
+
+def _wireshark_capture_error(stderr: str) -> tuple[dict[str, Any], int]:
+    if _wireshark_permission_denied(stderr):
+        return _bundled_wireshark_error(
+            "capture_permission_denied",
+            "Packet capture permission is blocked.",
+            reason="Permission blocks capture",
+            explanation="macOS denied access to the packet capture device.",
+        )
+    return _bundled_wireshark_error("capture_failed", "Capture system unavailable.")
+
+
+def _bundled_wireshark_engine_interfaces() -> tuple[list[dict[str, str]], tuple[dict[str, Any], int] | None]:
+    paths = _bundled_wireshark_paths()
+    manifest, manifest_error = _load_bundled_wireshark_manifest(paths["manifest"])
+    if manifest_error:
+        if manifest_error == "missing_manifest":
+            return [], _bundled_wireshark_error(
+                "engine_not_initialized",
+                "Packet capture engine is not available.",
+                engine_state="not_ready",
+            )
+        return [], _bundled_wireshark_error("engine_failed", "Network engine failed to start.")
+
+    for name in ("tshark", "dumpcap"):
+        binary_path = paths[name]
+        relative_path = f"bin/{name}"
+        if not binary_path.exists():
+            return [], _bundled_wireshark_error(
+                "engine_not_initialized",
+                "Packet capture engine is not available.",
+                engine_state="not_ready",
+            )
+        if not binary_path.is_file():
+            return [], _bundled_wireshark_error("engine_failed", "Network engine failed to start.")
+        if not os.access(binary_path, os.X_OK):
+            return [], _bundled_wireshark_error("engine_failed", "Network engine failed to start.")
+        expected_hash = _manifest_hash(manifest or {}, relative_path)
+        if not expected_hash:
+            return [], _bundled_wireshark_error("engine_failed", "Network engine failed to start.")
+        actual_hash = _sha256_file(binary_path)
+        if actual_hash.lower() != expected_hash.lower():
+            return [], _bundled_wireshark_error("engine_failed", "Network engine failed to start.")
+
+    try:
+        completed = subprocess.run(
+            [str(paths["dumpcap"]), "-D"],
+            cwd=str(paths["root"]),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=5,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return [], _bundled_wireshark_error("engine_failed", "Capture system unavailable.")
+    except OSError as exc:
+        return [], _bundled_wireshark_error("engine_failed", "Network engine failed to start.")
+
+    if completed.returncode != 0:
+        return [], _bundled_wireshark_error("engine_failed", "Capture system unavailable.")
+
+    return _parse_dumpcap_interfaces(completed.stdout), None
+
+
+def _validate_bundled_wireshark_tools() -> tuple[dict[str, Any], int]:
+    interfaces, error = _bundled_wireshark_engine_interfaces()
+    if error:
+        return error
+    return _network_ui_contract(
+        "READY",
+        summary={
+            "reason": "ready",
+        },
+    )
+
+
+def _select_capture_interface(interfaces: list[dict[str, str]]) -> str | None:
+    requested = request.args.get("interface", "").strip()
+    if requested:
+        for interface in interfaces:
+            if requested in (interface.get("id"), interface.get("name")):
+                return interface.get("name")
+        return requested
+    active_interfaces = _active_capture_interfaces()
+    for interface in interfaces:
+        name = interface.get("name", "")
+        if name in active_interfaces:
+            return name
+    for preferred in ("en0", "en1"):
+        for interface in interfaces:
+            if interface.get("name") == preferred:
+                return preferred
+    for interface in interfaces:
+        name = interface.get("name", "")
+        if name and not name.startswith(("lo", "utun")):
+            return name
+    return interfaces[0].get("name") if interfaces else None
+
+
+def _select_live_capture_interfaces(interfaces: list[dict[str, str]]) -> list[str]:
+    requested = request.args.get("interface", "").strip()
+    if requested:
+        for interface in interfaces:
+            if requested in (interface.get("id"), interface.get("name")):
+                return [str(interface.get("name") or requested)]
+        return [requested]
+
+    available = [str(interface.get("name") or "").strip() for interface in interfaces]
+    available = [name for name in available if name]
+    active_interfaces = _active_capture_interfaces()
+    selected: list[str] = []
+
+    def add(name: str) -> None:
+        if name and name in available and name not in selected:
+            selected.append(name)
+
+    add("lo0")
+    for name in sorted(active_interfaces):
+        if not name.startswith("utun"):
+            add(name)
+    for preferred in ("en0", "en1"):
+        add(preferred)
+
+    if selected:
+        return selected
+    single = _select_capture_interface(interfaces)
+    return [single] if single else []
+
+
+def _active_capture_interfaces() -> set[str]:
+    active = set()
+    try:
+        completed = subprocess.run(
+            ["ifconfig"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return active
+    current = ""
+    block: list[str] = []
+    for line in completed.stdout.splitlines():
+        if line and not line.startswith(("\t", " ")):
+            if current and _ifconfig_block_is_active(block):
+                active.add(current)
+            current = line.split(":", 1)[0].strip()
+            block = [line]
+        else:
+            block.append(line)
+    if current and _ifconfig_block_is_active(block):
+        active.add(current)
+    return active
+
+
+def _ifconfig_block_is_active(lines: list[str]) -> bool:
+    text = "\n".join(lines).lower()
+    return "status: active" in text and ("\n\tinet " in text or "\n inet " in text)
+
+
+def _layer_value(layers: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = layers.get(key)
+        if isinstance(value, list) and value:
+            return str(value[0])
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _packet_protocol(layers: dict[str, Any]) -> str:
+    for protocol in ("http", "dns", "tls", "tcp", "udp", "icmp", "icmpv6", "ipv6", "ip"):
+        if protocol in layers:
+            return protocol.upper()
+    return "UNKNOWN"
+
+
+def _protocol_from_frame_protocols(value: Any) -> str:
+    protocols = str(value or "").lower()
+    for protocol in ("http", "dns", "tls", "tcp", "udp", "icmpv6", "icmp", "ipv6", "ip"):
+        if protocol in protocols.split(":"):
+            return protocol.upper()
+    return "UNKNOWN"
+
+
+def _network_event_summary(event: dict[str, Any]) -> str:
+    if event.get("dns_query"):
+        return f"DNS lookup for {event['dns_query']}"
+    if event.get("http_host"):
+        return f"HTTP connection to {event['http_host']}"
+    if event.get("tls_sni"):
+        return f"TLS connection to {event['tls_sni']}"
+    destination = event.get("dst_ip") or "unknown destination"
+    protocol = event.get("protocol") or "network"
+    port = f":{event['dst_port']}" if event.get("dst_port") else ""
+    return f"{protocol} packet to {destination}{port}"
+
+
+def _is_local_network_host(value: str) -> bool:
+    host = str(value or "").strip().lower()
+    normalized = host.strip("[]")
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        address = None
+    if address:
+        local_ranges = (
+            "10.0.0.0/8",
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "224.0.0.0/4",
+            "::1/128",
+            "fc00::/7",
+            "fe80::/10",
+            "ff00::/8",
+        )
+        return any(address in ipaddress.ip_network(cidr) for cidr in local_ranges)
+    return (
+        not host
+        or host == "*"
+        or host.startswith("127.")
+        or host.startswith("[::1]")
+        or host.startswith("::1")
+        or host.startswith("localhost")
+        or host.startswith("10.")
+        or host.startswith("192.168.")
+        or host.startswith("172.16.")
+        or host.startswith("[fe80:")
+        or "->127." in host
+        or "->[::1]" in host
+        or "->10." in host
+        or "->192.168." in host
+        or "->172.16." in host
+        or "->[fe80:" in host
+    )
+
+
+def _network_ip_is_multicast(value: Any) -> bool:
+    try:
+        return ipaddress.ip_address(str(value or "").strip().strip("[]")).is_multicast
+    except ValueError:
+        return False
+
+
+def _network_ip_is_link_local(value: Any) -> bool:
+    try:
+        return ipaddress.ip_address(str(value or "").strip().strip("[]")).is_link_local
+    except ValueError:
+        return False
+
+
+def _network_endpoint_is_cloudflare(value: Any) -> bool:
+    return _network_ip_in_any_cidr(
+        value,
+        (
+            "104.16.0.0/13",
+            "162.158.0.0/15",
+            "172.64.0.0/13",
+            "2606:4700::/32",
+        ),
+    )
+
+
+def _network_endpoint_is_apple_push(value: Any, port: Any) -> bool:
+    return str(port or "").strip() == "5223" and _network_ip_in_any_cidr(value, ("17.0.0.0/8",))
+
+
+def _network_is_mdns_or_bonjour(event: dict[str, Any]) -> bool:
+    destination = str(event.get("dst_ip") or "").strip().lower()
+    port = str(event.get("dst_port") or event.get("src_port") or "").strip()
+    return port == "5353" or destination in {"224.0.0.251", "ff02::fb"} or ".local" in str(event.get("destination_display") or "").lower()
+
+
+def _network_is_ipv6_neighbor_discovery(event: dict[str, Any]) -> bool:
+    protocol = str(event.get("protocol") or "").upper()
+    return protocol == "ICMPV6" and (
+        _network_ip_is_link_local(event.get("src_ip"))
+        or _network_ip_is_link_local(event.get("dst_ip"))
+        or _network_ip_is_multicast(event.get("dst_ip"))
+    )
+
+
+def _network_is_routine_local_discovery(event: dict[str, Any]) -> bool:
+    if event.get("suspicious") or event.get("known_malicious"):
+        return False
+    if _network_is_mdns_or_bonjour(event) or _network_is_ipv6_neighbor_discovery(event):
+        return True
+    app = _network_event_app(event).lower()
+    return app == "rapportd" and (
+        _network_ip_is_link_local(event.get("src_ip"))
+        or _network_ip_is_link_local(event.get("dst_ip"))
+    )
+
+
+def _service_label(port: Any) -> str:
+    try:
+        value = int(port)
+    except (TypeError, ValueError):
+        return "Network connection"
+    labels = {
+        53: "DNS lookup",
+        80: "Web request (HTTP)",
+        443: "Secure web request (HTTPS)",
+        5000: "Local service",
+        5050: "Local service",
+        5173: "Local app traffic",
+        5223: "Apple Push notification channel",
+        5228: "Push notification channel",
+        5353: "Local device discovery",
+        5432: "Local database",
+        8000: "Local service",
+    }
+    return labels.get(value, "Network connection")
+
+
+def _network_external_service_label(event: dict[str, Any]) -> str:
+    destination = str(
+        event.get("dns_query")
+        or event.get("http_host")
+        or event.get("tls_sni")
+        or event.get("destination_display")
+        or event.get("dst_ip")
+        or ""
+    ).strip().lower()
+    if destination.endswith(".cloudfront.net") or ".cloudfront.net:" in destination:
+        return "a CloudFront-hosted service"
+    if "akamai" in destination or "akadns" in destination:
+        return "an Akamai-hosted content delivery service"
+    if _network_endpoint_is_cloudflare(event.get("dst_ip")) or _network_endpoint_is_cloudflare(event.get("src_ip")):
+        return "a Cloudflare-hosted service"
+    return "an external service"
+
+
+def _network_external_activity_summary(app: str, event: dict[str, Any]) -> str:
+    service = _network_external_service_label(event)
+    port = str(event.get("dst_port") or "").strip()
+    if port == "443":
+        return f"{app} is securely communicating with {service}."
+    if port == "80":
+        return f"{app} is making an unencrypted web request to {service}."
+    return f"{app} is communicating with {service}."
+
+
+def _network_summary_exposes_raw_external_destination(event: dict[str, Any]) -> bool:
+    summary = str(event.get("summary") or "").strip().lower()
+    if not summary:
+        return False
+    destination_values = [
+        event.get("destination_display"),
+        event.get("dns_query"),
+        event.get("http_host"),
+        event.get("tls_sni"),
+        event.get("dst_ip"),
+    ]
+    destinations = {str(value or "").strip().lower() for value in destination_values if str(value or "").strip()}
+    destinations.update(
+        _network_endpoint(value, event.get("dst_port")).lower()
+        for value in destination_values
+        if str(value or "").strip()
+    )
+    if " is connecting to " in summary and any(destination and destination in summary for destination in destinations):
+        return True
+    if ".cloudfront.net" in summary or "akamai" in summary or "akadns" in summary:
+        return True
+    return bool(re.search(r"\b[a-z0-9-]+(?:\.[a-z0-9-]+)+:\d+\b", summary))
+
+
+def _clean_process_name(value: Any) -> str:
+    text = str(value or "Unknown app").replace("\\x20", " ").strip()
+    return text or "Unknown app"
+
+
+def _network_endpoint(host: Any, port: Any) -> str:
+    host_text = str(host or "").strip()
+    if not host_text:
+        return "Unavailable"
+    port_text = str(port or "").strip()
+    return f"{host_text}:{port_text}" if port_text and port_text != "0" else host_text
+
+
+def _network_event_datetime(value: Any) -> datetime:
+    if value is None or value == "":
+        return datetime.now(timezone.utc)
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        if numeric > 100000000000:
+            numeric = numeric / 1000.0
+        return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    text = str(value).strip()
+    try:
+        numeric = float(text)
+        if numeric > 100000000000:
+            numeric = numeric / 1000.0
+        return datetime.fromtimestamp(numeric, tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return datetime.now(timezone.utc)
+
+
+def _network_event_iso(value: Any) -> str:
+    return _network_event_datetime(value).isoformat().replace("+00:00", "Z")
+
+
+def _network_event_fingerprint(event: dict[str, Any]) -> str:
+    seed = "|".join(
+        str(event.get(key) or "")
+        for key in (
+            "timestamp",
+            "packet_index",
+            "process",
+            "pid",
+            "src_ip",
+            "src_port",
+            "dst_ip",
+            "dst_port",
+            "dns_query",
+            "tls_sni",
+            "http_host",
+            "protocol",
+        )
+    )
+    return "network:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+
+
+def _network_event_severity(event: dict[str, Any]) -> str:
+    text = " ".join(str(event.get(key) or "") for key in ("severity", "reason", "category", "meaning", "summary")).lower()
+    if event.get("known_malicious") or "known malicious" in text or "malware" in text or "exfil" in text:
+        return "critical"
+    if event.get("suspicious") or "suspicious" in text or "unusual" in text or "missing" in text:
+        return "warning"
+    if _network_event_app(event) == "Unknown app" and not _is_local_network_host(str(event.get("dst_ip") or "")):
+        return "warning"
+    if _network_is_routine_local_discovery(event):
+        return "info"
+    if _is_local_network_host(str(event.get("dst_ip") or "")):
+        return "info"
+    return "low"
+
+
+def _network_event_confidence(event: dict[str, Any]) -> str:
+    if event.get("process") and str(event.get("process")).lower() != "unknown app":
+        return "high"
+    if event.get("dns_query") or event.get("http_host") or event.get("tls_sni"):
+        return "medium"
+    return "low"
+
+
+def _network_event_app(event: dict[str, Any]) -> str:
+    app = str(event.get("process") or event.get("app") or event.get("application") or "").strip()
+    return app if app and app.lower() not in {"unknown", "unknown app"} else "Unknown app"
+
+
+def _network_app_name_is_internal_engine(name: Any) -> bool:
+    return "wireshark" in str(name or "").strip().lower()
+
+
+def _network_public_app_name(name: Any) -> str:
+    text = str(name or "Unknown app").strip() or "Unknown app"
+    return "Network capture subsystem" if _network_app_name_is_internal_engine(text) else text
+
+
+def _network_app_identity_index(refresh: bool = False) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
+    try:
+        payload = list_applications_payload(refresh=refresh)
+    except Exception:
+        return {}, []
+    apps = payload.get("apps") if isinstance(payload, dict) else []
+    index: dict[str, dict[str, Any]] = {}
+    running_apps: list[dict[str, Any]] = []
+    for app in apps if isinstance(apps, list) else []:
+        if not isinstance(app, dict):
+            continue
+        app_name = _network_public_app_name(app.get("name"))
+        identity = {
+            "process": app_name,
+            "app": app_name,
+            "app_bundle_id": str(app.get("bundle_id") or ""),
+            "app_category": str(app.get("category") or "other"),
+            "confidence": "high",
+        }
+        for value in (app.get("name"), app.get("bundle_id")):
+            key = str(value or "").strip().lower()
+            if key:
+                index[key] = identity
+        if app.get("running") and not _network_app_name_is_internal_engine(app.get("name")):
+            running_apps.append({
+                "name": identity["app"],
+                "bundle_id": identity["app_bundle_id"],
+                "category": identity["app_category"],
+                "observed_network_events": 0,
+            })
+        for proc in app.get("processes", []) if isinstance(app.get("processes"), list) else []:
+            if not isinstance(proc, dict):
+                continue
+            for value in (proc.get("pid"), proc.get("process"), proc.get("name"), proc.get("command")):
+                key = str(value or "").strip().lower()
+                if key:
+                    index[key] = identity
+    return index, running_apps
+
+
+def _network_identity_from_process(process: Any, pid: Any, app_index: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    for value in (pid, process):
+        key = str(value or "").strip().lower()
+        if key and key in app_index:
+            return app_index[key]
+    process_text = str(process or "").strip().lower()
+    if process_text:
+        for key, identity in app_index.items():
+            if key and (key in process_text or process_text in key):
+                return identity
+    return None
+
+
+def _network_ip_in_any_cidr(value: Any, cidrs: tuple[str, ...]) -> bool:
+    try:
+        address = ipaddress.ip_address(str(value or "").strip().strip("[]"))
+    except ValueError:
+        return False
+    for cidr in cidrs:
+        try:
+            if address in ipaddress.ip_network(cidr):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _network_identity_from_destination(event: dict[str, Any], app_index: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    dst_ip = event.get("dst_ip")
+    src_ip = event.get("src_ip")
+    cloudflare_ranges = (
+        "104.16.0.0/13",
+        "162.158.0.0/15",
+        "172.64.0.0/13",
+        "2606:4700::/32",
+    )
+    if _network_ip_in_any_cidr(dst_ip, cloudflare_ranges) or _network_ip_in_any_cidr(src_ip, cloudflare_ranges):
+        for key, identity in app_index.items():
+            if "cloudflare" in key or "warp" in key:
+                return identity
+    return None
+
+
+def _network_enrichment_index(refresh: bool = False) -> dict[str, dict[str, Any]]:
+    global _NETWORK_RUNNING_APPS, _NETWORK_RUNNING_APPS_AT
+    app_index, running_apps = _network_app_identity_index(refresh=False)
+    with _NETWORK_RUNNING_APPS_LOCK:
+        _NETWORK_RUNNING_APPS = [dict(item) for item in running_apps]
+        _NETWORK_RUNNING_APPS_AT = time.monotonic()
+    index: dict[str, dict[str, Any]] = _network_lsof_enrichment_index(app_index)
+    cloudflare_identity = next(
+        (identity for key, identity in app_index.items() if "cloudflare" in key or "warp" in key),
+        None,
+    )
+    if cloudflare_identity:
+        index["_cloudflare_identity"] = cloudflare_identity
+    if not refresh:
+        return index
+    try:
+        snapshot = get_cleanhouse_monitoring_adapter().get_network(refresh=refresh)
+    except Exception:
+        return index
+    data = snapshot.get("data") if isinstance(snapshot, dict) and isinstance(snapshot.get("data"), dict) else {}
+    connections = data.get("connections") if isinstance(data.get("connections"), list) else []
+    for conn in connections:
+        if not isinstance(conn, dict):
+            continue
+        process = _clean_process_name(conn.get("process"))
+        identity = _network_identity_from_process(process, conn.get("pid"), app_index) or {}
+        row = {
+            "process": identity.get("process") or process,
+            "app": identity.get("app") or process,
+            "app_bundle_id": identity.get("app_bundle_id") or "",
+            "app_category": identity.get("app_category") or ("system" if process == "System" else "other"),
+            "pid": conn.get("pid"),
+            "confidence": identity.get("confidence") or ("medium" if process != "Unknown app" else "low"),
+        }
+        local_host = str(conn.get("local_host") or "").strip()
+        local_port = str(conn.get("local_port") or "").strip()
+        remote_port = conn.get("remote_port") or conn.get("port")
+        remote_port_text = str(remote_port or "").strip()
+        if local_port:
+            index[f"local_port:{local_port}"] = row
+        if local_host and local_port:
+            index[f"local:{local_host}:{local_port}"] = row
+        for host_key in ("domain", "remote_host", "host", "address"):
+            host = str(conn.get(host_key) or "").strip()
+            if not host:
+                continue
+            index[host] = row
+            if remote_port:
+                index[f"{host}:{remote_port}"] = row
+                index[f"remote:{host}:{remote_port}"] = row
+            if local_host and local_port:
+                index[f"flow:{local_host}:{local_port}->{host}:{remote_port_text}"] = row
+    return index
+
+
+def _network_lsof_enrichment_index(app_index: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    lsof = Path("/usr/sbin/lsof")
+    if not lsof.exists():
+        return {}
+    try:
+        completed = subprocess.run(
+            [str(lsof), "-nP", "-iTCP", "-iUDP"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if completed.returncode not in (0, 1):
+        return {}
+    index: dict[str, dict[str, Any]] = {}
+    for line in completed.stdout.splitlines()[1:]:
+        parts = line.split(None, 8)
+        if len(parts) < 9:
+            continue
+        command, pid, name = _clean_process_name(parts[0]), parts[1], parts[8]
+        identity = _network_identity_from_process(command, pid, app_index) or {}
+        process = _network_public_app_name(identity.get("process") or command)
+        row = {
+            "process": process,
+            "app": identity.get("app") or process,
+            "app_bundle_id": identity.get("app_bundle_id") or "",
+            "app_category": identity.get("app_category") or "other",
+            "pid": pid,
+            "confidence": identity.get("confidence") or "medium",
+        }
+        endpoint = name.split(" (", 1)[0]
+        local, remote = (endpoint.split("->", 1) + [""])[:2] if "->" in endpoint else (endpoint, "")
+        local_host, local_port = _split_network_endpoint(local)
+        remote_host, remote_port = _split_network_endpoint(remote)
+        if local_port:
+            index[f"local_port:{local_port}"] = row
+        if local_host and local_port:
+            index[f"local:{local_host}:{local_port}"] = row
+        if remote_host and remote_port:
+            index[f"remote:{remote_host}:{remote_port}"] = row
+        if local_host and local_port and remote_host and remote_port:
+            index[f"flow:{local_host}:{local_port}->{remote_host}:{remote_port}"] = row
+    return index
+
+
+def _split_network_endpoint(value: Any) -> tuple[str, str]:
+    text = str(value or "").strip()
+    if not text:
+        return "", ""
+    if text.startswith("[") and "]:" in text:
+        host, port = text.rsplit(":", 1)
+        return host.strip("[]"), port
+    if ":" not in text:
+        return text, ""
+    host, port = text.rsplit(":", 1)
+    return host.strip("[]"), port
+
+
+def _network_process_command_index() -> dict[str, str]:
+    ps = Path("/bin/ps")
+    if not ps.exists():
+        return {}
+    try:
+        completed = subprocess.run(
+            [str(ps), "-axo", "pid=,command="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    if completed.returncode != 0:
+        return {}
+    index: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid, command = parts
+        if pid and command:
+            index[pid] = command
+    return index
+
+
+def _network_socket_owner_label(command: Any, pid: Any, process_commands: dict[str, str]) -> str:
+    raw_command = str(command or "").replace("\\x20", " ").strip()
+    pid_text = str(pid or "").strip()
+    full_command = process_commands.get(pid_text, "")
+    haystack = f"{raw_command} {full_command}".lower()
+    if pid_text == str(os.getpid()) or "backend/server.py" in haystack:
+        return "CleanHouse Backend"
+    if "codex.app" in haystack or raw_command.lower().startswith("codex"):
+        return "Codex"
+    if "visual studio code.app" in haystack or raw_command.lower() == "code":
+        return "Code"
+    if "webkit.networking" in haystack:
+        return "Safari/WebKit Networking"
+    if "safari.app" in haystack or raw_command.lower() == "safari":
+        return "Safari"
+    if raw_command:
+        return raw_command
+    return "Unknown app"
+
+
+def _network_lsof_state_and_endpoint(name: str) -> tuple[str, str]:
+    text = str(name or "").strip()
+    if text.endswith(")") and " (" in text:
+        endpoint, state = text.rsplit(" (", 1)
+        return state[:-1].strip(), endpoint.strip()
+    return "", text
+
+
+def _network_socket_event_from_lsof_line(
+    line: str,
+    *,
+    timestamp: str,
+    process_commands: dict[str, str],
+) -> dict[str, Any] | None:
+    parts = line.split(None, 8)
+    if len(parts) < 9:
+        return None
+    command, pid, _user, fd, _fd_type, _device, _size, protocol, name = parts
+    protocol = str(protocol or "").upper()
+    if protocol not in {"TCP", "UDP"}:
+        return None
+    state, endpoint = _network_lsof_state_and_endpoint(name)
+    local_endpoint, remote_endpoint = (endpoint.split("->", 1) + [""])[:2] if "->" in endpoint else (endpoint, "")
+    local_host, local_port = _split_network_endpoint(local_endpoint)
+    remote_host, remote_port = _split_network_endpoint(remote_endpoint)
+    owner = _network_socket_owner_label(command, pid, process_commands)
+    cleanhouse_port = str(os.getenv("CLEANHOUSE_PORT") or "3333")
+    if str(command or "").lower().startswith(("python", "python3")) and cleanhouse_port in {str(local_port), str(remote_port)}:
+        owner = "CleanHouse Backend"
+    if remote_endpoint:
+        source_display = _network_endpoint(local_host, local_port)
+        destination_display = _network_endpoint(remote_host, remote_port)
+        dst_ip = remote_host
+        dst_port = remote_port
+        role = "connection"
+    else:
+        source_display = _network_endpoint(local_host, local_port)
+        destination_display = f"{state.lower()} on {source_display}" if state else source_display
+        dst_ip = local_host
+        dst_port = local_port
+        role = "listener" if state == "LISTEN" else "socket"
+    seed = "|".join([str(pid), fd, protocol, endpoint, state])
+    event = {
+        "timestamp": timestamp,
+        "event_id": "network_socket:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24],
+        "packet_index": None,
+        "packet_length": None,
+        "process": owner,
+        "app": owner,
+        "pid": pid,
+        "src_ip": local_host,
+        "src_port": local_port,
+        "dst_ip": dst_ip,
+        "dst_port": dst_port,
+        "protocol": protocol,
+        "category": "Local traffic" if _is_local_network_host(str(dst_ip or "")) else "External connection",
+        "meaning": "Active socket ownership observed from lsof.",
+        "source_display": source_display or "Unavailable",
+        "destination_display": destination_display or "Unavailable",
+        "severity": "info" if _is_local_network_host(str(dst_ip or "")) else "low",
+        "confidence": "high",
+        "finding_status": "open",
+        "socket_state": state,
+        "socket_role": role,
+        "socket_name": endpoint,
+        "fd": fd,
+    }
+    semantics = _network_plain_language_semantics(event)
+    event["category"] = semantics["category"]
+    event["summary"] = semantics["summary"]
+    event["meaning"] = semantics["meaning"]
+    event["reason"] = semantics["reason"]
+    event["system_impact"] = _network_event_system_impact(event)
+    event["projection"] = {
+        "finding_priority": NETWORK_SEVERITY_RANK.get(str(event["severity"]), 0),
+        "system_impact": event["system_impact"],
+        "timeline_anchor": timestamp,
+    }
+    return event
+
+
+def _network_active_socket_events() -> list[dict[str, Any]]:
+    lsof = Path("/usr/sbin/lsof")
+    if not lsof.exists():
+        return []
+    try:
+        completed = subprocess.run(
+            [str(lsof), "-nP", "-iTCP", "-iUDP"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=4,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if completed.returncode not in (0, 1):
+        return []
+    timestamp = _now_iso()
+    process_commands = _network_process_command_index()
+    socket_events = []
+    for line in completed.stdout.splitlines()[1:]:
+        event = _network_socket_event_from_lsof_line(
+            line,
+            timestamp=timestamp,
+            process_commands=process_commands,
+        )
+        if event:
+            socket_events.append(event)
+    socket_events.sort(key=lambda item: (str(item.get("process") or "").lower(), str(item.get("pid") or ""), str(item.get("socket_name") or "")))
+    return socket_events
+
+
+def _network_active_connection_count() -> int:
+    return sum(1 for event in _network_active_socket_events() if str(event.get("socket_role") or "") == "connection")
+
+
+def _network_match_enrichment(event: dict[str, Any], enrichment: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    src_ip = str(event.get("src_ip") or "").strip()
+    src_port = str(event.get("src_port") or "").strip()
+    dst_ip = str(event.get("dst_ip") or "").strip()
+    dst_port = str(event.get("dst_port") or "").strip()
+    destination = str(
+        event.get("dns_query")
+        or event.get("http_host")
+        or event.get("tls_sni")
+        or event.get("dst_ip")
+        or ""
+    ).strip()
+    destination_with_port = _network_endpoint(destination, dst_port)
+    keys = [
+        f"flow:{src_ip}:{src_port}->{destination}:{dst_port}" if src_ip and src_port and destination else "",
+        f"flow:{src_ip}:{src_port}->{dst_ip}:{dst_port}" if src_ip and src_port and dst_ip else "",
+        f"local:{src_ip}:{src_port}" if src_ip and src_port else "",
+        f"local_port:{src_port}" if src_port else "",
+        f"remote:{destination}:{dst_port}" if destination and dst_port else "",
+        f"remote:{dst_ip}:{dst_port}" if dst_ip and dst_port else "",
+        destination_with_port,
+        destination,
+        dst_ip,
+    ]
+    for key in keys:
+        if key and key in enrichment:
+            return enrichment[key]
+    cloudflare_identity = enrichment.get("_cloudflare_identity")
+    if cloudflare_identity and (
+        _network_ip_in_any_cidr(event.get("dst_ip"), ("104.16.0.0/13", "162.158.0.0/15", "172.64.0.0/13", "2606:4700::/32"))
+        or _network_ip_in_any_cidr(event.get("src_ip"), ("104.16.0.0/13", "162.158.0.0/15", "172.64.0.0/13", "2606:4700::/32"))
+    ):
+        return cloudflare_identity
+    return None
+
+
+def _network_plain_language_semantics(event: dict[str, Any]) -> dict[str, str]:
+    # Product contract: Findings copy must be semantic and human-readable here,
+    # before the frontend renders it. Raw packet rows belong to Table.
+    app = _network_event_app(event)
+    destination = event.get("destination_display") or _network_endpoint(
+        event.get("dns_query") or event.get("http_host") or event.get("tls_sni") or event.get("dst_ip"),
+        event.get("dst_port"),
+    )
+    protocol = str(event.get("protocol") or "network").upper()
+    dst_ip = event.get("dst_ip")
+    dst_port = event.get("dst_port")
+    if app.lower() == "rapportd" and (
+        _network_ip_is_link_local(event.get("src_ip"))
+        or _network_ip_is_link_local(dst_ip)
+    ):
+        return {
+            "category": "Local device discovery",
+            "summary": "rapportd is checking nearby Apple devices on the local network.",
+            "meaning": "This is normal Apple Continuity traffic used for nearby-device features.",
+            "reason": "Apple uses rapportd for local Continuity and nearby-device coordination.",
+        }
+    if _network_is_mdns_or_bonjour(event):
+        return {
+            "category": "Local device discovery",
+            "summary": "Local devices are using Bonjour to discover services on this network.",
+            "meaning": "This is normal local discovery traffic and does not leave your local network.",
+            "reason": "Bonjour/mDNS traffic is expected for printers, AirPlay, sharing, and nearby services.",
+        }
+    if _network_is_ipv6_neighbor_discovery(event):
+        return {
+            "category": "Local device discovery",
+            "summary": "This Mac or a nearby device is using IPv6 neighbor discovery on the local network.",
+            "meaning": "This is routine local network housekeeping, not internet traffic.",
+            "reason": "IPv6 link-local and multicast addresses are used to find nearby devices and routers.",
+        }
+    if _network_endpoint_is_apple_push(dst_ip, dst_port):
+        return {
+            "category": "Apple service traffic",
+            "summary": "Apple Push notification service traffic was observed from this Mac.",
+            "meaning": "This is commonly used by Apple and apps to keep notification channels open.",
+            "reason": "The destination is an Apple network on the Apple Push notification port.",
+        }
+    if _network_endpoint_is_cloudflare(dst_ip) or _network_endpoint_is_cloudflare(event.get("src_ip")):
+        if app != "Unknown app":
+            summary = f"{app} is using Cloudflare/WARP network traffic."
+        else:
+            summary = "Cloudflare/WARP network traffic was observed from this Mac."
+        return {
+            "category": "Cloudflare network traffic",
+            "summary": summary,
+            "meaning": "This is secure Cloudflare network traffic.",
+            "reason": "The destination is in a Cloudflare network range.",
+        }
+    if _is_local_network_host(str(dst_ip or "")):
+        if app != "Unknown app":
+            summary = f"{app} is communicating on the local network."
+        else:
+            summary = "Unresolved local network service traffic was observed."
+        return {
+            "category": "Local network traffic",
+            "summary": summary,
+            "meaning": "This traffic stays on this Mac or the local network.",
+            "reason": "The destination is a local, private, link-local, or multicast address.",
+        }
+    if app == "Unknown app":
+        return {
+            "category": "Unknown external connection",
+            "summary": f"An unknown process contacted an external server at {destination}.",
+            "meaning": "CleanHouse could not identify the owning app or service for this external traffic.",
+            "reason": "This is suspicious because CleanHouse could not identify the owning app or service.",
+        }
+    service = _service_label(dst_port)
+    if service == "Network connection":
+        service = protocol
+    return {
+        "category": "External connection",
+        "summary": _network_external_activity_summary(app, event),
+        "meaning": f"This appears to be {service.lower()} traffic outside this Mac.",
+        "reason": "Review this if you did not expect this app to use this network service. The exact destination is preserved in metadata.",
+    }
+
+
+def _network_human_summary(event: dict[str, Any]) -> str:
+    return _network_plain_language_semantics(event)["summary"]
+
+
+def _network_event_system_impact(event: dict[str, Any]) -> int:
+    score = 0
+    local = _is_local_network_host(str(event.get("dst_ip") or ""))
+    if local:
+        score += 1
+    else:
+        score += 2
+    if _network_event_app(event) == "Unknown app" and not local:
+        score += 3
+    if not (event.get("dns_query") or event.get("http_host") or event.get("tls_sni")) and not _is_local_network_host(str(event.get("dst_ip") or "")):
+        score += 2
+    if str(event.get("dst_port") or "") not in {"", "53", "80", "123", "443", "465", "587", "993", "995", "5223", "5228"}:
+        score += 1
+    if NETWORK_SEVERITY_RANK.get(str(event.get("severity") or ""), 0) >= NETWORK_SEVERITY_RANK["warning"]:
+        score += 2
+    return score
+
+
+def _network_apply_enrichment(event: dict[str, Any], enrichment: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    normalized = event.copy()
+    enrichment = enrichment or {}
+    match = _network_match_enrichment(normalized, enrichment)
+    if match and _network_event_app(normalized) == "Unknown app":
+        normalized["process"] = match.get("process") or "Unknown app"
+        normalized["app"] = match.get("app") or normalized["process"]
+        normalized["app_bundle_id"] = match.get("app_bundle_id") or normalized.get("app_bundle_id") or ""
+        normalized["app_category"] = match.get("app_category") or normalized.get("app_category") or "other"
+        if match.get("pid") and not normalized.get("pid"):
+            normalized["pid"] = match.get("pid")
+    normalized["timestamp"] = _network_event_iso(normalized.get("timestamp"))
+    normalized["event_id"] = str(normalized.get("event_id") or _network_event_fingerprint(normalized))
+    public_app = _network_public_app_name(_network_event_app(normalized))
+    normalized["app"] = public_app
+    normalized["process"] = public_app
+    normalized["source_display"] = normalized.get("source_display") or _network_endpoint(normalized.get("src_ip"), normalized.get("src_port"))
+    normalized["destination_display"] = normalized.get("destination_display") or _network_endpoint(
+        normalized.get("dns_query") or normalized.get("http_host") or normalized.get("tls_sni") or normalized.get("dst_ip"),
+        normalized.get("dst_port"),
+    )
+    semantics = _network_plain_language_semantics(normalized)
+    normalized["category"] = semantics["category"]
+    normalized["summary"] = semantics["summary"]
+    normalized["meaning"] = semantics["meaning"]
+    normalized["reason"] = semantics["reason"]
+    normalized["suspicious"] = bool(normalized.get("suspicious") or semantics["category"] == "Unknown external connection")
+    semantic_severity = _network_event_severity(normalized)
+    existing_severity = str(normalized.get("severity") or "")
+    if semantics["category"] == "Unknown external connection" and NETWORK_SEVERITY_RANK.get(existing_severity, 0) > NETWORK_SEVERITY_RANK.get(semantic_severity, 0):
+        normalized["severity"] = existing_severity
+    elif semantics["category"] in {"Unknown external connection", "Local device discovery", "Local network traffic"}:
+        normalized["severity"] = semantic_severity
+    else:
+        normalized["severity"] = existing_severity or semantic_severity
+    if semantics["category"] == "Unknown external connection":
+        normalized["confidence"] = "low"
+    else:
+        normalized["confidence"] = str(normalized.get("confidence") or match.get("confidence") if match else normalized.get("confidence") or _network_event_confidence(normalized))
+    normalized["finding_status"] = str(normalized.get("finding_status") or "open")
+    normalized["system_impact"] = _network_event_system_impact(normalized)
+    normalized["projection"] = {
+        "finding_priority": NETWORK_SEVERITY_RANK.get(normalized["severity"], 0),
+        "system_impact": normalized["system_impact"],
+        "timeline_anchor": normalized["timestamp"],
+    }
+    normalized.pop("interface", None)
+    return normalized
+
+
+def _network_public_event(event: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "event_id",
+        "event_type",
+        "receipt_type",
+        "sequence",
+        "cursor",
+        "collector_sequence",
+        "collector_cursor",
+        "collector_generation",
+        "server_boot_id",
+        "timestamp",
+        "packet_index",
+        "packet_length",
+        "process",
+        "pid",
+        "app",
+        "app_bundle_id",
+        "app_category",
+        "src_ip",
+        "src_port",
+        "dst_ip",
+        "dst_port",
+        "dns_query",
+        "tls_sni",
+        "http_host",
+        "protocol",
+        "category",
+        "summary",
+        "meaning",
+        "suspicious",
+        "reason",
+        "source_display",
+        "destination_display",
+        "severity",
+        "confidence",
+        "system_impact",
+        "finding_status",
+        "projection",
+        "bucket_key",
+        "bucket_start",
+        "bucket_end",
+        "connectionCount",
+        "degradedCount",
+        "missingDestinationCount",
+        "externalOnlyCount",
+        "source_event_id",
+        "socket_state",
+        "socket_role",
+        "socket_name",
+        "fd",
+        "related_event_count",
+        "related_event_ids",
+        "related_destinations",
+        "tick_id",
+        "sealed_at",
+        "immutable",
+        "evidence_refs",
+        "supersedes",
+        "revision_of",
+        "gap_start",
+        "gap_end",
+        "duration_seconds",
+        "immutable",
+        "state",
+        "reason",
+        "generation",
+        "restart_count",
+        "exit_code",
+        "gap_from_sequence",
+        "gap_to_sequence",
+        "dropped_count",
+        "lost_event_id",
+        "tags",
+        "assessments",
+        "assessment_refs",
+        "assessment_summary",
+        "assessment_indicators",
+    }
+    return {key: event.get(key) for key in allowed if key in event}
+
+
+def _network_stored_event_rows(
+    event_type: str = NETWORK_OBSERVATION_EVENT_TYPE,
+    limit: int = NETWORK_EVIDENCE_LOOKBACK,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    try:
+        # The event spine already has a source/type/id index. Read only the
+        # newest bounded slice through that index, then apply the UTC window in
+        # memory. A datetime(timestamp) predicate forces SQLite to scan the
+        # multi-gigabyte history when a short window contains no rows, which
+        # can starve live capture and turn an honest empty state into timeout.
+        rows = events.list_events(
+            limit=limit,
+            event_type=event_type,
+            source_surface="network",
+        )
+        return [
+            row for row in rows
+            if (
+                (not start or _network_event_datetime(row.get("timestamp")) >= start)
+                and (not end or _network_event_datetime(row.get("timestamp")) < end)
+            )
+        ]
+    except TypeError:
+        return [
+            row for row in events.list_events(limit=limit)
+            if (
+                row.get("event_type") == event_type
+                and row.get("source_surface") == "network"
+                and (not start or _network_event_datetime(row.get("timestamp")) >= start)
+                and (not end or _network_event_datetime(row.get("timestamp")) < end)
+            )
+        ]
+    except Exception:
+        return []
+
+
+def _network_projection_history_limit(range_key: str) -> int:
+    if range_key == "5s":
+        return min(NETWORK_EVIDENCE_LOOKBACK, 250)
+    if range_key == "1m":
+        return min(NETWORK_EVIDENCE_LOOKBACK, 500)
+    if range_key in {"30m", "1h"}:
+        return min(NETWORK_EVIDENCE_LOOKBACK, 1000)
+    return min(NETWORK_EVIDENCE_LOOKBACK, 1500)
+
+
+def _network_stored_observations(
+    limit: int = NETWORK_EVIDENCE_LOOKBACK,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    observations = []
+    for row in _network_stored_event_rows(NETWORK_OBSERVATION_EVENT_TYPE, limit, start=start, end=end):
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        network = data.get("network") if isinstance(data.get("network"), dict) else {}
+        if network:
+            observations.append(network)
+    return observations
+
+
+def _network_stored_assessment_transitions(
+    limit: int = NETWORK_EVIDENCE_LOOKBACK,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Load ordered append-only assessment transitions from the event spine."""
+    transitions: list[dict[str, Any]] = []
+    for row in _network_stored_event_rows(
+        ASSESSMENT_TRANSITION_EVENT_TYPE,
+        limit=limit,
+        start=start,
+        end=end,
+    ):
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        assessment = data.get("security_assessment") if isinstance(data.get("security_assessment"), dict) else {}
+        if assessment:
+            transitions.append(assessment)
+    transitions.sort(key=lambda item: (
+        _network_event_datetime(item.get("last_seen") or item.get("timestamp")),
+        str(item.get("assessment_id") or ""),
+    ))
+    return transitions
+
+
+def _network_event_already_stored(event_id: str) -> bool:
+    for item in _network_stored_observations(limit=NETWORK_EVIDENCE_LOOKBACK):
+        if str(item.get("event_id") or "") == event_id:
+            return True
+    return False
+
+
+def _network_vvault_config() -> tuple[str, str]:
+    url = os.getenv("CLEANHOUSE_VVAULT_NETWORK_EVIDENCE_URL") or os.getenv("CLEANHOUSE_VVAULT_PICKUP_URL") or os.getenv("VVAULT_PICKUP_URL") or ""
+    token = os.getenv("CLEANHOUSE_VVAULT_SERVICE_TOKEN") or os.getenv("VVAULT_SERVICE_TOKEN") or ""
+    return url.strip(), token.strip()
+
+
+def _persist_network_queue_failure(queue_name: str, reason: str, network_event: dict[str, Any], **details: Any) -> None:
+    timestamp = _now_iso()
+    source_event_id = str(network_event.get("event_id") or "unknown")
+    receipt_id = "network_queue:" + hashlib.sha256(
+        f"{queue_name}:{reason}:{source_event_id}:{timestamp}".encode("utf-8")
+    ).hexdigest()[:24]
+    receipt = {
+        "event_id": receipt_id,
+        "event_type": NETWORK_COLLECTOR_RECEIPT_EVENT_TYPE,
+        "receipt_type": "collector.failure",
+        "timestamp": timestamp,
+        "state": "degraded",
+        "reason": reason,
+        "queue": queue_name,
+        "source_event_id": source_event_id,
+        **details,
+    }
+    try:
+        events.insert_event(
+            event_type=NETWORK_COLLECTOR_RECEIPT_EVENT_TYPE,
+            path=f"/network/collector/{receipt_id}",
+            summary=f"Network {queue_name} queue degraded",
+            session_id=DEFAULT_SESSION_ID,
+            timestamp=timestamp,
+            source_surface="network",
+            actor_type="network_capture",
+            evidence_level="observed",
+            collector_status="error",
+            scope_relation="runtime",
+            data={"network_collector": receipt},
+        )
+    except Exception:
+        # The in-memory health counters remain the fallback receipt when the
+        # same storage failure prevents writing a durable one.
+        return
+
+
+def _network_vvault_worker() -> None:
+    global _NETWORK_VVAULT_LAST_SUCCESS_AT, _NETWORK_VVAULT_LAST_ERROR
+    global _NETWORK_VVAULT_LAST_ERROR_AT, _NETWORK_VVAULT_PENDING_COUNT
+    global _NETWORK_VVAULT_OLDEST_PENDING_AT
+    pending: list[dict[str, Any]] = []
+    while not _NETWORK_VVAULT_WORKER_STOP.is_set():
+        try:
+            if not pending:
+                try:
+                    pending.append(_NETWORK_VVAULT_OUTBOX.get(timeout=0.5))
+                except queue.Empty:
+                    if _NETWORK_VVAULT_WORKER_STOP.is_set():
+                        break
+                    url, token = _network_vvault_config()
+                    if not url or not token:
+                        continue
+                    for item in _network_stored_observations(limit=NETWORK_EVIDENCE_LOOKBACK):
+                        event_id = str(item.get("event_id") or "")
+                        if event_id and event_id not in _NETWORK_VVAULT_SYNCED_IDS:
+                            pending.append({
+                                "event_id": event_id,
+                                "timestamp": item.get("timestamp"),
+                                "network": item,
+                                "_queue_owned": False,
+                                "_enqueued_at": item.get("timestamp") or _now_iso(),
+                            })
+                        if len(pending) >= NETWORK_VVAULT_BATCH_SIZE:
+                            break
+                    if not pending:
+                        _NETWORK_VVAULT_WORKER_STOP.wait(NETWORK_VVAULT_RETRY_SECONDS)
+                        continue
+            while len(pending) < NETWORK_VVAULT_BATCH_SIZE:
+                try:
+                    pending.append(_NETWORK_VVAULT_OUTBOX.get_nowait())
+                except queue.Empty:
+                    break
+            with _NETWORK_VVAULT_STATE_LOCK:
+                _NETWORK_VVAULT_PENDING_COUNT = len(pending)
+                _NETWORK_VVAULT_OLDEST_PENDING_AT = str(pending[0].get("_enqueued_at") or "") if pending else ""
+            url, token = _network_vvault_config()
+            if not url or not token:
+                _NETWORK_VVAULT_WORKER_STOP.wait(NETWORK_VVAULT_RETRY_SECONDS)
+                continue
+            outbound = [
+                {key: value for key, value in item.items() if not key.startswith("_")}
+                for item in pending
+            ]
+            body = json.dumps({"schema": "cleanhouse.network_evidence.batch.v1", "events": outbound}).encode("utf-8")
+            request_payload = urllib.request.Request(
+                url,
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                },
+                method="POST",
+            )
+            with urllib.request.urlopen(request_payload, timeout=5) as response:
+                if response.status >= 400:
+                    raise urllib.error.HTTPError(url, response.status, "sync failed", response.headers, None)
+            synced_ids = [str(item.get("event_id") or "") for item in pending if str(item.get("event_id") or "")]
+            _log_network_history_io(
+                "vvault_remote_save",
+                status="ok",
+                count=len(synced_ids),
+                oldest_enqueued_at=str(pending[0].get("_enqueued_at") or "") if pending else "",
+            )
+            _NETWORK_VVAULT_SYNCED_IDS.update(synced_ids)
+            if synced_ids:
+                sync_id = "network_sync:" + hashlib.sha256("|".join(sorted(synced_ids)).encode("utf-8")).hexdigest()[:24]
+                events.insert_event(
+                    event_type=NETWORK_SYNC_EVENT_TYPE,
+                    path=f"/network/vvault-sync/{sync_id}",
+                    summary="Network evidence sync completed",
+                    session_id=DEFAULT_SESSION_ID,
+                    timestamp=_now_iso(),
+                    source_surface="network",
+                    actor_type="cleanhouse",
+                    evidence_level="observed",
+                    data={"network_sync": {"event_id": sync_id, "synced_event_ids": synced_ids, "state": "synced"}},
+                )
+            for item in pending:
+                if item.get("_queue_owned"):
+                    _NETWORK_VVAULT_OUTBOX.task_done()
+            with _NETWORK_VVAULT_STATE_LOCK:
+                _NETWORK_VVAULT_LAST_SUCCESS_AT = _now_iso()
+                _NETWORK_VVAULT_LAST_ERROR = ""
+                _NETWORK_VVAULT_LAST_ERROR_AT = ""
+                _NETWORK_VVAULT_PENDING_COUNT = 0
+                _NETWORK_VVAULT_OLDEST_PENDING_AT = ""
+            pending = []
+        except Exception as exc:
+            _LOG.warning(
+                "network_history_io vvault_remote_save_failed count=%s error=%s",
+                len(pending),
+                exc,
+            )
+            with _NETWORK_VVAULT_STATE_LOCK:
+                _NETWORK_VVAULT_LAST_ERROR = str(exc)[:1024]
+                _NETWORK_VVAULT_LAST_ERROR_AT = _now_iso()
+                _NETWORK_VVAULT_PENDING_COUNT = len(pending)
+            _NETWORK_VVAULT_WORKER_STOP.wait(NETWORK_VVAULT_RETRY_SECONDS)
+
+    for item in pending:
+        if item.get("_queue_owned"):
+            _NETWORK_VVAULT_OUTBOX.task_done()
+    with _NETWORK_VVAULT_STATE_LOCK:
+        _NETWORK_VVAULT_PENDING_COUNT = 0
+        _NETWORK_VVAULT_OLDEST_PENDING_AT = ""
+
+
+def _start_network_vvault_worker() -> None:
+    # Retained as a compatibility hook. Delivery is owned by vvault_sync's
+    # single SQLite-backed worker shared with Files.
+    vvault_sync.start_service()
+
+
+def _stop_network_vvault_worker(timeout: float = 5.0) -> dict[str, Any]:
+    # The shared worker is stopped once by backend.server so stopping Network
+    # cannot interrupt Files delivery.
+    return {"service": "network_vvault_sync", "state": "retired", "joined": True}
+
+
+def _enqueue_network_vvault_sync(network_event: dict[str, Any]) -> bool:
+    event_id = str(network_event.get("event_id") or "").strip()
+    if not event_id:
+        return False
+    try:
+        result = vvault_sync.enqueue(
+            event_id,
+            {
+                "event_type": NETWORK_OBSERVATION_EVENT_TYPE,
+                "surface": "network",
+                "timestamp": network_event.get("timestamp") or _now_iso(),
+                "network": network_event,
+            },
+            surface="network",
+            preserve_local_cache=False,
+        )
+        _LOG.debug(
+            "network_history_io ovvaults_save status=%s artifact_id=%s",
+            result.get("status"),
+            event_id,
+        )
+        return True
+    except Exception as exc:
+        _persist_network_queue_failure(
+            "vvault_sync",
+            "durable_outbox_write_failed",
+            network_event,
+            error=str(exc)[:512],
+        )
+        return False
+
+
+def _network_trend_bucket_key(timestamp: str, range_key: str = "5s") -> tuple[str, datetime, datetime]:
+    dt = _network_event_datetime(timestamp)
+    duration_ms = NETWORK_TIME_RANGES_MS.get(range_key, NETWORK_TIME_RANGES_MS["5s"])
+    bucket_count = NETWORK_TREND_BUCKETS.get(range_key, NETWORK_TREND_BUCKETS["5s"])
+    bucket_ms = max(int(duration_ms / bucket_count), 1)
+    event_ms = int(dt.timestamp() * 1000)
+    bucket_start_ms = event_ms // bucket_ms * bucket_ms
+    start = datetime.fromtimestamp(bucket_start_ms / 1000.0, tz=timezone.utc)
+    end = datetime.fromtimestamp((bucket_start_ms + bucket_ms) / 1000.0, tz=timezone.utc)
+    return f"{range_key}:{bucket_start_ms}", start, end
+
+
+def _stored_network_buckets(
+    limit: int = NETWORK_EVIDENCE_LOOKBACK,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    buckets = []
+    for row in _network_stored_event_rows(NETWORK_TREND_BUCKET_EVENT_TYPE, limit=limit, start=start, end=end):
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        bucket = data.get("network_bucket") if isinstance(data.get("network_bucket"), dict) else {}
+        if bucket:
+            buckets.append(bucket)
+    return buckets
+
+
+def _vvault_network_buckets(
+    range_key: str = "",
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = NETWORK_EVIDENCE_LOOKBACK,
+) -> list[dict[str, Any]]:
+    try:
+        buckets = vvault_preservation.load_network_trend_buckets(range_key=range_key, start=start, end=end, limit=limit)
+        _log_network_history_io("vvault_load", artifact="trend_buckets", range=range_key, count=len(buckets))
+        return buckets
+    except Exception as exc:
+        _LOG.warning("network_history_io vvault_load_failed artifact=trend_buckets range=%s error=%s", range_key, exc)
+        return []
+
+
+def _network_trend_sample_from_event(network_event: dict[str, Any]) -> dict[str, Any]:
+    public = _network_public_event(network_event)
+    source_event_id = str(public.get("event_id") or network_event.get("event_id") or "")
+    sample_id = "network_sample:" + hashlib.sha256(source_event_id.encode("utf-8")).hexdigest()[:24] if source_event_id else ""
+    destination = (
+        public.get("dns_query")
+        or public.get("http_host")
+        or public.get("tls_sni")
+        or public.get("dst_ip")
+        or public.get("destination_display")
+        or ""
+    )
+    return {
+        "sample_id": sample_id,
+        "event_id": source_event_id,
+        "source_event_id": source_event_id,
+        "timestamp": public.get("timestamp") or _now_iso(),
+        "app": public.get("app") or public.get("process") or "Unknown app",
+        "process": public.get("process") or public.get("app") or "Unknown app",
+        "destination": destination,
+        "src_ip": public.get("src_ip") or "",
+        "src_port": public.get("src_port") or "",
+        "dst_ip": public.get("dst_ip") or "",
+        "dst_port": public.get("dst_port") or "",
+        "protocol": public.get("protocol") or "",
+        "dns_query": public.get("dns_query") or "",
+        "tls_sni": public.get("tls_sni") or "",
+        "http_host": public.get("http_host") or "",
+        "severity": public.get("severity") or "low",
+        "suspicious": bool(public.get("suspicious")),
+        "evidence_refs": [f"local://cleanhouse/network/{source_event_id}"] if source_event_id else [],
+    }
+
+
+def _preserve_network_trend_sample(network_event: dict[str, Any]) -> None:
+    sample = _network_trend_sample_from_event(network_event)
+    if not sample.get("sample_id"):
+        return
+    result = vvault_preservation.preserve_network_trend_sample(sample)
+    _log_network_vvault_save_result("trend_sample", sample.get("sample_id"), sample.get("timestamp"), result)
+
+
+def _preserve_network_trend_tick(tick: dict[str, Any]) -> None:
+    result = vvault_preservation.preserve_network_trend_tick(tick)
+    _log_network_vvault_save_result(
+        "trend_tick",
+        tick.get("tick_id") or tick.get("event_id"),
+        tick.get("timestamp") or tick.get("sealed_at"),
+        result,
+    )
+
+
+def _vvault_network_trend_samples(start: datetime | None = None, end: datetime | None = None, limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
+    try:
+        samples = vvault_preservation.load_network_trend_samples(start=start, end=end, limit=limit)
+        _log_network_history_io("vvault_load", artifact="trend_samples", count=len(samples))
+        return samples
+    except Exception as exc:
+        _LOG.warning("network_history_io vvault_load_failed artifact=trend_samples error=%s", exc)
+        return []
+
+
+def _stored_network_trend_ticks(
+    limit: int = NETWORK_EVIDENCE_LOOKBACK,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    ticks = []
+    for row in _network_stored_event_rows(NETWORK_TREND_TICK_EVENT_TYPE, limit=limit, start=start, end=end):
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        tick = data.get("network_tick") if isinstance(data.get("network_tick"), dict) else {}
+        if tick:
+            ticks.append(tick)
+    return ticks
+
+
+def _vvault_network_trend_ticks(range_key: str = "", start: datetime | None = None, end: datetime | None = None, limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
+    try:
+        ticks = vvault_preservation.load_network_trend_ticks(range_key=range_key, start=start, end=end, limit=limit)
+        _log_network_history_io("vvault_load", artifact="trend_ticks", range=range_key, count=len(ticks))
+        return ticks
+    except Exception as exc:
+        _LOG.warning("network_history_io vvault_load_failed artifact=trend_ticks range=%s error=%s", range_key, exc)
+        return []
+
+
+def _network_trend_tick_from_event(network_event: dict[str, Any], range_key: str) -> dict[str, Any]:
+    public = _network_public_event(network_event)
+    source_event_id = str(public.get("event_id") or network_event.get("event_id") or "")
+    timestamp = str(public.get("timestamp") or _now_iso())
+    bucket_key, start, end = _network_trend_bucket_key(timestamp, range_key)
+    seed = f"{source_event_id}:{range_key}:{timestamp}"
+    tick_id = "network_tick:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24]
+    external = not _is_local_network_host(str(public.get("dst_ip") or ""))
+    degraded = bool(public.get("suspicious")) or NETWORK_SEVERITY_RANK.get(str(public.get("severity") or ""), 0) >= NETWORK_SEVERITY_RANK["warning"]
+    missing_destination = external and not (public.get("dns_query") or public.get("http_host") or public.get("tls_sni"))
+    return {
+        "event_id": tick_id,
+        "tick_id": tick_id,
+        "timestamp": timestamp,
+        "sealed_at": timestamp,
+        "immutable": True,
+        "bucket_key": f"tick:{range_key}:{tick_id}",
+        "bucket_range": range_key,
+        "bucket_start": start.isoformat().replace("+00:00", "Z"),
+        "bucket_end": end.isoformat().replace("+00:00", "Z"),
+        "connectionCount": 1,
+        "degradedCount": 1 if degraded else 0,
+        "missingDestinationCount": 1 if missing_destination else 0,
+        "externalOnlyCount": 1 if external else 0,
+        "source_event_id": source_event_id,
+        "related_event_ids": [source_event_id] if source_event_id else [],
+        "evidence_refs": [f"local://cleanhouse/network/{source_event_id}"] if source_event_id else [],
+        "app": public.get("app") or public.get("process") or "Unknown app",
+        "process": public.get("process") or public.get("app") or "Unknown app",
+        "dst_ip": public.get("dst_ip") or "",
+        "dst_port": public.get("dst_port") or "",
+        "severity": public.get("severity") or "low",
+    }
+
+
+def _network_trend_ticks_from_samples(range_key: str, samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, Any]] = {}
+    for sample in samples:
+        source_event_id = str(sample.get("source_event_id") or sample.get("event_id") or sample.get("sample_id") or "")
+        timestamp = str(sample.get("timestamp") or _now_iso())
+        bucket_key, start, end = _network_trend_bucket_key(timestamp, range_key)
+        tick = buckets.setdefault(
+            bucket_key,
+            {
+                "event_id": "network_tick:" + hashlib.sha256(bucket_key.encode("utf-8")).hexdigest()[:24],
+                "tick_id": "network_tick:" + hashlib.sha256(bucket_key.encode("utf-8")).hexdigest()[:24],
+                "timestamp": timestamp,
+                "sealed_at": end.isoformat().replace("+00:00", "Z"),
+                "immutable": datetime.now(timezone.utc) >= end,
+                "bucket_key": bucket_key,
+                "bucket_range": range_key,
+                "bucket_start": start.isoformat().replace("+00:00", "Z"),
+                "bucket_end": end.isoformat().replace("+00:00", "Z"),
+                "connectionCount": 0,
+                "degradedCount": 0,
+                "missingDestinationCount": 0,
+                "externalOnlyCount": 0,
+                "related_event_ids": [],
+                "evidence_refs": [],
+                "_connection_ids": set(),
+                "_degraded_ids": set(),
+                "_missing_destination_ids": set(),
+                "_external_ids": set(),
+            },
+        )
+        connection_id = "|".join(
+            str(sample.get(field) or "")
+            for field in ("src_ip", "src_port", "dst_ip", "dst_port", "protocol")
+        )
+        if not connection_id.strip("|"):
+            connection_id = source_event_id or str(sample.get("sample_id") or timestamp)
+        external = not _is_local_network_host(str(sample.get("dst_ip") or sample.get("destination") or ""))
+        degraded = bool(sample.get("suspicious")) or NETWORK_SEVERITY_RANK.get(
+            str(sample.get("severity") or ""), 0
+        ) >= NETWORK_SEVERITY_RANK["warning"]
+        missing_destination = external and not (
+            sample.get("dns_query")
+            or sample.get("http_host")
+            or sample.get("tls_sni")
+            or sample.get("destination")
+        )
+        tick["_connection_ids"].add(connection_id)
+        if degraded:
+            tick["_degraded_ids"].add(connection_id)
+        if missing_destination:
+            tick["_missing_destination_ids"].add(connection_id)
+        if external:
+            tick["_external_ids"].add(connection_id)
+        if source_event_id and source_event_id not in tick["related_event_ids"]:
+            tick["related_event_ids"].append(source_event_id)
+        for evidence_ref in sample.get("evidence_refs") or (
+            [f"local://cleanhouse/network/{source_event_id}"] if source_event_id else []
+        ):
+            if evidence_ref not in tick["evidence_refs"]:
+                tick["evidence_refs"].append(evidence_ref)
+        if _network_event_datetime(timestamp) > _network_event_datetime(tick["timestamp"]):
+            tick["timestamp"] = timestamp
+
+    result = []
+    for tick in buckets.values():
+        tick["connectionCount"] = len(tick.pop("_connection_ids"))
+        tick["degradedCount"] = len(tick.pop("_degraded_ids"))
+        tick["missingDestinationCount"] = len(tick.pop("_missing_destination_ids"))
+        tick["externalOnlyCount"] = len(tick.pop("_external_ids"))
+        tick["related_event_ids"] = tick["related_event_ids"][:30]
+        tick["evidence_refs"] = tick["evidence_refs"][:30]
+        result.append(tick)
+    return sorted(result, key=lambda item: (_network_event_datetime(item.get("bucket_start")), str(item.get("tick_id") or "")))
+
+def _all_network_trend_ticks(range_key: str, start: datetime | None = None, end: datetime | None = None, limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for tick in [*_stored_network_trend_ticks(limit=limit), *_vvault_network_trend_ticks(range_key, start, end, limit=limit)]:
+        if tick.get("bucket_range") != range_key:
+            continue
+        event_dt = _network_event_datetime(tick.get("timestamp"))
+        if start and event_dt < start:
+            continue
+        if end and event_dt > end:
+            continue
+        tick_id = str(tick.get("tick_id") or tick.get("event_id") or "")
+        if tick_id:
+            by_id.setdefault(tick_id, tick)
+    samples = _all_network_trend_samples(start, end, limit=limit)
+    for tick in _network_trend_ticks_from_samples(range_key, samples):
+        tick_id = str(tick.get("tick_id") or tick.get("event_id") or "")
+        if tick_id:
+            by_id.setdefault(tick_id, tick)
+            _preserve_network_trend_tick(tick)
+    return sorted(by_id.values(), key=lambda item: (_network_event_datetime(item.get("timestamp")), str(item.get("tick_id") or item.get("event_id") or "")))
+
+
+def _all_network_trend_samples(start: datetime | None = None, end: datetime | None = None, limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for item in _network_stored_observations(limit=limit):
+        event_dt = _network_event_datetime(item.get("timestamp"))
+        if start and event_dt < start:
+            continue
+        if end and event_dt > end:
+            continue
+        sample = _network_trend_sample_from_event(item)
+        sample_id = str(sample.get("source_event_id") or sample.get("event_id") or sample.get("sample_id") or "")
+        if sample_id:
+            by_id[sample_id] = sample
+    for sample in _vvault_network_trend_samples(start, end, limit=limit):
+        sample_id = str(sample.get("source_event_id") or sample.get("event_id") or sample.get("sample_id") or "")
+        if sample_id:
+            by_id.setdefault(sample_id, sample)
+    return sorted(by_id.values(), key=lambda item: (_network_event_datetime(item.get("timestamp")), str(item.get("sample_id") or "")))
+
+
+def _all_network_buckets(range_key: str = "", start: datetime | None = None, end: datetime | None = None) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for bucket in [*_stored_network_buckets(), *_vvault_network_buckets(range_key, start, end)]:
+        if not bucket:
+            continue
+        bucket_id = str(bucket.get("event_id") or bucket.get("bucket_key") or "")
+        if not bucket_id:
+            continue
+        current = by_id.get(bucket_id)
+        if not current or _network_event_datetime(bucket.get("timestamp")) > _network_event_datetime(current.get("timestamp")):
+            by_id[bucket_id] = bucket
+    return list(by_id.values())
+
+
+def _append_network_trend_ticks(network_event: dict[str, Any]) -> None:
+    stored_tick_ids = {
+        str(item.get("tick_id") or item.get("event_id") or "")
+        for item in _stored_network_trend_ticks()
+    }
+    for range_key in NETWORK_TIME_RANGES_MS:
+        tick = _network_trend_tick_from_event(network_event, range_key)
+        tick_id = str(tick.get("tick_id") or tick.get("event_id") or "")
+        if not tick_id:
+            continue
+        if tick_id in stored_tick_ids:
+            _preserve_network_trend_tick(tick)
+            continue
+        events.insert_event(
+            event_type=NETWORK_TREND_TICK_EVENT_TYPE,
+            path=f"/network/trend/ticks/{tick_id}",
+            summary=f"Network trend tick {tick_id}",
+            session_id=DEFAULT_SESSION_ID,
+            timestamp=str(tick.get("timestamp") or _now_iso()),
+            source_surface="network",
+            actor_type="cleanhouse",
+            evidence_level="observed",
+            data={"network_tick": tick},
+        )
+        stored_tick_ids.add(tick_id)
+        _preserve_network_trend_tick(tick)
+
+
+def _persist_network_observation(
+    event: dict[str, Any],
+    enrichment: dict[str, dict[str, Any]] | None = None,
+    *,
+    persist_trend: bool = True,
+    check_existing: bool = True,
+    enqueue_vvault: bool = True,
+) -> dict[str, Any]:
+    network_event = _network_apply_enrichment(event, enrichment)
+    canonical_assessments, canonical_indicators = assess_network_event(network_event)
+    network_event["assessments"] = canonical_assessments
+    network_event["assessment_refs"] = [
+        item["assessment_id"] for item in canonical_assessments
+    ]
+    network_event["assessment_summary"] = add_assessment_contract(
+        {},
+        [network_event],
+    )["assessment_summary"]
+    if canonical_indicators:
+        network_event["assessment_indicators"] = canonical_indicators
+    event_id = str(network_event.get("event_id") or "")
+    if event_id and (not check_existing or not _network_event_already_stored(event_id)):
+        events.insert_event(
+            event_type=NETWORK_OBSERVATION_EVENT_TYPE,
+            path=f"/network/events/{event_id}",
+            summary=str(network_event.get("summary") or "Network event observed"),
+            session_id=DEFAULT_SESSION_ID,
+            timestamp=str(network_event.get("timestamp") or _now_iso()),
+            source_surface="network",
+            actor_type="network_capture",
+            evidence_level="observed",
+            observed_vs_expected={"status": "observed"},
+            collector_status="ok",
+            scope_relation="runtime",
+            evidence_refs=[f"local://cleanhouse/network/{event_id}"],
+            raw_evidence_ref=f"local://cleanhouse/network/{event_id}",
+            data={"network": network_event, "vvault_sync": {"state": "pending"}},
+        )
+        try:
+            # Raw packet evidence is committed first. Derived assessments are
+            # append-only and may fail without rewriting or losing the packet.
+            persist_network_assessment_transitions(network_event)
+        except Exception as exc:
+            _LOG.warning("network assessment persistence failed event=%s error=%s", event_id, exc.__class__.__name__)
+        if persist_trend:
+            _preserve_network_trend_sample(network_event)
+            _append_network_trend_ticks(network_event)
+        if enqueue_vvault:
+            _enqueue_network_vvault_sync(network_event)
+    return _network_public_event(network_event)
+
+
+def _network_live_persist_worker() -> None:
+    global _NETWORK_LIVE_PERSIST_FAILURES, _NETWORK_LIVE_PERSIST_LAST_ERROR
+    while not _NETWORK_LIVE_PERSIST_WORKER_STOP.is_set() or not _NETWORK_LIVE_PERSIST_QUEUE.empty():
+        try:
+            network_event = _NETWORK_LIVE_PERSIST_QUEUE.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        try:
+            _persist_network_observation(
+                network_event,
+                persist_trend=False,
+                check_existing=False,
+                enqueue_vvault=False,
+            )
+        except Exception as exc:
+            with _NETWORK_LIVE_PERSIST_LOCK:
+                _NETWORK_LIVE_PERSIST_FAILURES += 1
+                _NETWORK_LIVE_PERSIST_LAST_ERROR = str(exc)[:1024]
+                failure_count = _NETWORK_LIVE_PERSIST_FAILURES
+            _persist_network_queue_failure(
+                "canonical_persistence",
+                "persistence_worker_failed",
+                network_event,
+                failure_count=failure_count,
+                error=str(exc)[:512],
+            )
+        finally:
+            _NETWORK_LIVE_PERSIST_QUEUE.task_done()
+
+
+def _start_network_live_persist_worker() -> None:
+    global _NETWORK_LIVE_PERSIST_WORKER_STARTED, _NETWORK_LIVE_PERSIST_WORKER_THREAD
+    if _NETWORK_LIVE_PERSIST_WORKER_STARTED and _NETWORK_LIVE_PERSIST_WORKER_THREAD and _NETWORK_LIVE_PERSIST_WORKER_THREAD.is_alive():
+        return
+    with _NETWORK_LIVE_PERSIST_LOCK:
+        if _NETWORK_LIVE_PERSIST_WORKER_STARTED and _NETWORK_LIVE_PERSIST_WORKER_THREAD and _NETWORK_LIVE_PERSIST_WORKER_THREAD.is_alive():
+            return
+        _NETWORK_LIVE_PERSIST_WORKER_STOP.clear()
+        _NETWORK_LIVE_PERSIST_WORKER_THREAD = threading.Thread(
+            target=_network_live_persist_worker,
+            daemon=True,
+            name="cleanhouse-network-live-persist",
+        )
+        _NETWORK_LIVE_PERSIST_WORKER_THREAD.start()
+        _NETWORK_LIVE_PERSIST_WORKER_STARTED = True
+
+
+def _stop_network_live_persist_worker(timeout: float = 5.0) -> dict[str, Any]:
+    global _NETWORK_LIVE_PERSIST_WORKER_STARTED, _NETWORK_LIVE_PERSIST_WORKER_THREAD
+    _NETWORK_LIVE_PERSIST_WORKER_STOP.set()
+    with _NETWORK_LIVE_PERSIST_LOCK:
+        thread = _NETWORK_LIVE_PERSIST_WORKER_THREAD
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=max(0.0, float(timeout)))
+    joined = thread is None or not thread.is_alive()
+    if joined:
+        with _NETWORK_LIVE_PERSIST_LOCK:
+            _NETWORK_LIVE_PERSIST_WORKER_STARTED = False
+            _NETWORK_LIVE_PERSIST_WORKER_THREAD = None
+    return {"service": "network_live_persistence", "state": "stopped" if joined else "stopping", "joined": joined}
+
+
+def _enqueue_network_live_persistence(network_event: dict[str, Any]) -> bool:
+    global _NETWORK_LIVE_PERSIST_QUEUE_DROPS
+    _start_network_live_persist_worker()
+    try:
+        _NETWORK_LIVE_PERSIST_QUEUE.put_nowait(network_event.copy())
+        return True
+    except queue.Full:
+        with _NETWORK_LIVE_PERSIST_LOCK:
+            _NETWORK_LIVE_PERSIST_QUEUE_DROPS += 1
+            drops = _NETWORK_LIVE_PERSIST_QUEUE_DROPS
+        _persist_network_queue_failure(
+            "canonical_persistence",
+            "persistence_queue_overflow",
+            network_event,
+            queue_depth=_NETWORK_LIVE_PERSIST_QUEUE.qsize(),
+            queue_capacity=_NETWORK_LIVE_PERSIST_QUEUE.maxsize,
+            drop_count=drops,
+        )
+        return False
+
+
+def _snapshot_event_from_connection(conn: dict[str, Any]) -> dict[str, Any]:
+    process = _clean_process_name(conn.get("process"))
+    src_ip = conn.get("local_host")
+    src_port = conn.get("local_port")
+    dst_ip = conn.get("domain") or conn.get("remote_host") or conn.get("host") or conn.get("address") or "Unknown destination"
+    dst_port = conn.get("remote_port") or conn.get("port")
+    target = str(dst_ip)
+    port = dst_port
+    local = _is_local_network_host(target)
+    suspicious = bool(conn.get("suspicious"))
+    category = "Needs review" if suspicious else ("Local traffic" if local else "External connection")
+    service = _service_label(port)
+    destination = target if target != "*" else "local listeners"
+    source_display = _network_endpoint(src_ip, src_port)
+    destination_display = _network_endpoint(destination, port)
+    return {
+        "timestamp": _now_iso(),
+        "packet_index": None,
+        "packet_length": None,
+        "process": process,
+        "pid": conn.get("pid"),
+        "src_ip": src_ip,
+        "src_port": src_port,
+        "dst_ip": target,
+        "dst_port": port,
+        "protocol": service,
+        "category": category,
+        "summary": f"{process} -> {destination_display} -> {service}",
+        "meaning": "This is local app or device traffic." if local else "This app is communicating outside this Mac.",
+        "source": "network_observation_snapshot",
+        "suspicious": suspicious,
+        "reason": conn.get("reason") or "",
+        "source_display": source_display,
+        "destination_display": destination_display,
+    }
+
+
+def _network_collector_snapshot_payload(refresh: bool = False, persist: bool = True) -> tuple[dict[str, Any], int]:
+    adapter = get_cleanhouse_monitoring_adapter()
+    snapshot = adapter.get_network(refresh=refresh)
+    data = snapshot.get("data") if isinstance(snapshot.get("data"), dict) else {}
+    connections = data.get("connections") if isinstance(data.get("connections"), list) else []
+    enrichment = _network_enrichment_index(refresh=refresh)
+    raw_events = [_snapshot_event_from_connection(conn) for conn in connections if isinstance(conn, dict)]
+    events = [
+        _persist_network_observation(event, enrichment) if persist else _network_apply_enrichment(event, enrichment)
+        for event in raw_events
+    ]
+    events.sort(key=lambda item: (not item.get("suspicious"), item.get("category") != "External connection", item.get("process", "")))
+    counts = data.get("counts") if isinstance(data.get("counts"), dict) else {}
+    visible_count = min(len(events), WIRESHARK_MAX_EVENTS)
+    payload, status_code = _network_ui_contract(
+        "CAPTURING" if events else "NO_DATA",
+        events=events[:WIRESHARK_MAX_EVENTS],
+        summary={
+            "reason": "snapshot",
+            "event_count": visible_count,
+            "counts": counts,
+        },
+    )
+    return add_assessment_contract(payload, events), status_code
+
+
+def _network_event_collector_sequence(event: dict[str, Any]) -> int:
+    try:
+        return max(0, int(event.get("collector_sequence") or event.get("sequence") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _network_snapshot_payload(refresh: bool = False) -> tuple[dict[str, Any], int]:
+    collector = _get_network_collector()
+    collector.start()
+    if refresh:
+        collector.refresh(timeout=2.0)
+    boundary = collector.snapshot(include_events=False)
+    high_water_sequence = int(boundary.get("high_water_sequence") or 0)
+    visible_events = [
+        item
+        for item in _network_events_in_range("1m", limit=min(NETWORK_EVIDENCE_LOOKBACK, 200), enrich_unknown=False)[-WIRESHARK_MAX_EVENTS:]
+        if not (
+            str(item.get("server_boot_id") or "") == NETWORK_SERVER_BOOT_ID
+            and _network_event_collector_sequence(item) > high_water_sequence
+        )
+    ]
+    events_payload = [_network_public_event(item) for item in visible_events]
+    visible_count = len(events_payload)
+    snapshot_identities: set[str] = set()
+    for event in events_payload:
+        identity = _network_startup_operator_identity(event)
+        already_present = identity in snapshot_identities
+        snapshot_identities.add(identity)
+        _log_network_startup_reconciliation(
+            "snapshot_operator_record",
+            event_id=event.get("event_id"),
+            identity=identity,
+            outcome="updated_existing_table_record" if already_present else "created_new_table_record",
+            reason="frontend_row_identity_matched_earlier_snapshot_event" if already_present else "first_snapshot_event_for_frontend_row_identity",
+        )
+    os_active_connection_count = _network_active_connection_count()
+    payload, status_code = _network_ui_contract(
+        _network_runtime_probe_state(events_payload),
+        events=events_payload,
+        summary={
+            "reason": "snapshot",
+            "event_count": visible_count,
+            "counts": {
+                "connections": visible_count,
+                "os_active_connections": os_active_connection_count,
+            },
+            "source": "runtime_packet_buffer",
+            "active_connection_source": "macos_lsof",
+            "cursor": boundary["cursor"],
+            "high_water_cursor": boundary["high_water_cursor"],
+            "refresh": "synchronized" if refresh else "not_requested",
+        },
+    )
+    collector_health = network_collector_health()
+    payload.update({
+        "cursor": boundary["cursor"],
+        "high_water_cursor": boundary["high_water_cursor"],
+        "high_water_sequence": high_water_sequence,
+    })
+    payload = add_assessment_contract(payload, visible_events)
+    payload = _network_apply_retained_posture(payload)
+    _network_apply_collector_truth(payload, collector_health)
+    _log_network_startup_reconciliation(
+        "startup_reconciliation_report",
+        packets_captured=collector_health.get("startup_packets_captured", 0),
+        packet_events_emitted=collector_health.get("startup_canonical_packet_events_emitted", 0),
+        operator_visible_rows_created=len(_NETWORK_STARTUP_OPERATOR_RECORDS),
+        snapshot_packet_records_returned=visible_count,
+        snapshot_unique_operator_visible_rows=len(snapshot_identities),
+        os_active_connections=os_active_connection_count,
+        reduction_reason=(
+            "os_active_connections_is_an_lsof_socket_snapshot; table_records_are_only_recent_tshark_packet_events; "
+            "multiple_packet_events_with_the_same_frontend_row_identity_merge_into_one_table_row"
+        ),
+    )
+    return payload, status_code
+
+
+def _network_apply_retained_posture(payload: dict[str, Any]) -> dict[str, Any]:
+    """Attach Findings' retained assessment truth without changing health.
+
+    The header and Connections snapshot describe current capture operations,
+    while assessment lifecycle remains active until a retained transition
+    resolves it.  Reusing the bounded, cached Findings projection keeps one
+    assessment identity across views and avoids a second classifier.
+    """
+    try:
+        posture, _status_code = _network_projection_findings("retained")
+    except Exception:
+        return payload
+    result = dict(payload)
+    for key in (
+        "assessments",
+        "assessment_refs",
+        "assessment_summary",
+        "assessment_filter",
+        "assessment_rule_version",
+        "assessment_coverage",
+        "assessment_gap",
+    ):
+        if key in posture:
+            result[key] = posture[key]
+    return result
+
+
+def _network_history_enabled() -> bool:
+    return os.getenv("CLEANHOUSE_NETWORK_HISTORY_ENABLED", "1").lower() not in {"0", "false", "no", "off"}
+
+
+def _network_history_interval_seconds() -> int:
+    try:
+        return max(10, int(os.getenv("CLEANHOUSE_NETWORK_HISTORY_INTERVAL_SECONDS", "30")))
+    except ValueError:
+        return 30
+
+
+def _record_network_history_recovery_gap() -> None:
+    last = _network_latest_history_timestamp()
+    if not last:
+        return
+    now = datetime.now(timezone.utc)
+    threshold = max(_network_history_interval_seconds() * 2, 120)
+    if (now - last).total_seconds() > threshold:
+        _persist_network_timeline_gap("history_interrupted", last, now)
+
+
+def _record_network_history_sample() -> None:
+    payload, _status = _network_snapshot_payload(refresh=True)
+    sample_events = payload.get("events") if isinstance(payload.get("events"), list) else []
+    if not sample_events:
+        _log_network_history_io("runtime_sample", status="empty", count=0)
+        return
+    ranked = sorted(sample_events, key=_network_event_rank, reverse=True)
+    for event in ranked[:10]:
+        _preserve_network_trend_sample(event)
+        if _network_is_timeline_notable(event):
+            _persist_network_timeline_notable(event, "history")
+    _log_network_history_io("runtime_sample", status="saved", count=min(len(ranked), 10))
+
+
+def _network_history_service_loop() -> None:
+    _record_network_history_recovery_gap()
+    while not _NETWORK_HISTORY_SERVICE_STOP.is_set():
+        try:
+            _record_network_history_sample()
+        except Exception:
+            pass
+        _NETWORK_HISTORY_SERVICE_STOP.wait(_network_history_interval_seconds())
+
+
+def start_network_history_service() -> None:
+    global _NETWORK_HISTORY_SERVICE_THREAD
+    if not _network_history_enabled():
+        return
+    with _NETWORK_HISTORY_SERVICE_LOCK:
+        if _NETWORK_HISTORY_SERVICE_THREAD and _NETWORK_HISTORY_SERVICE_THREAD.is_alive():
+            return
+        _NETWORK_HISTORY_SERVICE_STOP.clear()
+        _NETWORK_HISTORY_SERVICE_THREAD = threading.Thread(
+            target=_network_history_service_loop,
+            daemon=True,
+            name="cleanhouse-network-history",
+        )
+        _NETWORK_HISTORY_SERVICE_THREAD.start()
+
+
+def stop_network_history_service(timeout: float = 5.0) -> dict[str, Any]:
+    global _NETWORK_HISTORY_SERVICE_THREAD
+    _NETWORK_HISTORY_SERVICE_STOP.set()
+    with _NETWORK_HISTORY_SERVICE_LOCK:
+        thread = _NETWORK_HISTORY_SERVICE_THREAD
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout=max(0.0, float(timeout)))
+    joined = thread is None or not thread.is_alive()
+    if joined:
+        with _NETWORK_HISTORY_SERVICE_LOCK:
+            if _NETWORK_HISTORY_SERVICE_THREAD is thread:
+                _NETWORK_HISTORY_SERVICE_THREAD = None
+    return {
+        "service": "network_history",
+        "state": "stopped" if joined else "stopping",
+        "joined": joined,
+    }
+
+
+def _event_from_tshark_packet(packet: dict[str, Any], interface: str) -> dict[str, Any] | None:
+    layers = packet.get("_source", {}).get("layers", {})
+    if not isinstance(layers, dict):
+        return None
+    frame = layers.get("frame", {}) if isinstance(layers.get("frame"), dict) else layers
+    dst_port = _layer_value(layers.get("tcp", {}) if isinstance(layers.get("tcp"), dict) else {}, "tcp.dstport") \
+        or _layer_value(layers.get("udp", {}) if isinstance(layers.get("udp"), dict) else {}, "udp.dstport")
+    event = {
+        "timestamp": _layer_value(frame, "frame.time_epoch"),
+        "packet_index": _layer_value(frame, "frame.number") or None,
+        "packet_length": _layer_value(frame, "frame.len") or None,
+        "protocol": _packet_protocol(layers),
+        "src_ip": _layer_value(layers.get("ip", {}) if isinstance(layers.get("ip"), dict) else {}, "ip.src")
+            or _layer_value(layers.get("ipv6", {}) if isinstance(layers.get("ipv6"), dict) else {}, "ipv6.src"),
+        "dst_ip": _layer_value(layers.get("ip", {}) if isinstance(layers.get("ip"), dict) else {}, "ip.dst")
+            or _layer_value(layers.get("ipv6", {}) if isinstance(layers.get("ipv6"), dict) else {}, "ipv6.dst"),
+        "src_port": _layer_value(layers.get("tcp", {}) if isinstance(layers.get("tcp"), dict) else {}, "tcp.srcport")
+            or _layer_value(layers.get("udp", {}) if isinstance(layers.get("udp"), dict) else {}, "udp.srcport"),
+        "dst_port": dst_port,
+        "dns_query": _layer_value(layers.get("dns", {}) if isinstance(layers.get("dns"), dict) else {}, "dns.qry.name"),
+        "tls_sni": _layer_value(layers.get("tls", {}) if isinstance(layers.get("tls"), dict) else {}, "tls.handshake.extensions_server_name"),
+        "http_host": _layer_value(layers.get("http", {}) if isinstance(layers.get("http"), dict) else {}, "http.host"),
+        "interface": interface,
+        "source": "network_capture",
+        "category": "Local traffic" if _is_local_network_host(
+            _layer_value(layers.get("ip", {}) if isinstance(layers.get("ip"), dict) else {}, "ip.dst")
+            or _layer_value(layers.get("ipv6", {}) if isinstance(layers.get("ipv6"), dict) else {}, "ipv6.dst")
+        ) else "External connection",
+        "meaning": "This is local app or device traffic." if _is_local_network_host(
+            _layer_value(layers.get("ip", {}) if isinstance(layers.get("ip"), dict) else {}, "ip.dst")
+            or _layer_value(layers.get("ipv6", {}) if isinstance(layers.get("ipv6"), dict) else {}, "ipv6.dst")
+        ) else "This packet is communicating outside this Mac.",
+    }
+    if not any(event.get(key) for key in ("src_ip", "dst_ip", "dns_query", "tls_sni", "http_host")):
+        return None
+    event["summary"] = _network_event_summary(event)
+    event["source_display"] = _network_endpoint(event.get("src_ip"), event.get("src_port"))
+    event["destination_display"] = _network_endpoint(
+        event.get("dns_query") or event.get("http_host") or event.get("tls_sni") or event.get("dst_ip"),
+        event.get("dst_port"),
+    )
+    return event
+
+
+def _tshark_json_command(paths: dict[str, Path], interface: str, duration: int | None = None, packet_limit: int | None = None) -> list[str]:
+    command = [
+        str(paths["tshark"]),
+        "-l",
+        "-n",
+        "-i", interface,
+    ]
+    if duration is not None:
+        command.extend(["-a", f"duration:{duration}"])
+    if packet_limit is not None:
+        command.extend(["-c", str(max(1, int(packet_limit)))])
+    command.extend([
+        "-T", "json",
+        "-j", "frame",
+        "-j", "ip",
+        "-j", "ipv6",
+        "-j", "tcp",
+        "-j", "udp",
+        "-j", "dns",
+        "-j", "tls",
+        "-j", "http",
+    ])
+    return command
+
+
+def _network_live_capture_filter(server_port: str) -> str:
+    port = str(server_port or "").strip()
+    if not port.isdigit():
+        return ""
+    return f"not port {int(port)}"
+
+
+def _tshark_live_fields_command(paths: dict[str, Path], interfaces: list[str] | str, capture_filter: str = "") -> list[str]:
+    interface_names = [interfaces] if isinstance(interfaces, str) else list(interfaces)
+    command = [
+        str(paths["tshark"]),
+        "-l",
+        "-n",
+    ]
+    for interface in interface_names:
+        command.extend(["-i", interface])
+    if capture_filter:
+        command.extend(["-f", capture_filter])
+    command.extend([
+        "-T", "fields",
+        "-E", "header=n",
+        "-E", "separator=|",
+        "-E", "occurrence=f",
+        "-e", "frame.time_epoch",
+        "-e", "frame.number",
+        "-e", "frame.len",
+        "-e", "frame.protocols",
+        "-e", "frame.interface_name",
+        "-e", "ip.src",
+        "-e", "ipv6.src",
+        "-e", "ip.dst",
+        "-e", "ipv6.dst",
+        "-e", "tcp.srcport",
+        "-e", "udp.srcport",
+        "-e", "tcp.dstport",
+        "-e", "udp.dstport",
+        "-e", "dns.qry.name",
+        "-e", "tls.handshake.extensions_server_name",
+        "-e", "http.host",
+    ])
+    return command
+
+
+def _event_from_tshark_fields_line(line: str, interface: str) -> dict[str, Any] | None:
+    raw = str(line or "").rstrip("\n")
+    if not raw:
+        return None
+    parts = raw.split("|")
+    if len(parts) < 16:
+        parts.extend([""] * (16 - len(parts)))
+    (
+        timestamp,
+        packet_index,
+        packet_length,
+        frame_protocols,
+        frame_interface,
+        ip_src,
+        ipv6_src,
+        ip_dst,
+        ipv6_dst,
+        tcp_src_port,
+        udp_src_port,
+        tcp_dst_port,
+        udp_dst_port,
+        dns_query,
+        tls_sni,
+        http_host,
+    ) = parts[:16]
+    src_ip = ip_src or ipv6_src
+    dst_ip = ip_dst or ipv6_dst
+    src_port = tcp_src_port or udp_src_port
+    dst_port = tcp_dst_port or udp_dst_port
+    event = {
+        "timestamp": timestamp,
+        "packet_index": packet_index or None,
+        "packet_length": packet_length or None,
+        "protocol": _protocol_from_frame_protocols(frame_protocols),
+        "src_ip": src_ip,
+        "dst_ip": dst_ip,
+        "src_port": src_port,
+        "dst_port": dst_port,
+        "dns_query": dns_query,
+        "tls_sni": tls_sni,
+        "http_host": http_host,
+        "interface": frame_interface or interface,
+        "source": "network_capture",
+        "category": "Local traffic" if _is_local_network_host(dst_ip) else "External connection",
+        "meaning": "This is local app or device traffic." if _is_local_network_host(dst_ip) else "This packet is communicating outside this Mac.",
+    }
+    if not any(event.get(key) for key in ("src_ip", "dst_ip", "dns_query", "tls_sni", "http_host")):
+        return None
+    event["summary"] = _network_event_summary(event)
+    event["source_display"] = _network_endpoint(src_ip, src_port)
+    event["destination_display"] = _network_endpoint(
+        dns_query or http_host or tls_sni or dst_ip,
+        dst_port,
+    )
+    return event
+
+
+def _network_collector_server_interfaces(interfaces: list[dict[str, str]]) -> list[str]:
+    requested = os.getenv("CLEANHOUSE_NETWORK_INTERFACE", "").strip()
+    available = [str(item.get("name") or "").strip() for item in interfaces]
+    available = [name for name in available if name]
+    if requested:
+        for item in interfaces:
+            if requested in {str(item.get("id") or ""), str(item.get("name") or "")}:
+                return [str(item.get("name") or requested)]
+        return [requested]
+
+    selected: list[str] = []
+
+    def add(name: str) -> None:
+        if name and name in available and name not in selected:
+            selected.append(name)
+
+    add("lo0")
+    for name in sorted(_active_capture_interfaces()):
+        if not name.startswith("utun"):
+            add(name)
+    for preferred in ("en0", "en1"):
+        add(preferred)
+    if selected:
+        return selected
+    return [available[0]] if available else []
+
+
+def _network_collector_command_factory() -> dict[str, Any]:
+    interfaces, engine_error = _bundled_wireshark_engine_interfaces()
+    if engine_error:
+        payload, _status_code = engine_error
+        reason = str((payload.get("summary") or {}).get("reason") or "engine_unavailable")
+        raise CaptureEngineUnavailable(reason)
+    selected = _network_collector_server_interfaces(interfaces)
+    if not selected:
+        raise RuntimeError("capture interface unavailable")
+    paths = _bundled_wireshark_paths()
+    server_port = os.getenv("CLEANHOUSE_PORT", "3333")
+    return {
+        "command": _tshark_live_fields_command(
+            paths,
+            selected,
+            _network_live_capture_filter(server_port),
+        ),
+        "cwd": str(paths["root"]),
+        "interface": ",".join(selected),
+    }
+
+
+def _network_collector_enrich_event(event: dict[str, Any]) -> dict[str, Any]:
+    global _NETWORK_COLLECTOR_ENRICHMENT, _NETWORK_COLLECTOR_ENRICHMENT_AT
+    now = time.monotonic()
+    with _NETWORK_COLLECTOR_ENRICHMENT_LOCK:
+        if (
+            not _NETWORK_COLLECTOR_ENRICHMENT
+            or now - _NETWORK_COLLECTOR_ENRICHMENT_AT >= NETWORK_COLLECTOR_ENRICHMENT_INTERVAL_SECONDS
+        ):
+            _NETWORK_COLLECTOR_ENRICHMENT = _network_enrichment_index(refresh=False)
+            _NETWORK_COLLECTOR_ENRICHMENT_AT = time.monotonic()
+        enrichment = _NETWORK_COLLECTOR_ENRICHMENT
+    return _network_apply_enrichment(event, enrichment)
+
+
+def _network_capture_sample_identity(event: dict[str, Any]) -> str:
+    return "|".join(str(event.get(key) or "").strip().lower() for key in (
+        "protocol",
+        "src_ip",
+        "src_port",
+        "dst_ip",
+        "dst_port",
+        "dns_query",
+        "tls_sni",
+        "http_host",
+    ))
+
+
+def _persist_network_collector_event(envelope: dict[str, Any]) -> dict[str, Any]:
+    global _NETWORK_CANONICAL_EVENT_IDS_INITIALIZED
+    global _NETWORK_STARTUP_OPERATOR_RECORDS_CREATED, _NETWORK_STARTUP_OPERATOR_RECORDS_UPDATED
+    event = envelope.get("event") if isinstance(envelope.get("event"), dict) else {}
+    event_id = str(event.get("event_id") or "")
+    with _NETWORK_CANONICAL_EVENT_IDS_LOCK:
+        if not _NETWORK_CANONICAL_EVENT_IDS_INITIALIZED:
+            for stored in _network_stored_observations(limit=NETWORK_EVIDENCE_LOOKBACK):
+                stored_id = str(stored.get("event_id") or "")
+                if stored_id:
+                    _NETWORK_CANONICAL_EVENT_IDS[stored_id] = None
+            while len(_NETWORK_CANONICAL_EVENT_IDS) > _NETWORK_CANONICAL_EVENT_IDS_LIMIT:
+                _NETWORK_CANONICAL_EVENT_IDS.pop(next(iter(_NETWORK_CANONICAL_EVENT_IDS)))
+            _NETWORK_CANONICAL_EVENT_IDS_INITIALIZED = True
+        duplicate = bool(event_id and event_id in _NETWORK_CANONICAL_EVENT_IDS)
+    if duplicate:
+        _log_network_startup_reconciliation(
+            "operator_record_reconciled",
+            event_id=event_id,
+            outcome="ignored",
+            reason="duplicate_canonical_event_id",
+        )
+        duplicate_envelope = envelope.copy()
+        duplicate_envelope["type"] = "collector.failure"
+        duplicate_envelope["event"] = {
+            "reason": "duplicate_event_id",
+            "state": "degraded",
+            "lost_event_id": event_id,
+            "sequence": envelope.get("sequence"),
+            "collector_sequence": envelope.get("sequence"),
+            "cursor": envelope.get("cursor"),
+            "collector_cursor": envelope.get("cursor"),
+            "server_boot_id": NETWORK_SERVER_BOOT_ID,
+        }
+        return _persist_network_collector_receipt(duplicate_envelope)
+    # The shared SQLite outbox is the bounded durable commit that precedes
+    # fan-out. The multi-gigabyte event spine is updated by its bounded worker
+    # so capture cannot be stalled by a per-packet history transaction.
+    persisted = _network_public_event(event)
+    live_assessments, live_indicators = assess_network_event(event)
+    persisted["assessments"] = live_assessments
+    persisted["assessment_refs"] = [item["assessment_id"] for item in live_assessments]
+    persisted["assessment_summary"] = add_assessment_contract(
+        {},
+        [event],
+    )["assessment_summary"]
+    if live_indicators:
+        persisted["assessment_indicators"] = live_indicators
+    if not _enqueue_network_vvault_sync(persisted):
+        raise RuntimeError("network durable outbox write failed")
+    if not _enqueue_network_live_persistence(persisted):
+        raise RuntimeError("network event-spine queue overflow")
+    # Projections must see the same authentic packet evidence immediately even
+    # when the durable event database is large. This bounded boot-local window
+    # supplements persistence; it never replaces or fabricates canonical rows.
+    with _NETWORK_RECENT_OBSERVATIONS_LOCK:
+        _NETWORK_RECENT_OBSERVATIONS.append(dict(persisted))
+    # Live packet delivery updates Table and the in-browser trend tape
+    # immediately. Retained projections keep their short bounded cache instead
+    # of forcing multi-gigabyte history reads for every captured packet.
+    identity = _network_startup_operator_identity(persisted)
+    with _NETWORK_STARTUP_RECONCILIATION_LOCK:
+        previous_count = _NETWORK_STARTUP_OPERATOR_RECORDS.get(identity, 0)
+        _NETWORK_STARTUP_OPERATOR_RECORDS[identity] = previous_count + 1
+        if previous_count:
+            _NETWORK_STARTUP_OPERATOR_RECORDS_UPDATED += 1
+            outcome = "updated_existing_table_record"
+            reason = "frontend_row_identity_matched_existing_record"
+        else:
+            _NETWORK_STARTUP_OPERATOR_RECORDS_CREATED += 1
+            outcome = "created_new_table_record"
+            reason = "frontend_row_identity_not_previously_observed"
+        created_count = _NETWORK_STARTUP_OPERATOR_RECORDS_CREATED
+        updated_count = _NETWORK_STARTUP_OPERATOR_RECORDS_UPDATED
+        unique_count = len(_NETWORK_STARTUP_OPERATOR_RECORDS)
+    _log_network_startup_reconciliation(
+        "operator_record_reconciled",
+        event_id=event_id,
+        collector_sequence=envelope.get("sequence"),
+        identity=identity,
+        outcome=outcome,
+        reason=reason,
+        operator_visible_rows_created=created_count,
+        operator_visible_rows_updated=updated_count,
+        current_unique_operator_visible_rows=unique_count,
+    )
+    if event_id:
+        with _NETWORK_CANONICAL_EVENT_IDS_LOCK:
+            _NETWORK_CANONICAL_EVENT_IDS[event_id] = None
+            while len(_NETWORK_CANONICAL_EVENT_IDS) > _NETWORK_CANONICAL_EVENT_IDS_LIMIT:
+                _NETWORK_CANONICAL_EVENT_IDS.pop(next(iter(_NETWORK_CANONICAL_EVENT_IDS)))
+    result = envelope.copy()
+    result["event"] = persisted
+    return result
+
+
+def _persist_network_collector_receipt(envelope: dict[str, Any]) -> dict[str, Any]:
+    receipt_type = str(envelope.get("type") or "collector.receipt")
+    sequence = int(envelope.get("sequence") or 0)
+    receipt = dict(envelope.get("event") or {})
+    receipt_id = str(receipt.get("event_id") or f"network_collector:{NETWORK_SERVER_BOOT_ID}:{sequence}:{receipt_type}")
+    receipt.update({
+        "event_id": receipt_id,
+        "event_type": NETWORK_COLLECTOR_RECEIPT_EVENT_TYPE,
+        "receipt_type": receipt_type,
+        "timestamp": str(receipt.get("timestamp") or _now_iso()),
+        "immutable": True,
+    })
+    events.insert_event(
+        event_type=NETWORK_COLLECTOR_RECEIPT_EVENT_TYPE,
+        path=f"/network/collector/{receipt_id}",
+        summary=f"Network collector {receipt_type.rsplit('.', 1)[-1]}",
+        session_id=DEFAULT_SESSION_ID,
+        timestamp=receipt["timestamp"],
+        source_surface="network",
+        actor_type="network_capture",
+        evidence_level="observed",
+        collector_status="error" if receipt_type in {"collector.failure", "collector.gap"} else "ok",
+        scope_relation="runtime",
+        evidence_refs=[f"local://cleanhouse/network/collector/{receipt_id}"],
+        raw_evidence_ref=f"local://cleanhouse/network/collector/{receipt_id}",
+        data={"network_collector": receipt},
+    )
+    result = envelope.copy()
+    result["event"] = _network_public_event(receipt)
+    return result
+
+
+def _network_collector_env_int(name: str, default: int, minimum: int) -> int:
+    try:
+        return max(minimum, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _network_collector_env_float(name: str, default: float, minimum: float) -> float:
+    try:
+        return max(minimum, float(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _get_network_collector() -> NetworkCollectorSupervisor:
+    global _NETWORK_COLLECTOR
+    if _NETWORK_COLLECTOR is not None:
+        return _NETWORK_COLLECTOR
+    with _NETWORK_COLLECTOR_LOCK:
+        if _NETWORK_COLLECTOR is None:
+            try:
+                watchdog_backoff = max(0.1, float(os.getenv("CLEANHOUSE_NETWORK_WATCHDOG_BACKOFF_SECONDS", "1")))
+            except (TypeError, ValueError):
+                watchdog_backoff = 1.0
+            _NETWORK_COLLECTOR = NetworkCollectorSupervisor(
+                _network_collector_command_factory,
+                _event_from_tshark_fields_line,
+                _network_collector_enrich_event,
+                _persist_network_collector_event,
+                _persist_network_collector_receipt,
+                boot_id=NETWORK_SERVER_BOOT_ID,
+                replay_size=_network_collector_env_int("CLEANHOUSE_NETWORK_REPLAY_SIZE", 4096, 64),
+                subscriber_queue_size=_network_collector_env_int("CLEANHOUSE_NETWORK_SUBSCRIBER_QUEUE_SIZE", 512, 2),
+                watchdog_backoff_seconds=watchdog_backoff,
+                event_identity=_network_capture_sample_identity,
+                coalesce_window_seconds=_network_collector_env_float(
+                    "CLEANHOUSE_NETWORK_SAMPLE_INTERVAL_SECONDS",
+                    1.0,
+                    0.05,
+                ),
+            )
+    return _NETWORK_COLLECTOR
+
+
+def start_network_collector_service() -> dict[str, Any]:
+    return _get_network_collector().start()
+
+
+def stop_network_collector_service(timeout: float = 5.0) -> dict[str, Any] | None:
+    receipt = _NETWORK_COLLECTOR.stop(timeout=timeout) if _NETWORK_COLLECTOR is not None else None
+    live_persistence = _stop_network_live_persist_worker(timeout=timeout)
+    vvault_sync = _stop_network_vvault_worker(timeout=timeout)
+    if receipt is not None and isinstance(receipt.get("event"), dict):
+        receipt["event"]["workers"] = [live_persistence, vvault_sync]
+    return receipt
+
+
+def network_collector_health(*, allow_keychain_read: bool = True) -> dict[str, Any]:
+    health = _get_network_collector().health()
+    preservation = vvault_sync.status(surface="network", allow_keychain_read=allow_keychain_read)
+    health.update({
+        "persistence_queue_depth": _NETWORK_LIVE_PERSIST_QUEUE.qsize(),
+        "persistence_queue_capacity": _NETWORK_LIVE_PERSIST_QUEUE.maxsize,
+        "persistence_queue_drops": _NETWORK_LIVE_PERSIST_QUEUE_DROPS,
+        "persistence_failures": health.get("persistence_failures", 0) + _NETWORK_LIVE_PERSIST_FAILURES,
+        "persistence_last_error": _NETWORK_LIVE_PERSIST_LAST_ERROR or health.get("last_error", ""),
+        "vvault_queue_depth": preservation.get("backlog_depth", 0),
+        "vvault_queue_capacity": None,
+        "vvault_queue_drops": 0,
+        "vvault_state": preservation.get("state", "unavailable"),
+        "vvault_worker_alive": bool(preservation.get("worker_alive")),
+    })
+    return health
+
+
+def _is_loopback_packet_host(value: Any) -> bool:
+    host = str(value or "").strip().strip("[]").lower()
+    if host in {"localhost", "::1"} or host.startswith("127."):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_current_live_stream_packet(event: dict[str, Any], client_port: str, server_port: str) -> bool:
+    if not client_port or not server_port:
+        return False
+    src_port = str(event.get("src_port") or "")
+    dst_port = str(event.get("dst_port") or "")
+    if {src_port, dst_port} != {client_port, server_port}:
+        return False
+    return _is_loopback_packet_host(event.get("src_ip")) and _is_loopback_packet_host(event.get("dst_ip"))
+
+
+def _iter_tshark_json_packets(stdout: Any):
+    buffer: list[str] = []
+    capturing = False
+    depth = 0
+    in_string = False
+    escaped = False
+
+    while True:
+        char = stdout.read(1)
+        if not char:
+            break
+
+        if not capturing:
+            if char == "{":
+                buffer = [char]
+                capturing = True
+                depth = 1
+                in_string = False
+                escaped = False
+            continue
+
+        buffer.append(char)
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                raw_packet = "".join(buffer)
+                buffer = []
+                capturing = False
+                try:
+                    packet = json.loads(raw_packet)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(packet, dict):
+                    yield packet
+
+
+def _tshark_packets_from_json_text(value: str) -> list[dict[str, Any]]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        return [payload]
+    return []
+
+
+def _sse_event(event: str, payload: dict[str, Any], *, event_id: str = "") -> str:
+    id_line = f"id: {event_id}\n" if event_id else ""
+    return f"{id_line}event: {event}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+
+def _network_tags(status: str, state: str, reasons: list[str] | None = None, explanation: str = "") -> dict[str, Any]:
     return {
         "status": status,
-        "engine": "wireshark",
-        "tshark_path": tshark or "",
-        "wireshark_path": wireshark or "",
-        "dumpcap_path": dumpcap or "",
-        "permission_state": "unknown" if tshark else "setup_required",
-        "message": message,
-        "fallback": "Existing CleanHouse network metadata remains available but is not the final network evidence authority.",
+        "state": state,
+        "reasons": reasons or [],
+        "explanation": explanation,
     }
+
+
+def _run_bundled_wireshark_capture() -> tuple[dict[str, Any], int]:
+    interfaces, engine_error = _bundled_wireshark_engine_interfaces()
+    if engine_error:
+        return engine_error
+    duration, duration_error = _capture_duration()
+    if duration_error:
+        return duration_error
+
+    interface = _select_capture_interface(interfaces if isinstance(interfaces, list) else [])
+    if not interface:
+        return _bundled_wireshark_error("engine_failed", "Capture system unavailable.")
+
+    paths = _bundled_wireshark_paths()
+    command = _tshark_json_command(paths, interface, duration=duration, packet_limit=min(WIRESHARK_MAX_EVENTS, 5))
+    events_payload = []
+    enrichment = _network_enrichment_index(refresh=False)
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(paths["root"]),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=duration + WIRESHARK_CAPTURE_TIMEOUT_GRACE_SECONDS,
+            check=False,
+        )
+        for packet in _tshark_packets_from_json_text(completed.stdout):
+            event = _event_from_tshark_packet(packet, interface)
+            if event:
+                events_payload.append(_persist_network_observation(event, enrichment))
+            if len(events_payload) >= WIRESHARK_MAX_EVENTS:
+                break
+    except subprocess.TimeoutExpired:
+        return _bundled_wireshark_error("capture_timeout", "Network engine failed to start.")
+    except OSError:
+        return _bundled_wireshark_error("engine_failed", "Network engine failed to start.")
+
+    stderr_text = completed.stderr
+    if completed.returncode not in (0, -15) and not events_payload:
+        return _wireshark_capture_error(stderr_text)
+
+    return _network_ui_contract(
+        "CAPTURING" if events_payload else "NO_DATA",
+        events=events_payload,
+        summary={
+            "reason": "events_observed" if events_payload else "no_data",
+            "event_count": len(events_payload),
+        },
+    )
 
 
 @bp.route("/cleanhouse/network/wireshark", methods=["GET"])
 def wireshark_status():
-    return jsonify(_wireshark_status_payload())
+    payload, status_code = _validate_bundled_wireshark_tools()
+    if payload.get("state") == "READY" and status_code == 200:
+        return jsonify({"state": "READY"}), 200
+    return jsonify({"state": "ERROR", "reason": "engine_unavailable"}), 400
+
+
+@bp.route("/cleanhouse/network/live", methods=["GET"])
+def network_live():
+    collector = _get_network_collector()
+    collector.start()
+    # Native EventSource retains its original query string across reconnects
+    # but advances Last-Event-ID, so the header is the authoritative cursor.
+    after_cursor = str(request.headers.get("Last-Event-ID") or request.args.get("after") or "").strip()
+    subscription = collector.subscribe(after_cursor=after_cursor or None)
+
+    @stream_with_context
+    def stream():
+        try:
+            health = network_collector_health()
+            state_map = {
+                "running": "CAPTURING",
+                "starting": "WARMING",
+                "blocked": "CAPTURE_BLOCKED",
+                "degraded": "ERROR",
+                "stopped": "ERROR",
+                "stopping": "ERROR",
+            }
+            initial_state, initial_reason = _network_collector_contract(health)
+            initial_cursor = subscription.initial_cursor
+            yield _sse_event("status", {
+                "state": initial_state,
+                "tags": _network_fixed_tags(initial_state, [], {"reason": initial_reason}),
+                "events": [],
+                "summary": {
+                    "reason": initial_reason,
+                    "event_count": 0,
+                    "cursor": initial_cursor,
+                },
+                "cursor": initial_cursor,
+                "collector": health,
+            }, event_id=initial_cursor)
+
+            while True:
+                try:
+                    envelope = subscription.get(timeout=15.0)
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+                    continue
+                if envelope is None:
+                    return
+                receipt_type = str(envelope.get("type") or "")
+                cursor = str(envelope.get("cursor") or "")
+                payload = dict(envelope.get("event") or {})
+                payload.setdefault("sequence", envelope.get("sequence"))
+                payload.setdefault("collector_sequence", envelope.get("sequence"))
+                payload.setdefault("cursor", cursor)
+                payload.setdefault("collector_cursor", cursor)
+                payload.setdefault("receipt_type", receipt_type)
+                if receipt_type == "network.event":
+                    event_name = "network-event"
+                elif receipt_type == "collector.gap":
+                    event_name = "gap"
+                elif receipt_type == "collector.failure":
+                    event_name = "failure"
+                    receipt_health = {
+                        **network_collector_health(),
+                        "state": payload.get("state") or "degraded",
+                        "reason_code": payload.get("reason") or "",
+                        "last_error": payload.get("error") or "",
+                    }
+                    capture_state, capture_reason = _network_collector_contract(receipt_health)
+                    payload["state"] = capture_state
+                    payload["summary"] = {"reason": capture_reason, "event_count": 0, "cursor": cursor}
+                    payload["tags"] = _network_fixed_tags(capture_state, [], payload["summary"])
+                else:
+                    event_name = "status"
+                    payload["collector"] = network_collector_health()
+                    payload["state"] = state_map.get(str(payload.get("state") or ""), payload.get("state") or "WARMING")
+                yield _sse_event(event_name, payload, event_id=cursor)
+        finally:
+            subscription.close()
+
+    return Response(stream(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
+
+
+def _network_projection_window(range_key: str) -> tuple[datetime, datetime]:
+    end = datetime.now(timezone.utc)
+    duration_ms = NETWORK_TIME_RANGES_MS.get(range_key, NETWORK_TIME_RANGES_MS["5s"])
+    start = datetime.fromtimestamp((end.timestamp() * 1000 - duration_ms) / 1000, tz=timezone.utc)
+    return start, end
+
+
+def _network_retention_start() -> datetime:
+    return datetime.now(timezone.utc) - timedelta(days=NETWORK_EVIDENCE_RETENTION_DAYS)
+
+
+def _network_events_in_range(
+    range_key: str,
+    limit: int = NETWORK_EVIDENCE_LOOKBACK,
+    *,
+    enrich_unknown: bool = True,
+) -> list[dict[str, Any]]:
+    start, end = _network_projection_window(range_key)
+    retention_start = _network_retention_start()
+    if start < retention_start:
+        start = retention_start
+    by_id: dict[str, dict[str, Any]] = {}
+    enrichment = None
+    with _NETWORK_RECENT_OBSERVATIONS_LOCK:
+        recent = [dict(item) for item in _NETWORK_RECENT_OBSERVATIONS]
+    recent_in_window = [
+        item for item in recent
+        if start <= _network_event_datetime(item.get("timestamp")) < end
+    ]
+    if range_key in {"5s", "1m"} and recent_in_window:
+        candidates = recent_in_window
+    else:
+        candidates = [*_network_stored_observations(limit=limit, start=start, end=end), *recent_in_window]
+    for item in candidates:
+        event_dt = _network_event_datetime(item.get("timestamp"))
+        if start <= event_dt < end:
+            projected = item
+            if enrich_unknown and _network_event_app(projected) == "Unknown app":
+                if enrichment is None:
+                    enrichment = _network_enrichment_index(refresh=False)
+                projected = _network_apply_enrichment(projected, enrichment)
+            event_id = str(projected.get("event_id") or "")
+            if event_id:
+                by_id[event_id] = projected
+    visible = list(by_id.values())
+    visible.sort(key=lambda item: (_network_event_datetime(item.get("timestamp")), str(item.get("event_id") or "")))
+    return visible
+
+
+def _network_retained_events(limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
+    retention_start = _network_retention_start()
+    retained = [
+        item for item in _network_stored_observations(limit=limit, start=retention_start)
+        if _network_event_datetime(item.get("timestamp")) >= retention_start
+    ]
+    retained.sort(key=lambda item: (_network_event_datetime(item.get("timestamp")), str(item.get("event_id") or "")))
+    return retained
+
+
+def _stored_network_timeline_notables(
+    limit: int = NETWORK_EVIDENCE_LOOKBACK,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    notables = []
+    for row in _network_stored_event_rows(NETWORK_TIMELINE_NOTABLE_EVENT_TYPE, limit=limit, start=start, end=end):
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        notable = data.get("network_timeline_notable") if isinstance(data.get("network_timeline_notable"), dict) else {}
+        if notable:
+            notables.append(notable)
+    return notables
+
+
+def _stored_network_timeline_gaps(
+    limit: int = NETWORK_EVIDENCE_LOOKBACK,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    gaps = []
+    for row in _network_stored_event_rows(NETWORK_TIMELINE_GAP_EVENT_TYPE, limit=limit, start=start, end=end):
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        gap = data.get("network_gap") if isinstance(data.get("network_gap"), dict) else {}
+        if gap:
+            gaps.append(gap)
+    return gaps
+
+
+def _vvault_network_timeline_notables(range_key: str = "", start: datetime | None = None, end: datetime | None = None, limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
+    try:
+        notables = vvault_preservation.load_network_timeline_notables(range_key=range_key, start=start, end=end, limit=limit)
+        _log_network_history_io("vvault_load", artifact="timeline_notables", range=range_key, count=len(notables))
+        return notables
+    except Exception as exc:
+        _LOG.warning("network_history_io vvault_load_failed artifact=timeline_notables range=%s error=%s", range_key, exc)
+        return []
+
+
+def _vvault_network_timeline_gaps(range_key: str = "", start: datetime | None = None, end: datetime | None = None, limit: int = NETWORK_EVIDENCE_LOOKBACK) -> list[dict[str, Any]]:
+    try:
+        gaps = vvault_preservation.load_network_timeline_gaps(range_key=range_key, start=start, end=end, limit=limit)
+        _log_network_history_io("vvault_load", artifact="timeline_gaps", range=range_key, count=len(gaps))
+        return gaps
+    except Exception as exc:
+        _LOG.warning("network_history_io vvault_load_failed artifact=timeline_gaps range=%s error=%s", range_key, exc)
+        return []
+
+
+def _network_timeline_gap_event(reason: str, start: datetime, end: datetime) -> dict[str, Any]:
+    duration_seconds = max(0, int((end - start).total_seconds()))
+    seed = f"{reason}:{start.isoformat()}:{end.isoformat()}"
+    return {
+        "event_id": "network_gap:" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:24],
+        "event_type": NETWORK_TIMELINE_GAP_EVENT_TYPE,
+        "timestamp": end.isoformat().replace("+00:00", "Z"),
+        "gap_start": start.isoformat().replace("+00:00", "Z"),
+        "gap_end": end.isoformat().replace("+00:00", "Z"),
+        "duration_seconds": duration_seconds,
+        "process": "CleanHouse",
+        "app": "CleanHouse",
+        "protocol": "History gap",
+        "category": "History gap",
+        "summary": "CleanHouse network history was interrupted.",
+        "meaning": "CleanHouse was not collecting network history during this interval.",
+        "reason": reason,
+        "severity": "warning",
+        "confidence": "high",
+        "system_impact": 2,
+        "source": "network_history_service",
+    }
+
+
+def _network_timeline_event_already_stored(event_type: str, event_id: str) -> bool:
+    for row in _network_stored_event_rows(event_type, limit=NETWORK_EVIDENCE_LOOKBACK):
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
+        for value in data.values():
+            if isinstance(value, dict) and str(value.get("event_id") or "") == event_id:
+                return True
+    return False
+
+
+def _persist_network_timeline_notable(event: dict[str, Any], range_key: str = "history") -> None:
+    notable = _network_public_event(event)
+    event_id = str(notable.get("event_id") or "")
+    if not event_id or _network_timeline_event_already_stored(NETWORK_TIMELINE_NOTABLE_EVENT_TYPE, event_id):
+        preservation = vvault_preservation.preserve_network_timeline_notable(notable, range_key)
+        _log_network_vvault_save_result("timeline_notable", event_id, notable.get("timestamp"), preservation)
+        return
+    events.insert_event(
+        event_type=NETWORK_TIMELINE_NOTABLE_EVENT_TYPE,
+        path=f"/network/timeline/notable/{event_id}",
+        summary=str(notable.get("summary") or "Network timeline notable"),
+        session_id=DEFAULT_SESSION_ID,
+        timestamp=str(notable.get("timestamp") or _now_iso()),
+        source_surface="network",
+        actor_type="cleanhouse",
+        evidence_level="observed",
+        data={"network_timeline_notable": notable},
+    )
+    preservation = vvault_preservation.preserve_network_timeline_notable(notable, range_key)
+    _log_network_vvault_save_result("timeline_notable", event_id, notable.get("timestamp"), preservation)
+
+
+def _persist_network_timeline_gap(reason: str, start: datetime, end: datetime) -> dict[str, Any]:
+    gap = _network_timeline_gap_event(reason, start, end)
+    event_id = str(gap.get("event_id") or "")
+    if event_id and not _network_timeline_event_already_stored(NETWORK_TIMELINE_GAP_EVENT_TYPE, event_id):
+        events.insert_event(
+            event_type=NETWORK_TIMELINE_GAP_EVENT_TYPE,
+            path=f"/network/timeline/gap/{event_id}",
+            summary=str(gap.get("summary") or "Network timeline gap"),
+            session_id=DEFAULT_SESSION_ID,
+            timestamp=str(gap.get("timestamp") or _now_iso()),
+            source_surface="network",
+            actor_type="cleanhouse",
+            evidence_level="observed",
+            data={"network_gap": gap},
+        )
+    preservation = vvault_preservation.preserve_network_timeline_gap("history", reason, gap)
+    _log_network_vvault_save_result("timeline_gap", event_id, gap.get("timestamp"), preservation)
+    return gap
+
+
+def _network_latest_history_timestamp() -> datetime | None:
+    timestamps: list[datetime] = []
+    for bucket in _all_network_buckets():
+        value = bucket.get("bucket_end") or bucket.get("timestamp")
+        if value:
+            timestamps.append(_network_event_datetime(value))
+    for notable in [*_stored_network_timeline_notables(), *_vvault_network_timeline_notables()]:
+        if notable.get("timestamp"):
+            timestamps.append(_network_event_datetime(notable.get("timestamp")))
+    for gap in [*_stored_network_timeline_gaps(), *_vvault_network_timeline_gaps()]:
+        value = gap.get("gap_end") or gap.get("timestamp")
+        if value:
+            timestamps.append(_network_event_datetime(value))
+    if not timestamps:
+        return None
+    return max(timestamps)
+
+
+def _network_projection_state(events_payload: list[dict[str, Any]]) -> str:
+    return "CAPTURING" if events_payload else "NO_DATA"
+
+
+def _network_event_rank(item: dict[str, Any]) -> tuple[int, int, int]:
+    severity = NETWORK_SEVERITY_RANK.get(str(item.get("severity") or ""), 0)
+    confidence = NETWORK_CONFIDENCE_RANK.get(str(item.get("confidence") or ""), 0)
+    impact = int(item.get("system_impact") or 0)
+    return severity, confidence, impact
+
+
+def _network_finding_status(item: dict[str, Any]) -> str:
+    return str(item.get("finding_status") or "open").strip().lower()
+
+
+def _network_is_open_finding(item: dict[str, Any]) -> bool:
+    return _network_finding_status(item) not in {
+        "cleared",
+        "closed",
+        "dismissed",
+        "invalid",
+        "invalidated",
+        "resolved",
+        "superseded",
+    }
+
+
+def _network_is_review_worthy_finding(item: dict[str, Any]) -> bool:
+    severity, _confidence, impact = _network_event_rank(item)
+    if severity >= NETWORK_SEVERITY_RANK["warning"]:
+        return True
+    if _network_is_routine_local_discovery(item):
+        return True
+    if item.get("category") in {"Local device discovery", "Local network traffic", "Apple service traffic", "Cloudflare network traffic"}:
+        return True
+    if severity < NETWORK_SEVERITY_RANK["low"]:
+        return False
+    destination_text = str(
+        item.get("dns_query")
+        or item.get("http_host")
+        or item.get("tls_sni")
+        or item.get("destination_display")
+        or item.get("dst_ip")
+        or ""
+    ).lower()
+    if item.get("suspicious") or item.get("known_malicious"):
+        return True
+    if _network_event_app(item) == "Unknown app":
+        return True
+    if impact >= 6:
+        return True
+    destination = item.get("dns_query") or item.get("http_host") or item.get("tls_sni")
+    common_port = str(item.get("dst_port") or "") in {"", "53", "80", "123", "443", "465", "587", "993", "995", "5223", "5228", "5353"}
+    return not destination and not common_port
+
+
+def _network_is_timeline_notable(item: dict[str, Any]) -> bool:
+    severity, _confidence, _impact = _network_event_rank(item)
+    return bool(
+        item.get("suspicious")
+        or item.get("known_malicious")
+        or severity >= NETWORK_SEVERITY_RANK["warning"]
+    )
+
+
+def _network_finding_priority_key(item: dict[str, Any]) -> tuple[int, int, int, int, float, str]:
+    severity, confidence, impact = _network_event_rank(item)
+    suspicious = 1 if item.get("suspicious") or item.get("known_malicious") else 0
+    first_seen = _network_event_datetime(item.get("first_seen") or item.get("detected_at") or item.get("timestamp")).timestamp()
+    return (
+        -severity,
+        -confidence,
+        -impact,
+        -suspicious,
+        first_seen,
+        str(item.get("event_id") or ""),
+    )
+
+
+def _network_finding_signature(item: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    # Product contract: Findings collapse repeated evidence into one semantic
+    # finding while preserving distinct meanings. Packet identity is not the
+    # display identity for this tab.
+    category = str(item.get("category") or "").strip()
+    summary = str(item.get("summary") or "").strip().lower()
+    reason = str(item.get("reason") or item.get("meaning") or "").strip().lower()
+    if category in {"Local device discovery", "Local network traffic", "Apple service traffic", "Cloudflare network traffic"} and summary:
+        return (
+            str(item.get("severity") or "").strip().lower(),
+            category.lower(),
+            summary,
+            reason,
+            "",
+        )
+    destination = str(
+        item.get("dns_query")
+        or item.get("http_host")
+        or item.get("tls_sni")
+        or item.get("dst_ip")
+        or item.get("destination_display")
+        or ""
+    ).strip().lower()
+    return (
+        str(item.get("severity") or "").strip().lower(),
+        _network_event_app(item).strip().lower(),
+        destination,
+        str(item.get("dst_port") or "").strip(),
+        str(item.get("protocol") or "").strip().upper(),
+    )
+
+
+def _network_merge_related_finding(target: dict[str, Any], related: dict[str, Any]) -> None:
+    target["related_event_count"] = int(target.get("related_event_count") or 1) + 1
+    ids = target.setdefault("related_event_ids", [str(target.get("event_id") or "")])
+    related_id = str(related.get("event_id") or "")
+    if related_id and related_id not in ids and len(ids) < NETWORK_FINDINGS_RELATED_ID_LIMIT:
+        ids.append(related_id)
+    destinations = target.setdefault("related_destinations", [])
+    destination = str(related.get("destination_display") or related.get("dst_ip") or "").strip()
+    if destination and destination not in destinations and len(destinations) < NETWORK_FINDINGS_DESTINATION_LIMIT:
+        destinations.append(destination)
+
+
+def _network_projection_summary(view: str, range_key: str, event_count: int, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    summary = {
+        "reason": "projection",
+        "view": view,
+        "range": range_key,
+        "event_count": event_count,
+        "retention_days": NETWORK_EVIDENCE_RETENTION_DAYS,
+        "generated_at": _now_iso(),
+    }
+    if extra:
+        summary.update(extra)
+    return summary
+
+
+def _network_findings_cache_get() -> dict[str, Any] | None:
+    with _NETWORK_FINDINGS_CACHE_LOCK:
+        payload = _NETWORK_FINDINGS_CACHE.get("payload")
+        cached_at = float(_NETWORK_FINDINGS_CACHE.get("cached_at") or 0.0)
+        if isinstance(payload, dict) and time.monotonic() - cached_at <= NETWORK_FINDINGS_CACHE_SECONDS:
+            return json.loads(json.dumps(payload))
+    return None
+
+
+def _network_findings_cache_set(payload: dict[str, Any]) -> None:
+    with _NETWORK_FINDINGS_CACHE_LOCK:
+        _NETWORK_FINDINGS_CACHE["payload"] = json.loads(json.dumps(payload))
+        _NETWORK_FINDINGS_CACHE["cached_at"] = time.monotonic()
+
+
+NETWORK_PROJECTION_CACHE_SECONDS = 8.0
+
+
+def _network_projection_cache_key(view: str, range_key: str) -> str:
+    return f"{view}:{range_key}"
+
+
+def _network_projection_cache_get(view: str, range_key: str) -> dict[str, Any] | None:
+    cache_key = _network_projection_cache_key(view, range_key)
+    with _NETWORK_PROJECTION_CACHE_LOCK:
+        entry = _NETWORK_PROJECTION_CACHE.get(cache_key)
+    if not isinstance(entry, dict):
+        return None
+    cached_at = float(entry.get("cached_at") or 0.0)
+    if time.monotonic() - cached_at > NETWORK_PROJECTION_CACHE_SECONDS:
+        return None
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    cached = json.loads(json.dumps(payload))
+    summary = cached.get("summary") if isinstance(cached.get("summary"), dict) else {}
+    cached["summary"] = {
+        **summary,
+        "cache": "hot",
+        "generated_at": _now_iso(),
+    }
+    return cached
+
+
+def _network_projection_cache_set(view: str, range_key: str, payload: dict[str, Any]) -> None:
+    cache_key = _network_projection_cache_key(view, range_key)
+    with _NETWORK_PROJECTION_CACHE_LOCK:
+        _NETWORK_PROJECTION_CACHE[cache_key] = {
+            "payload": json.loads(json.dumps(payload)),
+            "cached_at": time.monotonic(),
+        }
+
+
+def _network_finding_needs_enrichment(item: dict[str, Any]) -> bool:
+    if _network_event_app(item) == "Unknown app":
+        return True
+    if _network_summary_exposes_raw_external_destination(item):
+        return True
+    return not (item.get("summary") and item.get("reason") and item.get("category"))
+
+
+def _network_running_app_summary(visible: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    global _NETWORK_RUNNING_APPS, _NETWORK_RUNNING_APPS_AT
+    with _NETWORK_RUNNING_APPS_LOCK:
+        cache_fresh = bool(_NETWORK_RUNNING_APPS) and (
+            time.monotonic() - _NETWORK_RUNNING_APPS_AT < NETWORK_COLLECTOR_ENRICHMENT_INTERVAL_SECONDS
+        )
+        running_apps = [dict(item) for item in _NETWORK_RUNNING_APPS] if cache_fresh else []
+    if not running_apps:
+        _index, running_apps = _network_app_identity_index(refresh=False)
+        with _NETWORK_RUNNING_APPS_LOCK:
+            _NETWORK_RUNNING_APPS = [dict(item) for item in running_apps]
+            _NETWORK_RUNNING_APPS_AT = time.monotonic()
+    observed = {}
+    for item in visible or []:
+        name = _network_event_app(item)
+        if name:
+            observed[name] = observed.get(name, 0) + 1
+    return [
+        {
+            "app_id": str(app.get("id") or app.get("bundle_id") or app.get("name") or ""),
+            "name": str(app.get("name") or "Unknown app"),
+            "category": str(app.get("category") or "other"),
+            "observed_network_events": observed.get(str(app.get("name") or ""), 0),
+            "source": "applications_running_gui_inventory",
+        }
+        for app in running_apps[:100]
+    ]
+
+
+def _network_projection_findings(range_key: str) -> tuple[dict[str, Any], int]:
+    # Findings is the grouped, priority-preserving review surface. Do not make
+    # this projection behave like the raw Table stream or Distribution donut.
+    cached = _network_findings_cache_get()
+    if cached is not None:
+        cached_summary = cached.get("summary") if isinstance(cached.get("summary"), dict) else {}
+        cached["summary"] = {
+            **cached_summary,
+            "range": "retained",
+            "projection_window": "bounded_retained_queue",
+            "cache": "hot",
+            "generated_at": _now_iso(),
+        }
+        return cached, 200
+    enrichment = None
+    seen_signatures: dict[tuple[str, str, str, str, str], dict[str, Any]] = {}
+    findings_limit = min(
+        NETWORK_EVIDENCE_LOOKBACK,
+        NETWORK_FINDINGS_LOOKBACK,
+        _network_projection_history_limit("12mo"),
+    )
+    retained_events = list(_network_retained_events(limit=findings_limit))
+    for item in retained_events:
+        projected = item
+        if _network_finding_needs_enrichment(item):
+            if enrichment is None:
+                enrichment = _network_enrichment_index(refresh=False)
+            projected = _network_apply_enrichment(item, enrichment)
+        if not (_network_is_open_finding(projected) and _network_is_review_worthy_finding(projected)):
+            continue
+        signature = _network_finding_signature(projected)
+        existing = seen_signatures.get(signature)
+        if existing:
+            _network_merge_related_finding(existing, projected)
+            if _network_finding_priority_key(projected) < _network_finding_priority_key(existing):
+                replacement = projected.copy()
+                replacement["related_event_count"] = existing.get("related_event_count", 1)
+                replacement["related_event_ids"] = existing.get("related_event_ids", [])
+                replacement["related_destinations"] = existing.get("related_destinations", [])
+                seen_signatures[signature] = replacement
+            continue
+        finding = projected.copy()
+        finding["related_event_count"] = 1
+        finding["related_event_ids"] = [str(finding.get("event_id") or "")]
+        destination = str(finding.get("destination_display") or finding.get("dst_ip") or "").strip()
+        finding["related_destinations"] = [destination] if destination else []
+        seen_signatures[signature] = finding
+    deduped = sorted(seen_signatures.values(), key=_network_finding_priority_key)[:min(NETWORK_PROJECTION_LIMIT, 100)]
+    events_payload = [_network_public_event(item) for item in deduped]
+    payload, status_code = _network_ui_contract(
+        _network_projection_state(events_payload),
+        events=events_payload,
+        summary=_network_projection_summary(
+            "findings",
+            "retained",
+            len(events_payload),
+            {
+                "ordering": "priority_pinned",
+                "projection_window": "12mo",
+                "cache": "cold",
+                "history_limit": findings_limit,
+                "coverage_state": "bounded_retained_queue",
+            },
+        ),
+    )
+    # The compatibility event queue remains priority-filtered, but canonical
+    # assessments come from the complete bounded retained evidence window.
+    # Otherwise an informational Strength could disappear from Findings while
+    # retaining the same assessment ID in every other Network projection.
+    payload = add_assessment_contract(payload, retained_events)
+    _network_findings_cache_set(payload)
+    return payload, status_code
+
+
+def _network_projection_distribution(range_key: str) -> tuple[dict[str, Any], int]:
+    # Distribution is packet-evidence projection, never a relabeled socket or
+    # process inventory. Open applications remain a separate product dataset.
+    visible = _network_events_in_range(
+        range_key,
+        limit=_network_projection_history_limit(range_key),
+    )
+    events_payload = [_network_public_event(item) for item in visible[:NETWORK_PROJECTION_LIMIT]]
+    owner_aggregates: dict[str, dict[str, Any]] = {}
+    unresolved = 0
+    for item in visible:
+        app = _network_event_app(item)
+        aggregate = owner_aggregates.setdefault(app, {
+            "owner_id": network_distribution_owner_id(app),
+            "name": app,
+            "observed_network_events": 0,
+            "source": "retained_packet_evidence",
+            "evidence_refs": [],
+            "assessment_refs": [],
+        })
+        aggregate["observed_network_events"] += 1
+        event_id = str(item.get("event_id") or "").strip()
+        evidence_refs = item.get("evidence_refs") if isinstance(item.get("evidence_refs"), list) else []
+        if event_id:
+            evidence_refs = [*evidence_refs, f"local://cleanhouse/network/{event_id}"]
+        for evidence_ref in evidence_refs:
+            text = str(evidence_ref or "").strip()
+            if text and text not in aggregate["evidence_refs"]:
+                aggregate["evidence_refs"].append(text)
+            if len(aggregate["evidence_refs"]) >= 32:
+                break
+        attached = item.get("assessment_refs") if isinstance(item.get("assessment_refs"), list) else []
+        if not attached:
+            derived, _indicators = assess_network_event(item)
+            attached = [assessment["assessment_id"] for assessment in derived]
+        for assessment_ref in attached:
+            text = str(assessment_ref or "").strip()
+            if text and text not in aggregate["assessment_refs"]:
+                aggregate["assessment_refs"].append(text)
+            if len(aggregate["assessment_refs"]) >= 32:
+                break
+        if app == "Unknown app":
+            unresolved += 1
+    app_counts = {
+        name: int(aggregate["observed_network_events"])
+        for name, aggregate in owner_aggregates.items()
+    }
+    network_owners = [
+        {
+            **owner_aggregates[app],
+            "evidence_refs": sorted(owner_aggregates[app]["evidence_refs"]),
+            "assessment_refs": sorted(owner_aggregates[app]["assessment_refs"]),
+        }
+        for app in sorted(app_counts, key=lambda name: (-app_counts[name], name.lower()))
+    ]
+    payload, status_code = _network_ui_contract(
+        _network_projection_state(events_payload),
+        events=events_payload,
+        summary=_network_projection_summary(
+            "distribution",
+            range_key,
+            len(events_payload),
+            {
+                "classified_apps": app_counts,
+                "unresolved_app_events": unresolved,
+                "source": "retained_packet_evidence",
+                "measurement_basis": "packet_supported_communications",
+                "owners": network_owners,
+                # Compatibility alias: this is intentionally the exact same
+                # packet-backed owner list as the donut, never a second GUI
+                # application inventory.
+                "open_applications": network_owners,
+                "open_applications_source": "retained_packet_evidence",
+            },
+        ),
+    )
+    return add_assessment_contract(payload, visible), status_code
+
+
+def _network_timeline_bucket_key(timestamp: Any, range_key: str) -> str:
+    dt = _network_event_datetime(timestamp)
+    if range_key in {"5s", "1m"}:
+        return f"{range_key}:{int(dt.timestamp())}"
+    if range_key in {"30m", "1h"}:
+        return dt.strftime(f"{range_key}:%Y-%m-%dT%H:%M")
+    if range_key == "24h":
+        return dt.strftime("%Y-%m-%dT%H")
+    if range_key in {"7d", "1mo"}:
+        return dt.strftime("%Y-%m-%d")
+    if range_key == "3mo":
+        iso = dt.isocalendar()
+        return f"{dt.year}-W{iso.week:02d}"
+    return dt.strftime("%Y-%m")
+
+
+def _network_timeline_min_rank(range_key: str) -> int:
+    if range_key in {"5s", "1m"}:
+        return NETWORK_SEVERITY_RANK["low"]
+    if range_key in {"30m", "1h"}:
+        return NETWORK_SEVERITY_RANK["low"]
+    if range_key in {"24h", "7d"}:
+        return NETWORK_SEVERITY_RANK["warning"]
+    return NETWORK_SEVERITY_RANK["high"]
+
+
+def _network_projection_timeline(range_key: str) -> tuple[dict[str, Any], int]:
+    cached = _network_projection_cache_get("timeline", range_key)
+    if cached is not None:
+        return cached, 200
+    start, end = _network_projection_window(range_key)
+    history_limit = _network_projection_history_limit(range_key)
+    visible = _network_events_in_range(range_key, limit=history_limit)
+    min_rank = _network_timeline_min_rank(range_key)
+    candidates = [
+        item for item in visible
+        if NETWORK_SEVERITY_RANK.get(str(item.get("severity") or ""), 0) >= min_rank
+    ]
+    # Retain every factual event. The UI groups by interval for navigation,
+    # but expanding an interval must expose each contained event rather than
+    # selecting one arbitrary representative.
+    ledger = sorted(candidates, key=lambda item: (_network_event_datetime(item.get("timestamp")), str(item.get("event_id") or "")))
+    events_payload = [_network_public_event(item) for item in ledger[-NETWORK_PROJECTION_LIMIT:]]
+    by_id = {str(item.get("event_id") or ""): item for item in events_payload if str(item.get("event_id") or "")}
+    local_notables = _stored_network_timeline_notables(limit=history_limit, start=start, end=end)
+    vvault_notables = _vvault_network_timeline_notables(range_key, start, end, limit=history_limit)
+    for item in [*local_notables, *vvault_notables]:
+        event_dt = _network_event_datetime(item.get("timestamp"))
+        if not (start <= event_dt < end):
+            continue
+        public = _network_public_event(item)
+        event_id = str(public.get("event_id") or "")
+        if event_id:
+            by_id[event_id] = public
+    gap_events = []
+    local_gaps = _stored_network_timeline_gaps(limit=history_limit, start=start, end=end)
+    vvault_gaps = _vvault_network_timeline_gaps(range_key, start, end, limit=history_limit)
+    for gap in [*local_gaps, *vvault_gaps]:
+        event_dt = _network_event_datetime(gap.get("timestamp") or gap.get("gap_end"))
+        if start <= event_dt < end:
+            gap_events.append(_network_public_event(gap))
+    assessment_events = []
+    for assessment in _network_stored_assessment_transitions(limit=history_limit, start=start, end=end):
+        assessment_id = str(assessment.get("assessment_id") or "")
+        timestamp = str(assessment.get("last_seen") or "")
+        if not assessment_id or not timestamp:
+            continue
+        assessment_events.append({
+            "event_id": f"assessment-transition:{assessment_id}:{timestamp}",
+            "event_type": ASSESSMENT_TRANSITION_EVENT_TYPE,
+            "timestamp": timestamp,
+            "assessment_id": assessment_id,
+            "assessment_ref": assessment_id,
+            "category": assessment.get("category"),
+            "severity": assessment.get("severity"),
+            "assessment_state": assessment.get("assessment_state") or assessment.get("lifecycle"),
+            "rationale": assessment.get("rationale"),
+            "evidence_refs": assessment.get("evidence_refs") or [],
+            "assessments": [assessment],
+        })
+    events_payload = sorted(
+        [*by_id.values(), *gap_events, *assessment_events],
+        key=lambda item: (_network_event_datetime(item.get("timestamp")), str(item.get("event_id") or "")),
+    )[-NETWORK_PROJECTION_LIMIT:]
+    payload, status_code = _network_ui_contract(
+        _network_projection_state(events_payload),
+        events=events_payload,
+        summary=_network_projection_summary(
+            "timeline",
+            range_key,
+            len(events_payload),
+            {
+                "source_event_count": len(visible),
+                "timeline_min_rank": min_rank,
+                "gap_count": len(gap_events),
+                "assessment_transition_count": len(assessment_events),
+                "refresh_required": True,
+                "history_limit": history_limit,
+            },
+        ),
+    )
+    payload = add_assessment_contract(payload, [*visible, *assessment_events])
+    _network_projection_cache_set("timeline", range_key, payload)
+    _log_network_history_io(
+        "timeline_hydration",
+        range=range_key,
+        event_count=len(events_payload),
+        local_notable_count=len(local_notables),
+        vvault_notable_count=len(vvault_notables),
+        local_gap_count=len(local_gaps),
+        vvault_gap_count=len(vvault_gaps),
+        gap_count=len(gap_events),
+    )
+    return payload, status_code
+
+
+def _network_complete_trend_geometry(
+    range_key: str,
+    start: datetime,
+    end: datetime,
+    ticks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the established bucket geometry with explicit uncovered gaps."""
+    bucket_count = NETWORK_TREND_BUCKETS.get(range_key, NETWORK_TREND_BUCKETS["5s"])
+    duration_ms = NETWORK_TIME_RANGES_MS.get(range_key, NETWORK_TIME_RANGES_MS["5s"])
+    bucket_ms = max(int(duration_ms / bucket_count), 1)
+    end_ms = int(end.timestamp() * 1000)
+    geometry_end_ms = ((end_ms + bucket_ms - 1) // bucket_ms) * bucket_ms
+    geometry_start_ms = geometry_end_ms - bucket_count * bucket_ms
+    by_start: dict[int, dict[str, Any]] = {}
+    for tick in ticks:
+        bucket_start = _network_event_datetime(tick.get("bucket_start") or tick.get("timestamp"))
+        start_ms = int(bucket_start.timestamp() * 1000) // bucket_ms * bucket_ms
+        current = by_start.get(start_ms)
+        if current is None or int(tick.get("connectionCount") or 0) > int(current.get("connectionCount") or 0):
+            by_start[start_ms] = dict(tick)
+    geometry: list[dict[str, Any]] = []
+    for index in range(bucket_count):
+        start_ms = geometry_start_ms + index * bucket_ms
+        bucket_start = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+        bucket_end = datetime.fromtimestamp((start_ms + bucket_ms) / 1000, tz=timezone.utc)
+        retained = by_start.get(start_ms)
+        if retained is None:
+            geometry.append({
+                "event_id": f"network_gap:{range_key}:{start_ms}",
+                "bucket_key": f"{range_key}:{start_ms}",
+                "bucket_range": range_key,
+                "bucket_start": bucket_start.isoformat().replace("+00:00", "Z"),
+                "bucket_end": bucket_end.isoformat().replace("+00:00", "Z"),
+                "timestamp": bucket_end.isoformat().replace("+00:00", "Z"),
+                "coverage_state": "gap",
+                "gap": True,
+                "connectionCount": None,
+                "evidence_refs": [],
+            })
+        else:
+            retained.setdefault("coverage_state", "observed")
+            retained["gap"] = False
+            geometry.append(retained)
+    return geometry
+
+
+def _network_projection_trend(range_key: str, metric: str = "connections") -> tuple[dict[str, Any], int]:
+    if metric not in SUPPORTED_TREND_METRICS:
+        metric = "connections"
+    cache_range_key = f"{range_key}:{metric}"
+    cached = _network_projection_cache_get("trend", cache_range_key)
+    if cached is not None:
+        return cached, 200
+    start, end = _network_projection_window(range_key)
+    retention_start = _network_retention_start()
+    if start < retention_start:
+        start = retention_start
+    history_limit = _network_projection_history_limit(range_key)
+    history_sources = {
+        "local_buckets": 0,
+        "vvault_buckets": 0,
+        "local_ticks": 0,
+        "vvault_ticks": 0,
+        "local_samples": 0,
+        "recent_samples": 0,
+        "vvault_samples": 0,
+    }
+    with _NETWORK_RECENT_OBSERVATIONS_LOCK:
+        recent_sample_events = [
+            dict(item) for item in _NETWORK_RECENT_OBSERVATIONS
+            if start <= _network_event_datetime(item.get("timestamp")) < end
+        ]
+    recent_only = range_key in {"5s", "1m"} and bool(recent_sample_events)
+    local_buckets = [
+        bucket for bucket in _stored_network_buckets(limit=history_limit, start=start, end=end)
+        if (
+            (bucket.get("bucket_range") == range_key or str(bucket.get("bucket_key") or "").startswith(f"{range_key}:"))
+            and _network_event_datetime(bucket.get("bucket_end") or bucket.get("timestamp")) >= start
+            and _network_event_datetime(bucket.get("bucket_start") or bucket.get("timestamp")) < end
+        )
+    ] if not recent_only else []
+    vvault_buckets = [] if recent_only else _vvault_network_buckets(range_key, start, end, limit=history_limit)
+    history_sources["local_buckets"] = len(local_buckets)
+    history_sources["vvault_buckets"] = len(vvault_buckets)
+
+    local_ticks = [
+        tick for tick in _stored_network_trend_ticks(limit=history_limit, start=start, end=end)
+        if tick.get("bucket_range") == range_key
+        and start <= _network_event_datetime(tick.get("timestamp")) < end
+    ] if not recent_only else []
+    vvault_ticks = [] if recent_only else _vvault_network_trend_ticks(range_key, start, end, limit=history_limit)
+    history_sources["local_ticks"] = len(local_ticks)
+    history_sources["vvault_ticks"] = len(vvault_ticks)
+
+    local_sample_events = {
+        str(item.get("event_id") or ""): item
+        for item in ([] if recent_only else _network_stored_observations(limit=history_limit, start=start, end=end))
+        if str(item.get("event_id") or "")
+        and start <= _network_event_datetime(item.get("timestamp")) < end
+    }
+    for item in recent_sample_events:
+        event_id = str(item.get("event_id") or "")
+        if event_id:
+            local_sample_events[event_id] = item
+    local_samples = [_network_trend_sample_from_event(item) for item in local_sample_events.values()]
+    vvault_samples = [] if recent_only else _vvault_network_trend_samples(start, end, limit=history_limit)
+    history_sources["local_samples"] = len(local_samples)
+    history_sources["recent_samples"] = len(recent_sample_events)
+    history_sources["vvault_samples"] = len(vvault_samples)
+
+    ticks_by_id: dict[str, dict[str, Any]] = {}
+    for tick in [*local_ticks, *vvault_ticks]:
+        tick_id = str(tick.get("tick_id") or tick.get("event_id") or "")
+        if tick_id:
+            ticks_by_id.setdefault(tick_id, tick)
+    for tick in _network_trend_ticks_from_samples(range_key, [*local_samples, *vvault_samples]):
+        tick_id = str(tick.get("tick_id") or tick.get("event_id") or "")
+        if not tick_id:
+            continue
+        ticks_by_id.setdefault(tick_id, tick)
+
+    trend_points: dict[str, dict[str, Any]] = dict(ticks_by_id)
+    if not trend_points:
+        for bucket in [*local_buckets, *vvault_buckets]:
+            bucket_id = str(bucket.get("event_id") or bucket.get("bucket_key") or "")
+            if bucket_id:
+                trend_points.setdefault(bucket_id, bucket)
+    ticks = sorted(
+        trend_points.values(),
+        key=lambda item: (
+            _network_event_datetime(item.get("timestamp")),
+            str(item.get("tick_id") or item.get("event_id") or ""),
+        ),
+    )
+
+    had_retained_ticks = bool(ticks)
+    ticks = _network_complete_trend_geometry(range_key, start, end, ticks)
+    expected_buckets = NETWORK_TREND_BUCKETS.get(range_key, NETWORK_TREND_BUCKETS["5s"])
+    occupied_buckets = {
+        str(item.get("bucket_start") or item.get("bucket_key") or "")
+        for item in ticks
+        if item.get("bucket_start") or item.get("bucket_key")
+    }
+    gap_count = sum(1 for item in ticks if item.get("gap"))
+    observed_bucket_count = len(ticks) - gap_count
+    if not had_retained_ticks and not local_samples and not vvault_samples:
+        gap_event_id = "network_gap:" + hashlib.sha256(
+            f"trend:{range_key}:{start.isoformat()}:{end.isoformat()}".encode("utf-8")
+        ).hexdigest()[:24]
+        preservation = vvault_preservation.preserve_network_timeline_gap(
+            f"trend:{range_key}",
+            "no_retained_trend_history",
+            {
+                "event_id": gap_event_id,
+                "event_type": NETWORK_TIMELINE_GAP_EVENT_TYPE,
+                "timestamp": end.isoformat().replace("+00:00", "Z"),
+                "gap_start": start.isoformat().replace("+00:00", "Z"),
+                "gap_end": end.isoformat().replace("+00:00", "Z"),
+                "source": "network_trend",
+            },
+        )
+        _log_network_vvault_save_result("timeline_gap", gap_event_id, end, preservation)
+
+    transitions = _network_stored_assessment_transitions(limit=history_limit, end=end)
+    assessment_observations = _network_stored_observations(limit=history_limit, end=end)
+    # Backfill old retained evidence that predates append-only transition
+    # receipts. This remains deterministic and bounded by the projection's
+    # established history limit.
+    for observation in assessment_observations:
+        observed_assessments, _indicators = assess_network_event(observation)
+        transitions.extend(observed_assessments)
+    metric_points = active_assessment_series(ticks, transitions, metric=metric)
+    events_payload = [dict(point) for point in metric_points[-NETWORK_PROJECTION_LIMIT:]]
+    payload, status_code = _network_ui_contract(
+        _network_projection_state([item for item in events_payload if not item.get("gap")]),
+        events=events_payload,
+        summary=_network_projection_summary(
+            "trend",
+            range_key,
+            len(events_payload),
+            {
+                "bucket_count": len(occupied_buckets),
+                "observed_bucket_count": observed_bucket_count,
+                "bucket_scale": range_key,
+                "measurement": "observed_connection_count" if metric == "connections" else "active_security_assessment_count",
+                "metric": metric,
+                "history_sources": history_sources,
+                "live_ticks": True,
+                "gap_count": gap_count,
+                "coverage_state": "gap" if observed_bucket_count == 0 else ("partial" if gap_count else "observed"),
+                "immutable_ticks": True,
+                "history_limit": history_limit,
+                "zero_means": (
+                    "observed_bucket_with_zero_connections"
+                    if metric == "connections"
+                    else "observed_bucket_with_no_active_assessments"
+                ),
+                "missing_means": "no_retained_evidence_for_bucket",
+            },
+        ),
+    )
+    payload = add_assessment_contract(payload, [
+        *assessment_observations,
+        *(
+            {
+                "timestamp": transition.get("last_seen"),
+                "assessments": [transition],
+            }
+            for transition in transitions
+        ),
+    ], metric=metric)
+    _network_projection_cache_set("trend", cache_range_key, payload)
+    _log_network_history_io(
+        "trend_hydration",
+        range=range_key,
+        metric=metric,
+        event_count=len(events_payload),
+        history_sources=history_sources,
+        gap_count=gap_count,
+    )
+    return payload, status_code
+
+def _network_current_packet_payload() -> tuple[dict[str, Any], int]:
+    # The default table API must stay cheap and CLI-probeable. Enrichment can
+    # invoke process/socket collectors, so leave it to projections and refreshes.
+    visible_events = _network_events_in_range(
+        "1m",
+        limit=min(NETWORK_EVIDENCE_LOOKBACK, 200),
+        enrich_unknown=False,
+    )[-WIRESHARK_MAX_EVENTS:]
+    events_payload = [_network_public_event(item) for item in visible_events]
+    ui_state = _network_runtime_probe_state(events_payload)
+    collector = _get_network_collector()
+    collector.start()
+    boundary = collector.snapshot(include_events=False)
+    payload, status_code = _network_ui_contract(
+        ui_state,
+        events=events_payload,
+        summary={
+            "reason": "events_observed" if events_payload else ("waiting_for_capture" if ui_state == "WARMING" else "no_data"),
+            "event_count": len(events_payload),
+            "source": "runtime_packet_buffer",
+            "cursor": boundary["cursor"],
+        },
+    )
+    collector_health = network_collector_health()
+    payload.update({
+        "cursor": boundary["cursor"],
+        "high_water_cursor": boundary["high_water_cursor"],
+        "high_water_sequence": boundary["high_water_sequence"],
+    })
+    payload = add_assessment_contract(payload, visible_events)
+    _network_apply_collector_truth(payload, collector_health)
+    return payload, status_code
+
+
+@bp.route("/cleanhouse/network/projection", methods=["GET"])
+def network_projection():
+    vvault_error = _network_vvault_required_error()
+    if vvault_error:
+        return jsonify(vvault_error[0]), vvault_error[1]
+    view = str(request.args.get("view") or "").strip().lower()
+    range_key = str(request.args.get("range") or request.args.get("timeline") or "5s").strip()
+    metric = str(request.args.get("metric") or "connections").strip().lower()
+    if view not in NETWORK_PROJECTION_VIEWS:
+        return jsonify(_network_error_contract("capture_failed")[0]), 400
+    if range_key not in NETWORK_TIME_RANGES_MS:
+        range_key = "5s"
+    if metric not in SUPPORTED_TREND_METRICS:
+        metric = "connections"
+    projectors = {
+        "findings": _network_projection_findings,
+        "trend": _network_projection_trend,
+        "distribution": _network_projection_distribution,
+        "timeline": _network_projection_timeline,
+    }
+    collector = _get_network_collector()
+    collector.start()
+    if _refresh_flag():
+        collector.refresh(timeout=2.0)
+        with _NETWORK_FINDINGS_CACHE_LOCK:
+            _NETWORK_FINDINGS_CACHE.update({"payload": None, "cached_at": 0.0})
+        with _NETWORK_PROJECTION_CACHE_LOCK:
+            _NETWORK_PROJECTION_CACHE.clear()
+    payload, status_code = (
+        _network_projection_trend(range_key, metric=metric)
+        if view == "trend"
+        else projectors[view](range_key)
+    )
+    boundary = collector.snapshot(include_events=False)
+    payload["cursor"] = boundary["cursor"]
+    payload["high_water_cursor"] = boundary["high_water_cursor"]
+    payload["high_water_sequence"] = boundary["high_water_sequence"]
+    _network_apply_collector_truth(payload, network_collector_health())
+    if isinstance(payload.get("summary"), dict):
+        payload["summary"]["cursor"] = boundary["cursor"]
+        payload["summary"]["refresh"] = "synchronized" if _refresh_flag() else "not_requested"
+    return jsonify(payload), status_code
 
 
 @bp.route("/cleanhouse/network", methods=["GET"])
 def network():
-    adapter = get_cleanhouse_monitoring_adapter()
-    return jsonify(adapter.get_network(refresh=_refresh_flag()))
+    vvault_error = _network_vvault_required_error()
+    if vvault_error:
+        return jsonify(vvault_error[0]), vvault_error[1]
+    if _truthy_arg("snapshot"):
+        payload, status_code = _network_snapshot_payload(refresh=_refresh_flag())
+        return jsonify(payload), status_code
+    payload, status_code = _network_current_packet_payload()
+    return jsonify(payload), status_code
 
 
 @bp.route("/cleanhouse/ai-activity", methods=["GET"])
@@ -1957,7 +6962,10 @@ def end_objective():
 @bp.route("/cleanhouse/intents", methods=["GET"])
 def intents():
     adapter = get_cleanhouse_monitoring_adapter()
-    return jsonify(adapter.get_intents())
+    limit, error = _optional_positive_int_arg("limit", max_value=LOW_PROCESSING_INTENT_MAX_LIMIT)
+    if error:
+        return error
+    return jsonify(adapter.get_intents(limit=limit or LOW_PROCESSING_INTENT_LIMIT))
 
 
 @bp.route("/cleanhouse/prompt", methods=["POST"])
@@ -2633,7 +7641,14 @@ def approval_queue():
     status, error = _require_string(request.args.get("status"), "status", required=False, allow_empty=True, max_len=32)
     if error:
         return error
-    return jsonify(adapter.get_approval_queue(session_id=session_id, status=status or None))
+    limit, error = _optional_positive_int_arg("limit", max_value=LOW_PROCESSING_APPROVAL_MAX_LIMIT)
+    if error:
+        return error
+    return jsonify(adapter.get_approval_queue(
+        session_id=session_id,
+        status=status or None,
+        max_records=limit or LOW_PROCESSING_APPROVAL_LIMIT,
+    ))
 
 
 @bp.route("/cleanhouse/approval-queue/<approval_id>", methods=["POST"])
@@ -2839,22 +7854,38 @@ def zaelith_analyze_text():
     text, error = _require_string(data.get("text"), "text", max_len=200000)
     if error:
         return error
-    prompt, error = _require_string(data.get("prompt"), "prompt", required=False, allow_empty=True, max_len=4096)
+    prompt, error = _require_string(
+        data.get("prompt"),
+        "prompt",
+        required=False,
+        allow_empty=True,
+        max_len=4096,
+    )
     if error:
         return error
-    source, error = _require_string(data.get("source"), "source", required=False, allow_empty=True, max_len=128)
+    source, error = _require_string(
+        data.get("source"),
+        "source",
+        required=False,
+        allow_empty=True,
+        max_len=128,
+    )
     if error:
         return error
     try:
         from corefiles.zaelith_service import get_zaelith_service
-        result = get_zaelith_service().analyze_text_interaction(
+        service = get_zaelith_service()
+        result = service.analyze_text_interaction(
             prompt or "Manual Zaelith conversation audit",
             text,
             source=source or "zaelith-page",
             save_to_history=True,
         )
     except Exception as exc:
-        return jsonify({"status": "error", "message": f"Zaelith analysis failed: {exc}"}), 500
+        return jsonify({
+            "status": "error",
+            "message": f"Zaelith analysis failed: {exc}",
+        }), 500
     status = "ok" if result.get("success") else "error"
     report = None
     if status == "ok":
@@ -2913,10 +7944,13 @@ def assess_scope():
 @bp.route("/cleanhouse/receipts", methods=["GET"])
 def get_receipts():
     adapter = get_cleanhouse_monitoring_adapter()
+    limit, error = _optional_positive_int_arg("limit", max_value=LOW_PROCESSING_RECEIPT_MAX_LIMIT)
+    if error:
+        return error
     session_id, error = _validate_session_id(request.args.get("session_id"), required=False)
     if error:
         return error
-    return jsonify(adapter.get_receipts(session_id=session_id))
+    return jsonify(adapter.get_receipts(session_id=session_id, max_records=limit or LOW_PROCESSING_RECEIPT_LIMIT))
 
 
 @bp.route("/cleanhouse/receipt-replay", methods=["GET"])
@@ -3022,7 +8056,7 @@ def domain_events():
     status, error = _require_string(request.args.get("status"), "status", required=False, allow_empty=True, max_len=64)
     if error:
         return error
-    limit, error = _optional_positive_int_arg("limit", max_value=1000)
+    limit, error = _optional_positive_int_arg("limit", max_value=LOW_PROCESSING_DOMAIN_EVENT_MAX_LIMIT)
     if error:
         return error
     return jsonify(adapter.get_domain_events(
@@ -3030,7 +8064,7 @@ def domain_events():
         surface=surface or None,
         severity=severity or None,
         status=status or None,
-        limit=limit or 200,
+        limit=limit or LOW_PROCESSING_DOMAIN_EVENT_LIMIT,
     ))
 
 
@@ -3172,6 +8206,284 @@ def action_outcomes():
     if error:
         return error
     return jsonify(get_cleanhouse_monitoring_adapter().action_outcome_audit(limit=limit or 200))
+
+
+@bp.route("/cleanhouse/evidence/context", methods=["GET"])
+def evidence_context():
+    data, error = _extract_evidence_request()
+    if error:
+        return error
+    try:
+        context = _resolve_evidence_context(data)
+    except Exception:
+        return _error_response("Unable to resolve evidence context.")
+    return jsonify({"status": "ok", "context": context.to_dict()})
+
+
+@bp.route("/cleanhouse/evidence/actions", methods=["GET"])
+def evidence_actions():
+    data, error = _extract_evidence_request()
+    if error:
+        return error
+    try:
+        context = _resolve_evidence_context(data)
+    except Exception:
+        return _error_response("Unable to resolve evidence actions.")
+    resolver = get_evidence_context_resolver()
+    actions = resolver.actions(context)
+    return jsonify({"status": "ok", "context": context.to_dict(), "actions": actions})
+
+
+@bp.route("/cleanhouse/evidence/actions", methods=["POST"])
+def post_evidence_action():
+    payload, error = _parse_json_payload()
+    if error:
+        return error
+    data, error = _extract_evidence_request(payload=payload)
+    if error:
+        return error
+    action_id, error = _require_string(payload.get("action_id"), "action_id", required=False, allow_empty=True, max_len=128)
+    if error:
+        return _error_response("action_id is required")
+    if not action_id:
+        return _error_response("action_id is required")
+    action_origin = _normalize_action_origin(payload.get("action_origin"))
+    action_subject = _normalize_subject_payload(payload.get("subject"))
+    selection_receipt = _normalize_optional_dict(payload.get("selection_receipt"))
+    insight_payload = _normalize_optional_dict(payload.get("insight_payload"))
+    scan_payload = _normalize_optional_dict(payload.get("scan_payload"))
+    evidence_links = _normalize_string_list(payload.get("evidence_links"))
+    create_report = _normalize_boolish(payload.get("create_report"))
+    action_request_id, error = _require_string(payload.get("action_request_id"), "action_request_id", required=False, allow_empty=True, max_len=160)
+    if error:
+        return error
+    invoker, error = _require_string(payload.get("invoker"), "invoker", required=False, allow_empty=True, max_len=256)
+    if error:
+        return error
+    role, error = _require_string(payload.get("role"), "role", required=False, allow_empty=True, max_len=128)
+    if error:
+        return error
+    invoker = (invoker or "operator").strip()
+    action_request_id = (action_request_id or uuid.uuid4().hex).strip()
+    request_fingerprint = hashlib.sha256(json.dumps({
+        "mode": data.get("mode"),
+        "ref": data.get("ref"),
+        "surface": data.get("surface"),
+        "entity_id": data.get("entity_id"),
+        "source_view": data.get("source_view"),
+        "action_id": action_id.strip(),
+    }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    with _EVIDENCE_ACTION_REQUESTS_LOCK:
+        previous_response = _EVIDENCE_ACTION_REQUESTS.get(action_request_id)
+        previous_fingerprint = _EVIDENCE_ACTION_REQUEST_FINGERPRINTS.get(action_request_id)
+    if previous_response:
+        if previous_fingerprint != request_fingerprint:
+            return _error_response("action_request_id was already used for a different action request.")
+        return jsonify({**previous_response, "replayed": True})
+    try:
+        context = _resolve_evidence_context(data)
+    except Exception:
+        return _error_response("Unable to resolve evidence context for action.")
+    selected_action = _find_evidence_action(context, action_id.strip())
+    if not selected_action:
+        return _error_response(f"Action '{action_id}' is not available for this evidence context.")
+    if not selected_action.get("enabled"):
+        disabled_reason = selected_action.get("disabled_reason") or "Action is currently disabled."
+        return _error_response(disabled_reason)
+    role = (role or selected_action.get("required_role") or "viewer").strip() or "viewer"
+    adapter = get_cleanhouse_monitoring_adapter()
+    resolved_action_origin = action_origin or ""
+    audit_entry = get_evidence_context_resolver().audit_entry(
+        context,
+        action_id=action_id.strip(),
+        invoker=invoker,
+        role=role,
+        action_origin=resolved_action_origin,
+        action_subject=action_subject if action_subject else None,
+        action_context={
+            "source_view": context.source_view,
+            "source_surface": context.source_surface,
+            "source_entity_id": context.source_entity_id,
+            "trace_id": context.trace_id,
+        },
+        selected_evidence_receipt=selection_receipt,
+        report_intent=selected_action.get("intent") or "",
+    )
+    audit_entry["voice_role"] = selected_action.get("voice_role")
+    audit_entry["backend_roles"] = selected_action.get("backend_roles") or []
+    audit_entry["capability_source"] = selected_action.get("capability_source") or "evidence_command_center"
+    adapter._persist_action_outcome(audit_entry)
+
+    receipt_id = "evidence-action:" + hashlib.sha256(
+        f"{action_request_id}|{context.evidence_key}|{action_id}".encode("utf-8")
+    ).hexdigest()[:24]
+    bounded_refs = list(context.evidence_refs)[:24]
+    effect: dict[str, Any] = {"type": selected_action.get("intent") or "action"}
+    if action_id == "copy":
+        insight_payload = insight_payload if isinstance(insight_payload, dict) else {}
+        live_context = insight_payload.get("evidence_context") if isinstance(insight_payload.get("evidence_context"), dict) else {}
+        generated_insight = insight_payload.get("insight") if isinstance(insight_payload.get("insight"), dict) else {}
+        summary = str(live_context.get("summary") or generated_insight.get("plain_language_summary") or context.summary or "").strip()
+        app = str(live_context.get("app") or "").strip()
+        source = str(live_context.get("source") or "").strip()
+        destination = str(live_context.get("destination") or "").strip()
+        protocol = str(live_context.get("protocol") or "").strip()
+        event_time = str(live_context.get("event_time") or "").strip()
+        detail = " · ".join(value for value in (app, source and destination and f"{source} → {destination}", protocol, event_time) if value)
+        copy_refs = _normalize_string_list(live_context.get("evidence_refs")) or bounded_refs
+        effect["copy_text"] = "\n".join(filter(None, [
+            summary,
+            detail,
+            f"Source ID: {live_context.get('source_entity_id') or context.source_entity_id}",
+            *copy_refs[:24],
+        ]))[:12000]
+    elif action_id == "export":
+        export_payload = {
+            "schema": "cleanhouse.evidence_export.v1",
+            "receipt_id": receipt_id,
+            "evidence_key": context.evidence_key,
+            "summary": context.summary,
+            "source_surface": context.source_surface,
+            "source_view": context.source_view,
+            "source_entity_id": context.source_entity_id,
+            "evidence_refs": bounded_refs,
+            "exported_at": _now_iso(),
+        }
+        preserved = vvault_preservation.preserve_local_artifact("receipt", receipt_id + "-export", export_payload)
+        effect["artifact"] = preserved
+    elif action_id in {"mark_read", "mark_unread"}:
+        effect["review_state"] = "read" if action_id == "mark_read" else "unread"
+    elif action_id == "observe":
+        effect["monitoring_state"] = "observing"
+
+    verification = {"status": "pending", "evidence_key": context.evidence_key}
+    receipt = {
+        "schema": "cleanhouse.evidence_action_receipt.v1",
+        "receipt_id": receipt_id,
+        "action_request_id": action_request_id,
+        "action": action_id,
+        "target": {
+            "evidence_key": context.evidence_key,
+            "source_entity_id": context.source_entity_id,
+            "source_surface": context.source_surface,
+            "source_view": context.source_view,
+        },
+        "effect": effect,
+        "verification": verification,
+        "actor": invoker,
+        "backend_boot_id": NETWORK_SERVER_BOOT_ID,
+        "timestamp": _now_iso(),
+    }
+    preservation = vvault_preservation.preserve_local_artifact("receipt", receipt_id, receipt)
+    preservation_status = str(preservation.get("status") or "error") if isinstance(preservation, dict) else "error"
+    verification.update({
+        "status": "verified" if preservation_status == "ok" else "unverified",
+        "receipt_id": receipt_id,
+        "vvault_status": preservation_status,
+    })
+    receipt["verification"] = dict(verification)
+    if preservation_status == "ok":
+        preservation = vvault_preservation.preserve_local_artifact("receipt", receipt_id, receipt)
+
+    report_response = None
+    if _should_create_evidence_action_report(
+        action_id=action_id,
+        action_origin=resolved_action_origin,
+        create_report=create_report,
+    ):
+        report_response = adapter.create_action_report(
+            action_id=action_id.strip(),
+            action_origin=resolved_action_origin,
+            trace_id=context.trace_id,
+            action_subject=action_subject,
+            action_context={
+                "selection": selection_receipt or {},
+                "evidence_links_override": evidence_links,
+                "selection_view": context.source_view,
+            },
+            selected_evidence_receipt=selection_receipt,
+            evidence_links=evidence_links or list(context.evidence_refs),
+            insight_payload=insight_payload,
+            scan_payload=scan_payload,
+            report_intent=selected_action.get("intent") or "",
+        )
+
+    response_body = {
+        "status": "ok",
+        "context": context.to_dict(),
+        "action": selected_action,
+        "audit": audit_entry,
+        "target": receipt["target"],
+        "effect": effect,
+        "verification": verification,
+        "action_request_id": action_request_id,
+        "receipt_id": receipt_id,
+        "vvault_receipt": preservation,
+        "undo_available": False,
+        "preservation": preservation,
+        "message": f"{selected_action.get('label') or action_id} completed.",
+    }
+    if report_response and report_response.get("status") == "ok":
+        response_body["report"] = report_response
+    with _EVIDENCE_ACTION_REQUESTS_LOCK:
+        _EVIDENCE_ACTION_REQUESTS[action_request_id] = dict(response_body)
+        _EVIDENCE_ACTION_REQUEST_FINGERPRINTS[action_request_id] = request_fingerprint
+        if len(_EVIDENCE_ACTION_REQUESTS) > 1000:
+            oldest_request_id = next(iter(_EVIDENCE_ACTION_REQUESTS))
+            _EVIDENCE_ACTION_REQUESTS.pop(oldest_request_id)
+            _EVIDENCE_ACTION_REQUEST_FINGERPRINTS.pop(oldest_request_id, None)
+    return jsonify(response_body)
+
+
+@bp.route("/cleanhouse/evidence/roles/insight", methods=["POST"])
+@bp.route("/cleanhouse/evidence/<path:evidence_key>/roles/insight", methods=["POST"])
+def post_evidence_insight(evidence_key: str | None = None):
+    payload, error = _parse_json_payload()
+    if error:
+        return error
+    requested_key, error = _require_string(evidence_key or payload.get("evidence_key"), "evidence_key", max_len=512)
+    if error:
+        return error
+    if not requested_key.startswith("network:"):
+        return _error_response("Insight currently supports Network evidence only.")
+    source_view, error = _require_string(payload.get("source_view"), "source_view", required=False, allow_empty=True, max_len=64)
+    if error:
+        return error
+    invoker, error = _require_string(payload.get("invoker"), "invoker", required=False, allow_empty=True, max_len=256)
+    if error:
+        return error
+    role, error = _require_string(payload.get("role"), "role", required=False, allow_empty=True, max_len=128)
+    if error:
+        return error
+    invoker = (invoker or "operator").strip()
+    resolver = get_evidence_context_resolver()
+    try:
+        context = resolver.resolve_from_evidence_key(requested_key, source_view=source_view)
+    except Exception:
+        return _error_response("Unable to resolve evidence context for Insight.")
+    context = _merge_evidence_context_override(
+        context,
+        _normalize_optional_dict(payload.get("evidence_context")),
+    )
+    if context.source_surface != "network":
+        return _error_response("Insight currently supports Network evidence only.")
+    selected_action = _find_evidence_action(context, "ask_insight")
+    if not selected_action:
+        return _error_response("Insight action is not available for this evidence context.")
+    if not selected_action.get("enabled"):
+        return _error_response(selected_action.get("disabled_reason") or "Insight action is currently disabled.")
+    role = (role or selected_action.get("required_role") or "Insight").strip() or "Insight"
+    result = get_apple_intelligence_insight_service().generate(context)
+    audit_entry = _persist_evidence_insight_audit(context, selected_action, result, invoker=invoker, role=role)
+    return jsonify({
+        "status": "ok",
+        "context": context.to_dict(),
+        "action": selected_action,
+        "audit": audit_entry,
+        "insight_status": result.get("insight_status"),
+        "apple_intelligence": result.get("apple_intelligence"),
+        "insight": result.get("insight"),
+    })
 
 
 @bp.route("/cleanhouse/qpb/cases", methods=["GET"])
@@ -3575,14 +8887,14 @@ def get_reports():
     report_type, error = _require_string(request.args.get("report_type"), "report_type", required=False, allow_empty=True, max_len=64)
     if error:
         return error
-    limit, error = _optional_positive_int_arg("limit")
+    limit, error = _optional_positive_int_arg("limit", max_value=LOW_PROCESSING_REPORT_MAX_LIMIT)
     if error:
         return error
     return jsonify(adapter.get_reports(
         session_id=session_id,
         report_type=report_type or None,
-        limit=limit,
-        summary_only=_truthy_arg("summary_only"),
+        limit=limit or LOW_PROCESSING_REPORT_LIMIT,
+        summary_only=not _truthy_arg("full") or _truthy_arg("summary_only"),
     ))
 
 
@@ -3677,12 +8989,49 @@ def list_retention_events():
     return jsonify(adapter.get_retention_events())
 
 
+FILES_MEDIATION_SOURCE = "files_mediation"
+FILES_RECONCILIATION_SOURCE = "files_reconciliation"
 FILES_WATCHER_SOURCE = "filesystem_watcher"
 FILES_WAZUH_SOURCE = "wazuh_fim"
+FILES_ATTENTION_SOURCE = "files_attention"
+FILES_MEDIATION_STATES = {"queue", "in_progress", "ready", "completed", "cancelled"}
+FILES_MEDIATION_TRANSITIONS = {
+    "queue": {"in_progress", "cancelled"},
+    "in_progress": {"ready", "cancelled"},
+    "ready": {"completed", "in_progress", "cancelled"},
+    "completed": set(),
+    "cancelled": set(),
+}
+
+
+def _files_event_path(row: dict[str, Any]) -> str:
+    return str(row.get("path") or "").strip()
+
+
+def _files_event_timestamp(row: dict[str, Any]) -> str:
+    return str(row.get("timestamp") or "").strip()
+
+
+def _files_event_data(row: dict[str, Any]) -> dict[str, Any]:
+    value = row.get("data")
+    return value if isinstance(value, dict) else {}
+
+
+def _files_presentable_event(row: dict[str, Any]) -> bool:
+    path = Path(_files_event_path(row))
+    parts = set(path.parts)
+    if parts.intersection({".git", "__pycache__", "node_modules", "cleanhouse_env"}):
+        return False
+    if path.suffix.lower() in {".pyc", ".pyo", ".swp", ".tmp"} or path.name == ".DS_Store":
+        return False
+    path_text = str(path)
+    if "/bundled/wireshark/" in path_text and "/Resources/share/" in path_text:
+        return False
+    return True
 
 
 def _files_event_epoch(row: dict[str, Any]) -> float | None:
-    value = str(row.get("timestamp") or "").strip()
+    value = _files_event_timestamp(row)
     if not value:
         return None
     try:
@@ -3694,46 +9043,37 @@ def _files_event_epoch(row: dict[str, Any]) -> float | None:
     return parsed.timestamp()
 
 
-def _files_presentable_event(row: dict[str, Any]) -> bool:
-    path = Path(str(row.get("path") or ""))
-    if not str(path):
-        return False
-    if set(path.parts).intersection({".git", "__pycache__", "node_modules", "cleanhouse_env"}):
-        return False
-    return path.name != ".DS_Store" and path.suffix.lower() not in {".pyc", ".pyo", ".swp", ".tmp"}
-
-
 def _files_correlated(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
-    """Prefer live Wazuh projection while retaining raw provider rows durably."""
+    """Prefer Wazuh in the UI while retaining both provider rows durably."""
     projected: list[dict[str, Any]] = []
     for original in rows:
         if not _files_presentable_event(original):
             continue
         row = dict(original)
-        path = str(row.get("path") or "")
+        path = _files_event_path(row)
         event_type = str(row.get("event_type") or "")
-        provider = str(row.get("provider") or row.get("source_surface") or "")
         timestamp = _files_event_epoch(row)
-        matched = None
+        provider = str(row.get("provider") or row.get("source_surface") or "")
+        match_index = None
         for index, existing in enumerate(projected):
-            if str(existing.get("path") or "") != path or str(existing.get("event_type") or "") != event_type:
+            if _files_event_path(existing) != path or str(existing.get("event_type") or "") != event_type:
                 continue
             existing_provider = str(existing.get("provider") or existing.get("source_surface") or "")
+            if existing_provider == provider:
+                continue
             existing_timestamp = _files_event_epoch(existing)
-            if existing_provider == provider or timestamp is None or existing_timestamp is None:
+            if timestamp is None or existing_timestamp is None or abs(timestamp - existing_timestamp) > 5:
                 continue
-            if abs(timestamp - existing_timestamp) <= 5:
-                matched = index
-                break
-        if matched is not None:
-            existing = projected[matched]
+            match_index = index
+            break
+        if match_index is not None:
+            existing = projected[match_index]
             existing_provider = str(existing.get("provider") or existing.get("source_surface") or "")
-            providers = sorted({provider, existing_provider})
             if provider == "wazuh" and existing_provider != "wazuh":
-                row["correlated_providers"] = providers
-                projected[matched] = row
+                row["correlated_providers"] = sorted({provider, existing_provider})
+                projected[match_index] = row
             else:
-                existing["correlated_providers"] = providers
+                existing["correlated_providers"] = sorted({provider, existing_provider})
             continue
         row["correlated_providers"] = [provider] if provider else []
         projected.append(row)
@@ -3742,83 +9082,338 @@ def _files_correlated(rows: list[dict[str, Any]], *, limit: int) -> list[dict[st
     return projected
 
 
+def _files_findings(rows: list[dict[str, Any]], reconciliation_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    path_counts: dict[str, int] = {}
+    latest_by_path: dict[str, dict[str, Any]] = {}
+    protected_names = {".env", "package-lock.json", "requirements.txt", "runtime_supervisor.py", "auth.py"}
+
+    for row in rows:
+        path = _files_event_path(row)
+        if not path:
+            continue
+        path_counts[path] = path_counts.get(path, 0) + 1
+        latest_by_path.setdefault(path, row)
+        event_type = str(row.get("event_type") or "observed").lower()
+        name = Path(path).name
+        category = ""
+        severity = "notice"
+        title = ""
+        reason = ""
+        suggestion = ""
+        if event_type == "deleted":
+            category, severity = "deletion", "review"
+            title = f"Deleted file: {name}"
+            reason = "A watched file disappeared and its lineage should be confirmed."
+            suggestion = f"Review the deletion of {name} and restore it if it was unintended."
+        elif name in protected_names or name.endswith((".lock", ".pem", ".key")):
+            category, severity = "protected-change", "review"
+            title = f"Protected file changed: {name}"
+            reason = "A dependency, credential, or runtime control file changed."
+            suggestion = f"Verify the latest {name} change against its intended source."
+        if category:
+            key = (category, path)
+            groups[key] = {
+                "id": f"{category}:{path}",
+                "category": category,
+                "title": title,
+                "reason": reason,
+                "context": path,
+                "severity": severity,
+                "confidence": "high",
+                "event_count": path_counts[path],
+                "latest_at": _files_event_timestamp(row),
+                "paths": [path],
+                "evidence_refs": list(row.get("evidence_refs") or []),
+                "suggestion": suggestion,
+            }
+
+    for path, count in path_counts.items():
+        if count < 5:
+            continue
+        row = latest_by_path[path]
+        groups[("rapid-churn", path)] = {
+            "id": f"rapid-churn:{path}",
+            "category": "rapid-churn",
+            "title": f"Repeated edits: {Path(path).name}",
+            "reason": f"CleanHouse observed {count} recent changes to the same file.",
+            "context": path,
+            "severity": "notice",
+            "confidence": "medium",
+            "event_count": count,
+            "latest_at": _files_event_timestamp(row),
+            "paths": [path],
+            "evidence_refs": list(row.get("evidence_refs") or []),
+            "suggestion": f"Review the recent edit sequence for {Path(path).name}.",
+        }
+
+    if reconciliation_rows:
+        latest = reconciliation_rows[0]
+        data = _files_event_data(latest)
+        discrepancies = list(data.get("discrepancies") or [])
+        if discrepancies:
+            groups[("reconciliation", "latest")] = {
+                "id": "reconciliation:latest",
+                "category": "reconciliation",
+                "title": "Reconciliation found unresolved lineage",
+                "reason": f"{len(discrepancies)} known path{'s' if len(discrepancies) != 1 else ''} could not be verified.",
+                "context": "Known lineage index",
+                "severity": "review",
+                "confidence": "high",
+                "event_count": len(discrepancies),
+                "latest_at": _files_event_timestamp(latest),
+                "paths": discrepancies[:20],
+                "evidence_refs": discrepancies[:20],
+                "suggestion": "Review unresolved paths from the latest reconciliation.",
+            }
+
+    severity_rank = {"critical": 3, "review": 2, "notice": 1}
+    return sorted(
+        groups.values(),
+        key=lambda item: (severity_rank.get(item["severity"], 0), item.get("latest_at", "")),
+        reverse=True,
+    )[:20]
+
+
+def _files_locations(rows: list[dict[str, Any]], findings: list[dict[str, Any]], watcher: dict[str, Any]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    unresolved_by_location: dict[str, int] = {}
+    for finding in findings:
+        for path in finding.get("paths", []):
+            parent = str(Path(path).parent)
+            unresolved_by_location[parent] = unresolved_by_location.get(parent, 0) + 1
+    for row in rows:
+        data = _files_event_data(row)
+        location = str(data.get("watch_dir") or Path(_files_event_path(row)).parent or "Unavailable")
+        current = grouped.setdefault(location, {
+            "location": location,
+            "event_count": 0,
+            "latest_at": "",
+            "sources": set(),
+            "status": "watched" if location == watcher.get("watch_dir") else "observed",
+        })
+        current["event_count"] += 1
+        current["latest_at"] = max(current["latest_at"], _files_event_timestamp(row))
+        current["sources"].add(str(row.get("source_surface") or FILES_WATCHER_SOURCE))
+    if watcher.get("watch_dir") and watcher["watch_dir"] not in grouped:
+        grouped[watcher["watch_dir"]] = {
+            "location": watcher["watch_dir"],
+            "event_count": 0,
+            "latest_at": "",
+            "sources": {FILES_WATCHER_SOURCE},
+            "status": "watched" if watcher.get("status") == "running" else "degraded",
+        }
+    result = []
+    for location, item in grouped.items():
+        item["sources"] = sorted(item["sources"])
+        item["unresolved_findings"] = sum(
+            count for path, count in unresolved_by_location.items() if path.startswith(location)
+        )
+        result.append(item)
+    return sorted(result, key=lambda item: (item["latest_at"], item["event_count"]), reverse=True)
+
+
+def _fold_file_mediations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    folded: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        data = _files_event_data(row)
+        mediation_id = str(data.get("mediation_id") or "").strip()
+        if not mediation_id or mediation_id in folded:
+            continue
+        status = str(data.get("status") or "queue")
+        folded[mediation_id] = {
+            "id": mediation_id,
+            "status": status if status in FILES_MEDIATION_STATES else "queue",
+            "request": str(data.get("request") or row.get("summary") or "File mediation"),
+            "scope": str(data.get("scope") or "all"),
+            "evidence_names": list(data.get("evidence_names") or []),
+            "created_at": str(data.get("created_at") or row.get("timestamp") or ""),
+            "updated_at": str(row.get("timestamp") or ""),
+            "execution_state": str(data.get("execution_state") or "unavailable_until_zaelith"),
+            "transition_receipt": data.get("transition_receipt") if isinstance(data.get("transition_receipt"), dict) else {},
+        }
+    return sorted(folded.values(), key=lambda item: item["updated_at"], reverse=True)
+
+
+def _acknowledged_files_attention(rows: list[dict[str, Any]]) -> set[str]:
+    acknowledged: set[str] = set()
+    for row in rows:
+        data = _files_event_data(row)
+        for item in data.get("attention_ids") or []:
+            if str(item):
+                acknowledged.add(str(item))
+    return acknowledged
+
+
 def _files_snapshot(limit: int = 200) -> dict[str, Any]:
-    bounded_limit = min(max(1, int(limit)), 500)
     source_rows = events.list_events_by_sources({
-        FILES_WATCHER_SOURCE: min(max(500, bounded_limit * 4), 1000),
-        FILES_WAZUH_SOURCE: min(max(500, bounded_limit * 4), 1000),
+        FILES_WATCHER_SOURCE: min(max(500, limit * 4), 1000),
+        FILES_WAZUH_SOURCE: min(max(500, limit * 4), 1000),
+        FILES_MEDIATION_SOURCE: 300,
+        FILES_RECONCILIATION_SOURCE: 20,
+        FILES_ATTENTION_SOURCE: 300,
     })
-    candidates = sorted(
+    candidate_rows = sorted(
         [*source_rows.get(FILES_WAZUH_SOURCE, []), *source_rows.get(FILES_WATCHER_SOURCE, [])],
         key=lambda row: int(row.get("id") or 0),
         reverse=True,
     )
-    projected = _files_correlated(candidates, limit=bounded_limit)
+    file_rows = _files_correlated(candidate_rows, limit=min(max(1, limit), 500))
+    mediation_rows = source_rows.get(FILES_MEDIATION_SOURCE, [])
+    reconciliation_rows = source_rows.get(FILES_RECONCILIATION_SOURCE, [])
+    attention_rows = source_rows.get(FILES_ATTENTION_SOURCE, [])
     watcher = events.get_watcher_status()
     wazuh = wazuh_files.status()
     preservation = vvault_sync.status(surface="files")
+    findings = _files_findings(file_rows, reconciliation_rows)
+    locations = _files_locations(file_rows, findings, watcher)
+    mediations = _fold_file_mediations(mediation_rows)
+    suggestions = [
+        {
+            "id": finding["id"],
+            "request": finding["suggestion"],
+            "severity": finding["severity"],
+            "finding_id": finding["id"],
+        }
+        for finding in findings
+        if finding.get("suggestion")
+    ][:8]
+    acknowledged_attention = _acknowledged_files_attention(attention_rows)
+    attention_items = [
+        {
+            "id": f"suggestion:{suggestion['id']}",
+            "kind": "suggestion",
+            "reference_id": suggestion["id"],
+        }
+        for suggestion in suggestions
+    ]
+    attention_items.extend(
+        {
+            "id": f"mediation:{item['id']}:{item['status']}",
+            "kind": "ready_review" if item["status"] == "ready" else "mediation_failure",
+            "reference_id": item["id"],
+        }
+        for item in mediations
+        if item["status"] == "ready" or item.get("transition_state") in {"conflict", "failed"}
+    )
+    for item in attention_items:
+        item["acknowledged"] = item["id"] in acknowledged_attention
+    for suggestion in suggestions:
+        suggestion["acknowledged"] = f"suggestion:{suggestion['id']}" in acknowledged_attention
+    latest_reconciliation = reconciliation_rows[0] if reconciliation_rows else None
+    reconciliation_data = _files_event_data(latest_reconciliation or {})
+    attention_count = sum(1 for item in attention_items if not item["acknowledged"])
+    cursor = max(
+        [int(row.get("id") or 0) for row in file_rows + mediation_rows + reconciliation_rows + attention_rows] or [0]
+    )
+    integrity_projection = file_integrity.snapshot()
+    projection_state = str(integrity_projection.get("state") or "no_data")
+    integrity = {
+        **integrity_projection,
+        "state": "degraded" if projection_state == "degraded" else ("review" if findings else projection_state),
+        "drift_state": str((integrity_projection.get("last_reconciliation") or {}).get("state") or "not_reconciled"),
+        "gap_state": "collector_interrupted" if wazuh.get("last_error") else "none_observed",
+        "mutation_count": len(file_rows),
+        "finding_count": len(findings),
+        "evidence_ref_count": sum(len(row.get("evidence_refs") or []) for row in file_rows),
+        "last_reconciled_at": _files_event_timestamp(latest_reconciliation or {}),
+        "reconciliation": reconciliation_data,
+    }
+    powered_by_wazuh = bool(wazuh.get("powered_by_wazuh"))
+    wazuh_runtime_status = wazuh.get("runtime") if isinstance(wazuh.get("runtime"), dict) else {}
+    wazuh_bundle = (
+        wazuh_runtime_status.get("bundle")
+        if isinstance(wazuh_runtime_status.get("bundle"), dict)
+        else {}
+    )
+    wazuh_signature = (
+        wazuh_bundle.get("signature")
+        if isinstance(wazuh_bundle.get("signature"), dict)
+        else {}
+    )
     current_wazuh_live = bool(wazuh.get("operational")) and wazuh.get("health") in {"live", "no_data"}
     fallback_active = not current_wazuh_live and watcher.get("status") == "running"
-    if current_wazuh_live:
-        state = str(wazuh.get("health") or "live")
-        provider = "wazuh"
-    elif fallback_active:
-        state = "fallback"
-        provider = "watchdog"
-    elif wazuh.get("configured"):
-        state = "degraded" if wazuh.get("last_error") else "warming"
-        provider = "none"
+    watcher_error = watcher.get("last_error") if isinstance(watcher.get("last_error"), dict) else {}
+    if fallback_active:
+        fallback_reason = "wazuh_not_authenticated"
+    elif watcher.get("collector_status") == "error":
+        fallback_reason = str(watcher_error.get("source") or "watchdog_error")
+    elif watcher.get("status") == "unavailable":
+        fallback_reason = str(watcher.get("unsupported_reason") or "watchdog_unavailable")
     else:
-        state = "unavailable"
-        provider = "none"
-    cursor = max([int(row.get("id") or 0) for row in projected] or [0])
+        fallback_reason = "watchdog_inactive"
+    if powered_by_wazuh and wazuh.get("health") == "live":
+        files_state = "live"
+    elif fallback_active:
+        files_state = "fallback"
+    elif wazuh.get("authenticated") and wazuh.get("health") == "no_data":
+        files_state = "no_data"
+    elif wazuh.get("health") == "warming":
+        files_state = "warming"
+    elif wazuh.get("configured"):
+        files_state = "degraded"
+    else:
+        files_state = "unavailable"
     collector = {
-        "provider": provider,
-        "health": state,
-        "lifecycle": str(wazuh.get("lifecycle") or "unavailable"),
-        "configured": bool(wazuh.get("configured")),
+        "provider": "wazuh" if current_wazuh_live else ("watchdog" if fallback_active else "none"),
+        "lifecycle": wazuh.get("lifecycle", "unavailable"),
+        "health": files_state,
+        "connection_health": str(wazuh.get("health") or files_state),
         "operational": bool(wazuh.get("operational")),
         "evidence_authenticated": bool(wazuh.get("authenticated")),
-        "powered_by_wazuh": bool(wazuh.get("powered_by_wazuh")),
-        "historical_wazuh_proof": bool(wazuh.get("historical_wazuh_proof")),
+        "evidence_authentication": "authenticated" if wazuh.get("authenticated") else "unavailable",
+        "powered_by_wazuh": powered_by_wazuh,
+        "package_version": wazuh_bundle.get("version"),
+        "package_status": wazuh_bundle.get("status") or "unavailable",
+        "package_verified": bool(wazuh_bundle.get("packaged")),
+        "package_checksum_verified": bool(wazuh_bundle.get("checksum_verified")),
+        "package_signature_verified": bool(wazuh_signature.get("verified")),
+        "agent_version": (wazuh.get("runtime") or {}).get("installed_version") or None,
         "agent_id": wazuh.get("agent_id") or None,
         "manager": wazuh.get("manager") or None,
-        "manager_version": wazuh.get("manager_version") or None,
-        "monitored_scope": wazuh.get("monitored_scope") or watcher.get("watch_dir"),
-        "last_event_at": wazuh.get("last_event_at") or (projected[0].get("timestamp") if projected else None),
+        "last_event_at": wazuh.get("last_event_at") or (_files_event_timestamp(file_rows[0]) if file_rows else None),
         "ingestion_latency_ms": wazuh.get("ingestion_latency_ms"),
         "cursor": wazuh.get("cursor") or "",
+        "stream_identity": wazuh.get("stream_identity") or "",
+        "stream_generation": wazuh.get("stream_generation") or "",
         "gap_state": wazuh.get("gap_state") or "unknown",
+        "manager_version": wazuh.get("manager_version") or None,
+        "historical_wazuh_proof": bool(wazuh.get("historical_wazuh_proof")),
+        "monitored_scope": wazuh.get("monitored_scope") or watcher.get("watch_dir"),
         "fallback": {
             "active": fallback_active,
             "provider": "watchdog",
             "status": watcher.get("status") or "unknown",
-            "reason": "wazuh_not_operational" if fallback_active else "inactive",
+            "reason": fallback_reason,
+            "last_error": watcher_error,
         },
+        "fallback_reason": fallback_reason,
         "last_error": wazuh.get("last_error") or "",
     }
     return {
-        "status": "ok" if state in {"live", "no_data", "fallback"} else state,
+        "status": "ok" if files_state in {"live", "fallback", "no_data"} else files_state,
         "schema": "cleanhouse.files.v2",
         "cursor": cursor,
         "collector": collector,
-        "powered_by_wazuh": collector["powered_by_wazuh"],
+        "powered_by_wazuh": powered_by_wazuh,
         "monitoring": {
             "always_on": bool(current_wazuh_live or fallback_active),
-            "status": state,
-            "provider": provider,
+            "status": files_state,
+            "legacy_status": watcher.get("status") or "unknown",
             "watch_dir": collector["monitored_scope"],
+            "last_event_at": collector["last_event_at"],
+            "provider": collector["provider"],
             "fallback": collector["fallback"],
         },
-        "events": projected,
-        "findings": [],
-        "integrity": file_integrity.snapshot(),
-        "locations": [],
-        "mediations": [],
-        "suggestions": [],
-        "attention_count": 0,
-        "attention": [],
-        "reconciliation": {},
+        "events": file_rows,
+        "findings": findings,
+        "integrity": integrity,
+        "locations": locations,
+        "mediations": mediations,
+        "suggestions": suggestions,
+        "attention_count": min(attention_count, 100),
+        "attention": attention_items,
+        "reconciliation": reconciliation_data,
         "preservation": preservation,
     }
 
@@ -3826,6 +9421,52 @@ def _files_snapshot(limit: int = 200) -> dict[str, Any]:
 def _files_sse_event(event: str, payload: dict[str, Any], *, event_id: str) -> str:
     data = json.dumps(payload, separators=(",", ":"), default=str)
     return f"id: {event_id}\nevent: {event}\ndata: {data}\n\n"
+
+
+@bp.route("/cleanhouse/files/attention/acknowledge", methods=["POST"])
+def acknowledge_files_attention():
+    guard = _require_privileged_files_request("files-attention-acknowledge")
+    if guard is not None:
+        return guard
+    payload, error = _parse_json_payload()
+    if error:
+        return error
+    snapshot = _files_snapshot(200)
+    available = {str(item.get("id")) for item in snapshot.get("attention", []) if item.get("id")}
+    requested = payload.get("attention_ids") or []
+    if payload.get("all") is True:
+        attention_ids = sorted(available)
+    elif isinstance(requested, list):
+        attention_ids = sorted({str(item) for item in requested if str(item) in available})
+    else:
+        return _error_response("attention_ids must be an array")
+    if not attention_ids:
+        return _error_response("no current attention items matched")
+    acknowledged_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    receipt_core = {"attention_ids": attention_ids, "acknowledged_at": acknowledged_at}
+    receipt_id = "files-attention:" + hashlib.sha256(
+        json.dumps(receipt_core, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    receipt = {
+        "id": receipt_id,
+        **receipt_core,
+        "execution_state": "acknowledgement_only",
+    }
+    events.insert_event(
+        event_type="file_attention_acknowledged",
+        path="/files/attention",
+        summary=f"Acknowledged {len(attention_ids)} Files attention item(s)",
+        source_surface=FILES_ATTENTION_SOURCE,
+        provider="cleanhouse",
+        actor_type="operator",
+        evidence_level="declared",
+        collector_status="ok",
+        evidence_refs=attention_ids,
+        source_event_key=receipt_id,
+        data={"attention_ids": attention_ids, "transition_receipt": receipt},
+    )
+    vvault_sync.enqueue(receipt_id, {"event_type": "file_attention_acknowledged", **receipt})
+    return jsonify({"status": "ok", "receipt": receipt, "snapshot": _files_snapshot(200)})
 
 
 @bp.route("/cleanhouse/files/snapshot", methods=["GET"])
@@ -3853,20 +9494,23 @@ def stream_files_live():
     @stream_with_context
     def generate():
         last_cursor = initial_cursor
-        last_signature = ""
+        last_attention = -1
+        last_state_signature = ""
         last_keepalive = time.monotonic()
         while True:
             snapshot = _files_snapshot(200)
             cursor = int(snapshot.get("cursor") or 0)
-            signature = hashlib.sha256(json.dumps({
+            attention = int(snapshot.get("attention_count") or 0)
+            state_signature = hashlib.sha256(json.dumps({
                 "collector": snapshot.get("collector"),
                 "integrity": snapshot.get("integrity"),
                 "preservation": snapshot.get("preservation"),
             }, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-            if cursor != last_cursor or signature != last_signature:
+            if cursor != last_cursor or attention != last_attention or state_signature != last_state_signature:
                 yield _files_sse_event("files-snapshot", snapshot, event_id=str(cursor))
                 last_cursor = cursor
-                last_signature = signature
+                last_attention = attention
+                last_state_signature = state_signature
                 last_keepalive = time.monotonic()
             elif time.monotonic() - last_keepalive >= 15:
                 yield ": keepalive\n\n"
@@ -3887,64 +9531,296 @@ def get_files_wazuh_status():
     return jsonify(wazuh_files.status())
 
 
-@bp.route("/cleanhouse/allowed-threats", methods=["GET"])
-def allowed_threats_list():
-    state = _read_allowed_threats_state()
-    items = state.get("allowed_threats", [])
-    return jsonify({
-        "status": "ok",
-        "allowed_threats": items,
-        "count": len(items),
-    })
-
-
-@bp.route("/cleanhouse/allowed-threats", methods=["POST"])
-def allowed_threats_create():
-    data, error = _parse_json_payload()
+@bp.route("/cleanhouse/files/wazuh/setup", methods=["POST"])
+def setup_files_wazuh():
+    guard = _require_privileged_files_request("wazuh-setup")
+    if guard is not None:
+        return guard
+    payload, error = _parse_json_payload()
     if error:
         return error
-    item = _allowed_threat_from_payload(data)
-    state = _read_allowed_threats_state()
-    items = state.get("allowed_threats", [])
-    items.append(item)
-    state["allowed_threats"] = items
-    state["updated_at"] = item["updated_at"]
-    _write_allowed_threats_state(state)
-    return jsonify({
-        "status": "ok",
-        "allowed_threat": item,
-        "allowed_threats": items,
-        "count": len(items),
-    }), 201
+    manager, error = _require_string(payload.get("manager"), "manager", max_len=253)
+    if error:
+        return error
+    agent_name, error = _require_string(
+        payload.get("agent_name") or "CleanHouse",
+        "agent_name",
+        max_len=128,
+    )
+    if error:
+        return error
+    monitored_scope, error = _require_string(
+        payload.get("monitored_scope") or str(events.DEFAULT_WATCH_DIR),
+        "monitored_scope",
+        max_len=4096,
+    )
+    if error:
+        return error
+    bundle = wazuh_runtime.verify_bundle()
+    if not bundle.get("packaged"):
+        return {
+            "status": "error",
+            "message": "The pinned Wazuh agent and source bundle have not passed package verification.",
+            "bundle": bundle,
+        }, 503
+    try:
+        enrollment = wazuh_files.enroll_agent(
+            manager=manager,
+            agent_name=agent_name,
+            monitored_scope=monitored_scope,
+        )
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": "Authenticated VVAULT Wazuh enrollment failed.",
+            "reason": str(exc)[:512],
+        }, 503
+    keychain = wazuh_runtime.store_enrollment_key(enrollment["client_key"])
+    if not keychain.get("stored"):
+        return {"status": "error", "message": "Could not store the Wazuh client key in Keychain"}, 503
+    result = wazuh_runtime.install_with_authorization(
+        manager=manager,
+        agent_name=agent_name,
+        agent_id=enrollment["agent_id"],
+        monitored_scope=monitored_scope,
+    )
+    result["enrollment"] = {
+        key: value for key, value in enrollment.items() if key != "client_key"
+    }
+    status_code = 200 if result.get("status") == "ok" else 503
+    return jsonify(result), status_code
 
 
-@bp.route("/cleanhouse/allowed-threats/<allowed_id>", methods=["DELETE"])
-def allowed_threats_delete(allowed_id: str):
-    state = _read_allowed_threats_state()
-    items = state.get("allowed_threats", [])
-    retained = [item for item in items if str(item.get("id")) != allowed_id]
-    if len(retained) == len(items):
-        return jsonify({"status": "not_found", "message": "Allowed threat not found."}), 404
-    state["allowed_threats"] = retained
-    state["updated_at"] = _now_iso()
-    _write_allowed_threats_state(state)
-    return jsonify({
-        "status": "ok",
-        "deleted_id": allowed_id,
-        "allowed_threats": retained,
-        "count": len(retained),
-    })
+@bp.route("/cleanhouse/files/reconcile", methods=["POST"])
+def reconcile_files():
+    collector = wazuh_files.status()
+    provider = "wazuh"
+    strategy = "wazuh_fim_inventory"
+    partial = False
+    try:
+        inventory = wazuh_files.inventory()
+    except Exception as exc:
+        provider = "watchdog"
+        strategy = "known_watcher_paths_partial"
+        partial = True
+        watcher = events.get_watcher_status()
+        scope = Path(str(watcher.get("watch_dir") or events.DEFAULT_WATCH_DIR)).expanduser().resolve()
+        known_rows = [
+            row for row in events.list_events_by_sources({FILES_WATCHER_SOURCE: 1000}).get(FILES_WATCHER_SOURCE, [])
+            if _files_presentable_event(row)
+        ][:500]
+        known_paths = list(dict.fromkeys(_files_event_path(row) for row in known_rows if _files_event_path(row)))[:250]
+        inventory = []
+        unavailable: list[str] = []
+        for raw_path in known_paths:
+            try:
+                path = Path(raw_path).expanduser().resolve(strict=True)
+                if not path.is_file() or (path != scope and scope not in path.parents):
+                    continue
+                stat = path.stat()
+                digest = hashlib.sha256()
+                with path.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                inventory.append({
+                    "path": str(path),
+                    "provider": "watchdog",
+                    "observed_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+                    "hashes": {"sha256": digest.hexdigest()},
+                    "metadata": {
+                        "size": stat.st_size,
+                        "mode": oct(stat.st_mode & 0o7777),
+                        "uid": stat.st_uid,
+                        "gid": stat.st_gid,
+                        "mtime": stat.st_mtime_ns,
+                        "inode": stat.st_ino,
+                        "file_type": "file",
+                    },
+                    "evidence_refs": [f"watchdog-path://{path}"],
+                })
+            except (OSError, RuntimeError):
+                unavailable.append(raw_path)
+        if unavailable:
+            collector = {**collector, "fallback_inventory_error": str(exc)[:512], "unavailable_paths": unavailable[:50]}
+    data = file_integrity.reconcile(inventory, provider=provider)
+    data.update({"strategy": strategy, "partial": partial, "collector": collector.get("health")})
+    events.insert_event(
+        event_type="file_reconciliation",
+        path=str(collector.get("monitored_scope") or events.DEFAULT_WATCH_DIR),
+        summary=f"Reconciled {data['checked']} file integrity entries via {provider}",
+        source_surface=FILES_RECONCILIATION_SOURCE,
+        provider=provider,
+        actor_type="operator",
+        evidence_level="authenticated" if provider == "wazuh" else "observed_partial",
+        collector_status="ok" if not partial else "fallback",
+        evidence_refs=[data["receipt_id"], *data.get("discrepancies", [])[:20]],
+        source_event_key=f"files-reconciliation:{data['receipt_id']}",
+        data=data,
+    )
+    vvault_sync.enqueue(data["receipt_id"], {"event_type": "file_reconciliation", **data})
+    snapshot = _files_snapshot(200)
+    snapshot["reconciliation_receipt"] = data
+    return jsonify(snapshot)
+
+
+@bp.route("/cleanhouse/files/baseline/rebuild", methods=["POST"])
+def rebuild_files_baseline():
+    guard = _require_privileged_files_request("baseline-rebuild")
+    if guard is not None:
+        return guard
+    try:
+        inventory = wazuh_files.inventory()
+    except Exception as exc:
+        return {
+            "status": "degraded",
+            "message": "A full baseline rebuild requires the authenticated Wazuh FIM inventory.",
+            "reason": str(exc)[:512],
+        }, 503
+    generation = file_integrity.rebuild(
+        inventory,
+        provider="wazuh",
+        reason="handler_requested_full_rebuild",
+        evidence_refs=["wazuh-fim-inventory"],
+    )
+    receipt_id = f"files-baseline:{generation['chain_hash']}"
+    events.insert_event(
+        event_type="file_baseline_rebuilt",
+        path=str(wazuh_files.status().get("monitored_scope") or events.DEFAULT_WATCH_DIR),
+        summary=f"Rebuilt Files baseline generation {generation['generation']}",
+        source_surface=FILES_RECONCILIATION_SOURCE,
+        provider="wazuh",
+        actor_type="operator",
+        evidence_level="authenticated",
+        collector_status="ok",
+        evidence_refs=[receipt_id],
+        source_event_key=receipt_id,
+        data={"baseline": generation, "authorization_state": "not_evaluated_until_zaelith"},
+    )
+    vvault_sync.enqueue(receipt_id, {"event_type": "file_baseline_rebuilt", **generation})
+    snapshot = _files_snapshot(200)
+    snapshot["baseline_receipt"] = {"id": receipt_id, **generation}
+    return jsonify(snapshot)
+
+
+@bp.route("/cleanhouse/files/mediations", methods=["POST"])
+def queue_file_mediation():
+    payload, error = _parse_json_payload()
+    if error:
+        return error
+    mediation_request, error = _require_string(payload.get("request"), "request", max_len=2000)
+    if error:
+        return error
+    scope = str(payload.get("scope") or "all").strip()
+    if scope not in {"all", "current"}:
+        return _error_response("scope must be all or current")
+    raw_evidence = payload.get("evidence_names") or []
+    if not isinstance(raw_evidence, list):
+        return _error_response("evidence_names must be an array")
+    evidence_names = [str(item).strip()[:255] for item in raw_evidence if str(item).strip()][:20]
+    mediation_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    data = {
+        "mediation_id": mediation_id,
+        "status": "queue",
+        "request": mediation_request,
+        "scope": scope,
+        "evidence_names": evidence_names,
+        "created_at": now,
+        "execution_state": "unavailable_until_zaelith",
+    }
+    receipt_id = "files-mediation:" + hashlib.sha256(
+        json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    data["transition_receipt"] = {
+        "id": receipt_id,
+        "from": None,
+        "to": "queue",
+        "created_at": now,
+        "execution_state": "unavailable_until_zaelith",
+    }
+    events.insert_event(
+        event_type="file_mediation_queued",
+        path=f"/files/mediations/{mediation_id}",
+        summary=mediation_request,
+        source_surface=FILES_MEDIATION_SOURCE,
+        actor_type="operator",
+        evidence_level="declared",
+        collector_status="ok",
+        evidence_refs=evidence_names,
+        source_event_key=receipt_id,
+        provider="cleanhouse",
+        data=data,
+    )
+    vvault_sync.enqueue(receipt_id, {"event_type": "file_mediation_queued", **data})
+    snapshot = _files_snapshot(200)
+    return jsonify({"status": "ok", "mediation": next(item for item in snapshot["mediations"] if item["id"] == mediation_id), "snapshot": snapshot}), 201
+
+
+@bp.route("/cleanhouse/files/mediations/<mediation_id>/transition", methods=["POST"])
+def transition_file_mediation(mediation_id: str):
+    if not re.fullmatch(r"[A-Fa-f0-9]{32}", mediation_id):
+        return _error_response("invalid mediation id")
+    payload, error = _parse_json_payload()
+    if error:
+        return error
+    next_status = str(payload.get("status") or "").strip()
+    if next_status not in FILES_MEDIATION_STATES:
+        return _error_response("invalid mediation status")
+    mediation_rows = events.list_events_by_sources({FILES_MEDIATION_SOURCE: 300}).get(FILES_MEDIATION_SOURCE, [])
+    current = next((item for item in _fold_file_mediations(mediation_rows) if item["id"] == mediation_id), None)
+    if current is None:
+        return {"status": "error", "message": "mediation not found"}, 404
+    if next_status not in FILES_MEDIATION_TRANSITIONS[current["status"]]:
+        return _error_response(f"cannot transition {current['status']} to {next_status}")
+    data = {
+        "mediation_id": mediation_id,
+        "status": next_status,
+        "request": current["request"],
+        "scope": current["scope"],
+        "evidence_names": current["evidence_names"],
+        "created_at": current["created_at"],
+        "execution_state": "unavailable_until_zaelith",
+    }
+    transitioned_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    receipt_payload = {
+        "mediation_id": mediation_id,
+        "from": current["status"],
+        "to": next_status,
+        "created_at": transitioned_at,
+        "evidence_refs": current["evidence_names"],
+        "execution_state": "unavailable_until_zaelith",
+    }
+    receipt_id = "files-mediation:" + hashlib.sha256(
+        json.dumps(receipt_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:32]
+    receipt_payload["id"] = receipt_id
+    data["transition_receipt"] = receipt_payload
+    events.insert_event(
+        event_type=f"file_mediation_{next_status}",
+        path=f"/files/mediations/{mediation_id}",
+        summary=f"{next_status.replace('_', ' ')}: {current['request']}",
+        source_surface=FILES_MEDIATION_SOURCE,
+        actor_type="operator",
+        evidence_level="verified",
+        collector_status="ok",
+        evidence_refs=current["evidence_names"],
+        source_event_key=receipt_id,
+        provider="cleanhouse",
+        data=data,
+    )
+    vvault_sync.enqueue(receipt_id, {"event_type": f"file_mediation_{next_status}", **data})
+    return jsonify({"status": "ok", "transition_receipt": receipt_payload, "snapshot": _files_snapshot(200)})
 
 
 @bp.route("/events", methods=["GET"])
 def get_events():
-    limit, error = _optional_positive_int_arg("limit", max_value=1000)
+    limit, error = _optional_positive_int_arg("limit", max_value=LOW_PROCESSING_EVENT_MAX_LIMIT)
     if error:
         return error
     session_id, error = _validate_session_id(request.args.get("session_id"), required=False)
     if error:
         return error
-    rows = events.list_events(limit=limit or 100, session_id=session_id)
+    rows = events.list_events(limit=limit or LOW_PROCESSING_EVENT_LIMIT, session_id=session_id)
     schema_error = _validate_events_rows_payload(rows)
     if schema_error:
         return schema_error
@@ -3953,7 +9829,7 @@ def get_events():
 
 @bp.route("/receipts", methods=["GET"])
 def get_receipts_list():
-    limit, error = _optional_positive_int_arg("limit", max_value=1000)
+    limit, error = _optional_positive_int_arg("limit", max_value=LOW_PROCESSING_RECEIPT_MAX_LIMIT)
     if error:
         return error
 
@@ -3963,7 +9839,7 @@ def get_receipts_list():
 
     if session_id is not None:
         events.ensure_latest_receipt(session_id=session_id)
-    rows = events.list_receipts(limit=limit or 100, session_id=session_id)
+    rows = events.list_receipts(limit=limit or LOW_PROCESSING_RECEIPT_LIMIT, session_id=session_id)
     schema_error = _validate_receipts_rows_payload(rows)
     if schema_error:
         return schema_error

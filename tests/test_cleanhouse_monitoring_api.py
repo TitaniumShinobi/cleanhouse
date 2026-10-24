@@ -9,6 +9,7 @@ import os
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -30,8 +31,12 @@ if "flask" not in sys.modules:
             return func
 
     flask_stub.Blueprint = _Blueprint
+    flask_stub.Response = lambda *args, **kwargs: types.SimpleNamespace(args=args, kwargs=kwargs, headers={})
     flask_stub.jsonify = lambda obj=None, **kwargs: obj if obj is not None else kwargs
     flask_stub.request = types.SimpleNamespace(args={}, headers={})
+    flask_stub.session = {}
+    flask_stub.send_file = lambda *args, **kwargs: {"send_file": args, "kwargs": kwargs}
+    flask_stub.stream_with_context = lambda func: func
     sys.modules["flask"] = flask_stub
 
 if "jwt" not in sys.modules:
@@ -57,6 +62,8 @@ from backend.api.cleanhouse_monitoring import (
     PersistenceBackend,
     SessionEnvelope,
 )
+from backend.apple_intelligence import AppleIntelligenceInsightService, bounded_evidence_context_payload
+from backend.evidence_context import EvidenceActionResolver, EvidenceContext, network_distribution_owner_id
 from corefiles.collectors.command_observer import CommandResult, get_observer
 from corefiles import config
 from corefiles.notifications import NotificationManager
@@ -186,15 +193,23 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self._old_native_notifications = os.environ.get("CLEANHOUSE_NATIVE_NOTIFICATIONS")
         self._old_active_context_codex = os.environ.get("CLEANHOUSE_ACTIVE_CONTEXT_CODEX")
         self._old_presence_mode = os.environ.get("CLEANHOUSE_PRESENCE_MODE")
+        self._old_files_outbox_db = os.environ.get("CLEANHOUSE_FILES_OUTBOX_DB")
         config.DATA_DIR = Path(self._data_tmp.name) / "data"
         os.environ["CLEANHOUSE_NATIVE_NOTIFICATIONS"] = "0"
         os.environ["CLEANHOUSE_ACTIVE_CONTEXT_CODEX"] = "0"
         os.environ["CLEANHOUSE_PRESENCE_MODE"] = "0"
+        os.environ["CLEANHOUSE_FILES_OUTBOX_DB"] = str(Path(self._data_tmp.name) / "files-outbox.db")
         cleanhouse_module.request = types.SimpleNamespace(
             args={},
             headers={},
             get_json=lambda silent=True: None,
         )
+        with cleanhouse_module._NETWORK_PROJECTION_CACHE_LOCK:
+            cleanhouse_module._NETWORK_PROJECTION_CACHE.clear()
+        with cleanhouse_module._NETWORK_FINDINGS_CACHE_LOCK:
+            cleanhouse_module._NETWORK_FINDINGS_CACHE.update({"payload": None, "cached_at": 0.0})
+        with cleanhouse_module._NETWORK_RECENT_OBSERVATIONS_LOCK:
+            cleanhouse_module._NETWORK_RECENT_OBSERVATIONS.clear()
 
     def tearDown(self):
         config.DATA_DIR = self._old_data_dir
@@ -210,6 +225,10 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
             os.environ.pop("CLEANHOUSE_PRESENCE_MODE", None)
         else:
             os.environ["CLEANHOUSE_PRESENCE_MODE"] = self._old_presence_mode
+        if self._old_files_outbox_db is None:
+            os.environ.pop("CLEANHOUSE_FILES_OUTBOX_DB", None)
+        else:
+            os.environ["CLEANHOUSE_FILES_OUTBOX_DB"] = self._old_files_outbox_db
         self._data_tmp.cleanup()
 
     def _set_request_json(self, payload):
@@ -245,6 +264,466 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         if hasattr(body, "get_json"):
             body = body.get_json()
         return body, status
+
+    def _sample_evidence_context(self, **overrides):
+        values = {
+            "evidence_key": "network:event-1",
+            "source_surface": "network",
+            "source_view": "findings",
+            "source_entity_id": "event-1",
+            "evidence_refs": ["local://cleanhouse/network/event-1"],
+            "summary": "Network event observed.",
+            "severity": "warning",
+            "validation_state": "observed",
+            "open_back_route": "/network?network_view=findings&event_id=event-1",
+            "timeline_event_id": "timeline:event-1",
+            "network_tags": {"status": "OBSERVING", "state": "DEGRADED", "reasons": ["External connection"], "explanation": "External connection", "ignored": "raw"},
+            "network_reasons": ["External connection"],
+            "origin": "local://cleanhouse/network/event-1",
+            "trace_id": "trace:event-1",
+        }
+        values.update(overrides)
+        return EvidenceContext(**values)
+
+    def test_evidence_insight_payload_is_bounded_before_apple_call(self):
+        class CapturingRunner:
+            def __init__(self):
+                self.payload = None
+
+            def invoke(self, payload):
+                self.payload = payload
+                return {
+                    "status": "ok",
+                    "insight": {
+                        "plain_language_summary": "Evidence-backed summary.",
+                        "why_it_matters": "It is tied to a resolved evidence key.",
+                        "recommended_next_steps": ["Open the source view."],
+                        "confidence": "medium",
+                        "limitations": [],
+                    },
+                }
+
+        runner = CapturingRunner()
+        context = self._sample_evidence_context(
+            summary="s" * 2000,
+            evidence_refs=[f"local://cleanhouse/network/{index}/" + ("x" * 2000) for index in range(20)],
+            network_tags={"status": "OBSERVING", "state": "DEGRADED", "reasons": [str(i) for i in range(20)], "explanation": "e" * 300, "raw_page_state": "drop"},
+            network_reasons=[str(i) for i in range(20)],
+        )
+        result = AppleIntelligenceInsightService(runner=runner).generate(context)
+
+        payload = runner.payload
+        self.assertEqual(result["insight_status"], "available")
+        self.assertEqual(
+            set(payload),
+            {
+                "evidence_key",
+                "source_surface",
+                "source_view",
+                "source_entity_id",
+                "summary",
+                "severity",
+                "validation_state",
+                "evidence_refs",
+                "timeline_event_id",
+                "open_back_route",
+                "network_tags",
+                "network_reasons",
+            },
+        )
+        self.assertLessEqual(len(payload["summary"]), 1200)
+        self.assertEqual(len(payload["evidence_refs"]), 12)
+        self.assertLessEqual(len(payload["evidence_refs"][0]), 1024)
+        self.assertNotIn("trace_id", payload)
+        self.assertNotIn("origin", payload)
+        self.assertNotIn("raw_page_state", payload["network_tags"])
+        self.assertEqual(len(payload["network_tags"]["reasons"]), 8)
+        self.assertEqual(len(payload["network_reasons"]), 8)
+
+    def test_unavailable_apple_intelligence_returns_structured_disabled_state(self):
+        class UnavailableRunner:
+            def invoke(self, payload):
+                return {"status": "unavailable", "reason": "Foundation Models framework is not available."}
+
+        result = AppleIntelligenceInsightService(runner=UnavailableRunner()).generate(self._sample_evidence_context())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["insight_status"], "unavailable")
+        self.assertFalse(result["apple_intelligence"]["available"])
+        self.assertEqual(result["insight"]["recommended_next_steps"], [])
+        self.assertEqual(result["insight"]["confidence"], "unavailable")
+        self.assertIn("Foundation Models framework is not available.", result["insight"]["limitations"][0])
+
+    def test_evidence_insight_payload_notes_missing_refs(self):
+        payload = bounded_evidence_context_payload(self._sample_evidence_context(evidence_refs=[]))
+        self.assertEqual(payload["evidence_refs"], [])
+        result = AppleIntelligenceInsightService(runner=type("Runner", (), {
+            "invoke": lambda self, payload: {
+                "status": "ok",
+                "insight": {
+                    "plain_language_summary": "Only the evidence key resolved.",
+                    "why_it_matters": "",
+                    "recommended_next_steps": ["Attach evidence refs before escalation."],
+                    "confidence": "low",
+                    "limitations": [],
+                },
+            }
+        })()).generate(self._sample_evidence_context(evidence_refs=[]))
+        self.assertTrue(any("Evidence references are missing" in item for item in result["insight"]["limitations"]))
+
+    def test_evidence_insight_drops_false_missing_refs_limitation_when_refs_exist(self):
+        result = AppleIntelligenceInsightService(runner=type("Runner", (), {
+            "invoke": lambda self, payload: {
+                "status": "ok",
+                "insight": {
+                    "plain_language_summary": "Evidence-backed summary.",
+                    "why_it_matters": "The context includes a resolved evidence reference.",
+                    "recommended_next_steps": ["Open the source view."],
+                    "confidence": "medium",
+                    "limitations": ["Evidence references are missing."],
+                },
+            }
+        })()).generate(self._sample_evidence_context())
+
+        self.assertEqual(result["insight"]["limitations"], [])
+
+    def test_evidence_insight_removes_unsupported_generated_claims(self):
+        result = AppleIntelligenceInsightService(runner=type("Runner", (), {
+            "invoke": lambda self, payload: {
+                "status": "ok",
+                "insight": {
+                    "plain_language_summary": "Safari contacted example.com over TLS.",
+                    "why_it_matters": "This could indicate phishing or unauthorized account access.",
+                    "recommended_next_steps": [
+                        "Open the source view.",
+                        "Contact the user about suspicious browser history.",
+                    ],
+                    "confidence": "medium",
+                    "limitations": ["Evidence_refs: Missing evidence_refs"],
+                },
+            }
+        })()).generate(self._sample_evidence_context())
+
+        insight = result["insight"]
+        self.assertEqual(insight["plain_language_summary"], "Safari contacted example.com over TLS.")
+        self.assertEqual(insight["why_it_matters"], "")
+        self.assertEqual(insight["recommended_next_steps"], ["Open the source view."])
+        self.assertFalse(any("Missing evidence_refs" in item for item in insight["limitations"]))
+        self.assertTrue(any("unsupported claims" in item for item in insight["limitations"]))
+
+    def test_codex_sandbox_returns_explicit_apple_intelligence_blocker(self):
+        with patch.dict(os.environ, {"CODEX_SANDBOX": "seatbelt"}):
+            result = AppleIntelligenceInsightService().generate(self._sample_evidence_context())
+
+        self.assertEqual(result["insight_status"], "unavailable")
+        self.assertFalse(result["apple_intelligence"]["available"])
+        self.assertIn("Codex seatbelt sandbox", result["apple_intelligence"]["reason"])
+        self.assertIn("com.apple.modelmanager", result["apple_intelligence"]["reason"])
+
+    def test_evidence_insight_filters_mutating_recommendations(self):
+        result = AppleIntelligenceInsightService(runner=type("Runner", (), {
+            "invoke": lambda self, payload: {
+                "status": "ok",
+                "insight": {
+                    "plain_language_summary": "Evidence-backed summary.",
+                    "why_it_matters": "Review is warranted.",
+                    "recommended_next_steps": ["Open the source view.", "Block the destination."],
+                    "confidence": "medium",
+                    "limitations": [],
+                },
+            }
+        })()).generate(self._sample_evidence_context())
+
+        self.assertEqual(result["insight"]["recommended_next_steps"], ["Open the source view."])
+        self.assertTrue(any("mutating recommendations were removed" in item for item in result["insight"]["limitations"]))
+
+    def test_distribution_insight_carries_aggregate_and_missing_refs_limitations(self):
+        result = AppleIntelligenceInsightService(runner=type("Runner", (), {
+            "invoke": lambda self, payload: {
+                "status": "unavailable",
+                "reason": "Foundation Models framework is not available.",
+            }
+        })()).generate(self._sample_evidence_context(source_view="distribution", evidence_refs=[]))
+
+        limitations = result["insight"]["limitations"]
+        self.assertFalse(result["apple_intelligence"]["available"])
+        self.assertTrue(any("Distribution owner grouping is aggregate evidence" in item for item in limitations))
+        self.assertTrue(any("Evidence references are missing" in item for item in limitations))
+
+    def test_network_evidence_resolver_supports_all_actions_panel_sources(self):
+        rows = [
+            {
+                "id": "row:table",
+                "event_id": "row:table",
+                "event_type": "network_observation",
+                "path": "/network/evidence/event-table",
+                "summary": "Safari contacted example.com.",
+                "source_surface": "network",
+                "data": {
+                    "network": {
+                        "event_id": "event-table",
+                        "timestamp": "2026-07-04T12:00:00Z",
+                        "process": "Safari",
+                        "app": "Safari",
+                        "summary": "Safari contacted example.com.",
+                        "severity": "low",
+                        "validation_state": "observed",
+                        "evidence_refs": ["local://cleanhouse/network/event-table"],
+                        "assessment_refs": ["assessment:safari"],
+                    }
+                },
+            },
+            {
+                "id": "row:trend",
+                "event_id": "row:trend",
+                "event_type": "network_trend_tick",
+                "path": "/network/trend/ticks/network_tick:trend",
+                "summary": "Network trend tick network_tick:trend",
+                "source_surface": "network",
+                "data": {
+                    "network_tick": {
+                        "event_id": "network_tick:trend",
+                        "tick_id": "network_tick:trend",
+                        "timestamp": "2026-07-04T12:00:00Z",
+                        "bucket_start": "2026-07-04T12:00:00Z",
+                        "bucket_end": "2026-07-04T12:00:05Z",
+                        "connectionCount": 2,
+                        "source_event_id": "event-table",
+                        "related_event_ids": ["event-table"],
+                        "evidence_refs": ["local://cleanhouse/network/event-table"],
+                        "process": "Safari",
+                        "app": "Safari",
+                        "severity": "warning",
+                    }
+                },
+            },
+            {
+                "id": "row:timeline",
+                "event_id": "row:timeline",
+                "event_type": "network_timeline_notable",
+                "path": "/network/timeline/notable/network:timeline",
+                "summary": "Timeline notable.",
+                "source_surface": "network",
+                "data": {
+                    "network_timeline_notable": {
+                        "event_id": "network:timeline",
+                        "timestamp": "2026-07-04T12:00:00Z",
+                        "process": "Safari",
+                        "app": "Safari",
+                        "summary": "Timeline notable.",
+                        "severity": "warning",
+                        "evidence_refs": ["local://cleanhouse/network/network:timeline"],
+                    }
+                },
+            },
+        ]
+        resolver = EvidenceActionResolver()
+
+        with patch.object(resolver, "_network_events", return_value=rows):
+            table = resolver.resolve("network", "event-table", source_view="table")
+            finding = resolver.resolve("network", "event-table", source_view="findings")
+            trend = resolver.resolve("network", "network_tick:trend", source_view="trend")
+            distribution = resolver.resolve("network", network_distribution_owner_id("Safari"), source_view="distribution")
+            timeline = resolver.resolve("network", "network:timeline", source_view="timeline")
+
+        self.assertEqual(table.source_view, "table")
+        self.assertEqual(finding.source_view, "findings")
+        self.assertEqual(trend.source_view, "trend")
+        self.assertEqual(distribution.source_view, "distribution")
+        self.assertEqual(distribution.source_entity_id, network_distribution_owner_id("Safari"))
+        self.assertEqual(timeline.source_view, "timeline")
+        self.assertTrue(all(context.evidence_key.startswith("network:") for context in [table, finding, trend, distribution, timeline]))
+        self.assertIn("local://cleanhouse/network/event-table", trend.evidence_refs)
+        self.assertIn("local://cleanhouse/network/event-table", distribution.evidence_refs)
+        self.assertIn("assessment:safari", distribution.assessment_refs)
+        self.assertIn("Aggregate grouping does not prove app or process ownership.", distribution.network_reasons)
+        self.assertEqual(timeline.timeline_event_id, "row:timeline")
+
+    def test_network_distribution_context_is_bounded_stable_and_aggregate_only(self):
+        rows = [{
+            "event_id": f"event-{index}",
+            "process": "Safari",
+            "destination_display": f"host-{index}.example:443",
+            "evidence_refs": [f"local://cleanhouse/network/event-{index}"],
+            "assessment_refs": [f"assessment:{index}"],
+        } for index in range(40)]
+        rows.append({
+            "event_id": "mail-event",
+            "process": "Mail",
+            "evidence_refs": ["local://cleanhouse/network/mail-event"],
+            "assessment_refs": ["assessment:mail"],
+        })
+        resolver = EvidenceActionResolver()
+        owner_id = network_distribution_owner_id("Safari")
+        with patch.object(resolver, "_network_events", return_value=rows):
+            context = resolver.resolve("network", owner_id, source_view="distribution")
+            unresolved = resolver.resolve("network", "network-owner:000000000000000000000000", source_view="distribution")
+
+        self.assertEqual(context.source_entity_id, owner_id)
+        self.assertEqual(context.evidence_key, f"network:{owner_id}")
+        self.assertEqual(context.validation_state, "aggregate_observed")
+        self.assertEqual(len(context.evidence_refs), 32)
+        self.assertEqual(len(context.assessment_refs), 32)
+        self.assertNotIn("host-0.example", json.dumps(context.to_dict(), sort_keys=True))
+        self.assertEqual(unresolved.validation_state, "aggregate_unresolved")
+        self.assertEqual(unresolved.evidence_refs, [])
+        self.assertEqual(unresolved.assessment_refs, [])
+
+    def test_evidence_insight_route_requires_evidence_key(self):
+        self._set_request_json({})
+        self._assert_bad_request(cleanhouse_module.post_evidence_insight(), "evidence_key is required")
+
+    def test_evidence_actions_execute_with_idempotency_verification_and_vvault_receipts(self):
+        context = self._sample_evidence_context()
+        resolver = EvidenceActionResolver()
+        stored = []
+
+        class FakeResolver:
+            def resolve(self, surface, entity_id, source_view=None):
+                return context
+
+            def actions(self, resolved_context):
+                return resolver.actions(resolved_context)
+
+            def audit_entry(self, resolved_context, **kwargs):
+                return resolver.audit_entry(resolved_context, **kwargs)
+
+        class FakeAdapter:
+            def _persist_action_outcome(self, payload):
+                stored.append(payload)
+
+        cleanhouse_module._EVIDENCE_ACTION_REQUESTS.clear()
+        cleanhouse_module._EVIDENCE_ACTION_REQUEST_FINGERPRINTS.clear()
+        preserved = []
+
+        def preserve(artifact_type, artifact_id, payload, local_ref=""):
+            preserved.append((artifact_type, artifact_id, payload))
+            return {"status": "ok", "path": f"/vvault/{artifact_id}.json"}
+
+        with patch.object(cleanhouse_module, "get_evidence_context_resolver", return_value=FakeResolver()), \
+             patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=FakeAdapter()), \
+             patch.object(cleanhouse_module.vvault_preservation, "preserve_local_artifact", side_effect=preserve):
+            for action_id in ("mark_read", "mark_unread", "copy", "export", "observe"):
+                request_id = f"request-{action_id}"
+                request_payload = {
+                    "surface": "network", "entity_id": "event-1", "source_view": "findings",
+                    "action_id": action_id, "action_request_id": request_id,
+                }
+                if action_id == "copy":
+                    request_payload["insight_payload"] = {"evidence_context": {
+                        "summary": "Cloudflare WARP network traffic.",
+                        "app": "Cloudflare WARP",
+                        "source": "162.159.198.2:443",
+                        "destination": "192.168.1.220:60749",
+                        "protocol": "UDP",
+                        "event_time": "07:20:18",
+                        "source_entity_id": "connection:warp",
+                        "evidence_refs": ["local://cleanhouse/network/connection:warp"],
+                    }}
+                self._set_request_json(request_payload)
+                result = cleanhouse_module.post_evidence_action()
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["action_request_id"], request_id)
+                self.assertEqual(result["verification"]["status"], "verified")
+                self.assertEqual(result["vvault_receipt"]["status"], "ok")
+                if action_id == "copy":
+                    self.assertIn("Cloudflare WARP · 162.159.198.2:443 → 192.168.1.220:60749 · UDP · 07:20:18", result["effect"]["copy_text"])
+
+                replay = cleanhouse_module.post_evidence_action()
+                self.assertTrue(replay["replayed"])
+                self.assertEqual(replay["receipt_id"], result["receipt_id"])
+
+            self._set_request_json({
+                "surface": "network", "entity_id": "event-1", "source_view": "findings",
+                "action_id": "block", "action_request_id": "request-block",
+            })
+            body, status = self._unwrap_response_tuple(cleanhouse_module.post_evidence_action())
+
+        self.assertEqual(status, 400)
+        self.assertEqual(body["message"], "No guarded local enforcement provider is available for this target.")
+        self.assertEqual(len(stored), 5)
+        self.assertTrue(preserved)
+
+    def test_evidence_insight_response_is_stored_with_trace_and_evidence_key(self):
+        context = self._sample_evidence_context()
+        stored = []
+
+        class FakeResolver:
+            def resolve_from_evidence_key(self, evidence_key, source_view=None):
+                self.evidence_key = evidence_key
+                self.source_view = source_view
+                return context
+
+            def actions(self, resolved_context):
+                return [{
+                    "id": "ask_insight",
+                    "label": "Ask Insight",
+                    "enabled": True,
+                    "required_role": "Insight",
+                    "voice_role": "Insight",
+                    "backend_roles": ["Valorie", "Clean"],
+                    "capability_source": "evidence_insight",
+                    "source_navigation": {"type": "none", "route": None},
+                }]
+
+            def audit_entry(self, resolved_context, *, action_id, invoker, role):
+                return {
+                    "id": "audit:1",
+                    "trace_id": resolved_context.trace_id,
+                    "evidence_key": resolved_context.evidence_key,
+                    "action_id": action_id,
+                    "invoker": invoker,
+                    "role": role,
+                    "source_surface": resolved_context.source_surface,
+                    "source_view": resolved_context.source_view,
+                    "source_entity_id": resolved_context.source_entity_id,
+                    "timestamp": "2026-07-04T00:00:00+00:00",
+                }
+
+        class FakeInsightService:
+            def generate(self, resolved_context):
+                return {
+                    "status": "ok",
+                    "insight_status": "available",
+                    "apple_intelligence": {"available": True, "provider": "apple_foundation_models", "reason": ""},
+                    "evidence_context": bounded_evidence_context_payload(resolved_context),
+                    "insight": {
+                        "plain_language_summary": "Review the evidence-backed connection.",
+                        "why_it_matters": "It is linked to Network evidence.",
+                        "recommended_next_steps": ["Open the source view."],
+                        "confidence": "medium",
+                        "limitations": [],
+                    },
+                }
+
+            def audit_summary(self, result):
+                return {
+                    "provider": "apple_foundation_models",
+                    "available": True,
+                    "insight_status": result["insight_status"],
+                    "plain_language_summary": result["insight"]["plain_language_summary"],
+                    "recommendation_count": 1,
+                    "confidence": "medium",
+                    "limitations": [],
+                }
+
+        class FakeAdapter:
+            def _persist_action_outcome(self, payload):
+                stored.append(payload)
+
+        self._set_request_json({"source_view": "findings"})
+        with patch.object(cleanhouse_module, "get_evidence_context_resolver", return_value=FakeResolver()), \
+             patch.object(cleanhouse_module, "get_apple_intelligence_insight_service", return_value=FakeInsightService()), \
+             patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=FakeAdapter()):
+            response = cleanhouse_module.post_evidence_insight("network:event-1")
+
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["audit"]["evidence_key"], "network:event-1")
+        self.assertEqual(stored[0]["trace_id"], "trace:event-1")
+        self.assertEqual(stored[0]["evidence_key"], "network:event-1")
+        self.assertEqual(stored[0]["action_id"], "ask_insight")
+        self.assertEqual(stored[0]["outcome_type"], "apple_intelligence_evidence_insight")
+        self.assertEqual(stored[0]["response_summary"]["recommendation_count"], 1)
 
     def test_local_origin_cors_header_is_set(self):
         response = type("Resp", (), {"headers": {}})()
@@ -643,7 +1122,7 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertEqual(proc["args"], "/usr/bin/python script.py --flag")
         self.assertEqual(proc["source_command"], "/usr/bin/python script.py --flag")
 
-    def test_network_route_uses_adapter(self):
+    def test_network_route_wraps_adapter_evidence_in_truthful_contract(self):
         payload = {"status": "warning", "issues": [{"id": "network:1", "source": "network", "severity": "warning", "message": "net", "detectedAt": "2026-04-17T00:00:00"}], "connections": []}
         fake = FakeAdapter({
             "status": {"status": "safe", "issues": []},
@@ -656,8 +1135,40 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         with patch.object(cleanhouse_module, "get_cleanhouse_monitoring_adapter", return_value=fake):
             response = cleanhouse_module.network()
 
-        self.assertEqual(response, payload)
-        self.assertEqual(fake.calls, [("network", False)])
+        body, status = self._unwrap_response_tuple(response)
+        self.assertEqual(status, 200)
+        self.assertIn(body["state"], cleanhouse_module.NETWORK_UI_STATES)
+        self.assertEqual(body["events"], [])
+        self.assertEqual(body["summary"]["source"], "runtime_packet_buffer")
+        self.assertIn("collector", body)
+        self.assertEqual(fake.calls, [])
+
+    def test_network_vvault_readiness_is_scoped_to_shared_transport(self):
+        expected = {
+            "surface": "network",
+            "state": "live",
+            "ready": True,
+            "receipt_identity": {"receipt_id": "network-receipt"},
+        }
+        with patch.object(cleanhouse_module.vvault_sync, "status", return_value=expected) as shared_status:
+            result = cleanhouse_module._network_vvault_readiness()
+
+        self.assertEqual(result, expected)
+        shared_status.assert_called_once_with(surface="network", allow_keychain_read=True)
+
+    def test_network_observation_uses_durable_shared_outbox(self):
+        event = {
+            "event_id": "network:test-shared-outbox",
+            "timestamp": "2026-08-22T23:00:00Z",
+            "summary": "Shared transport test",
+        }
+        with patch.object(cleanhouse_module.vvault_sync, "enqueue", return_value={"status": "queued"}) as enqueue:
+            self.assertTrue(cleanhouse_module._enqueue_network_vvault_sync(event))
+
+        self.assertEqual(enqueue.call_args.args[0], event["event_id"])
+        self.assertEqual(enqueue.call_args.kwargs["surface"], "network")
+        self.assertFalse(enqueue.call_args.kwargs["preserve_local_cache"])
+        self.assertEqual(enqueue.call_args.args[1]["network"], event)
 
     def test_network_events_include_endpoint_evidence(self):
         tracer_trace_data = {
@@ -721,6 +1232,822 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertIsInstance(ref, dict)
         self.assertIn("uri", ref)
         self.assertTrue(ref["uri"].startswith("local://cleanhouse/network/"))
+
+    def test_network_findings_projection_uses_stable_priority_queue(self):
+        retained = [
+            {
+                "event_id": "network:newer-low-routine",
+                "timestamp": "2026-06-01T12:02:00Z",
+                "process": "Browser",
+                "dst_ip": "93.184.216.34",
+                "dst_port": "443",
+                "dns_query": "example.com",
+                "severity": "low",
+                "confidence": "high",
+                "system_impact": 2,
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:older-warning",
+                "timestamp": "2026-06-01T12:00:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.7",
+                "dst_port": "443",
+                "severity": "warning",
+                "confidence": "medium",
+                "system_impact": 7,
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:newer-warning-same-priority",
+                "timestamp": "2026-06-01T12:01:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.8",
+                "dst_port": "443",
+                "severity": "warning",
+                "confidence": "medium",
+                "system_impact": 7,
+                "finding_status": "open",
+            },
+        ]
+
+        with patch.object(cleanhouse_module, "_network_retained_events", return_value=retained):
+            payload, status = cleanhouse_module._network_projection_findings("12mo")
+        with patch.object(cleanhouse_module, "_network_retained_events", return_value=list(reversed(retained))):
+            reloaded, reload_status = cleanhouse_module._network_projection_findings("12mo")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(reload_status, 200)
+        self.assertEqual(payload["events"][0]["event_id"], "network:older-warning")
+        self.assertEqual(reloaded["events"][0]["event_id"], "network:older-warning")
+        self.assertNotIn("network:newer-low-routine", [item["event_id"] for item in payload["events"]])
+
+    def test_network_findings_projection_allows_higher_priority_to_displace_top(self):
+        retained = [
+            {
+                "event_id": "network:warning",
+                "timestamp": "2026-06-01T12:00:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.7",
+                "dst_port": "443",
+                "severity": "warning",
+                "confidence": "high",
+                "system_impact": 7,
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:critical",
+                "timestamp": "2026-06-01T12:03:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.9",
+                "dst_port": "443",
+                "severity": "critical",
+                "confidence": "medium",
+                "system_impact": 7,
+                "finding_status": "open",
+            },
+        ]
+
+        with patch.object(cleanhouse_module, "_network_retained_events", return_value=retained):
+            payload, status = cleanhouse_module._network_projection_findings("12mo")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["events"][0]["event_id"], "network:critical")
+
+    def test_network_findings_projection_hides_closed_statuses(self):
+        retained = [
+            {
+                "event_id": "network:cleared",
+                "timestamp": "2026-06-01T12:00:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.1",
+                "severity": "critical",
+                "confidence": "high",
+                "system_impact": 8,
+                "finding_status": "cleared",
+            },
+            {
+                "event_id": "network:resolved",
+                "timestamp": "2026-06-01T12:01:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.2",
+                "severity": "critical",
+                "confidence": "high",
+                "system_impact": 8,
+                "finding_status": "resolved",
+            },
+            {
+                "event_id": "network:invalidated",
+                "timestamp": "2026-06-01T12:02:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.3",
+                "severity": "critical",
+                "confidence": "high",
+                "system_impact": 8,
+                "finding_status": "invalidated",
+            },
+            {
+                "event_id": "network:superseded",
+                "timestamp": "2026-06-01T12:03:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.4",
+                "severity": "critical",
+                "confidence": "high",
+                "system_impact": 8,
+                "finding_status": "superseded",
+            },
+            {
+                "event_id": "network:open",
+                "timestamp": "2026-06-01T12:04:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.5",
+                "severity": "warning",
+                "confidence": "high",
+                "system_impact": 8,
+                "finding_status": "open",
+            },
+        ]
+
+        with patch.object(cleanhouse_module, "_network_retained_events", return_value=retained):
+            payload, status = cleanhouse_module._network_projection_findings("12mo")
+
+        self.assertEqual(status, 200)
+        self.assertEqual([item["event_id"] for item in payload["events"]], ["network:open"])
+
+    def test_network_semantics_classify_link_local_and_multicast_as_local(self):
+        link_local = cleanhouse_module._network_apply_enrichment({
+            "event_id": "network:link-local",
+            "timestamp": "2026-06-01T12:00:00Z",
+            "process": "Unknown app",
+            "src_ip": "fe80::1",
+            "dst_ip": "fe80::2",
+            "protocol": "TCP",
+            "finding_status": "open",
+        }, {})
+        multicast = cleanhouse_module._network_apply_enrichment({
+            "event_id": "network:neighbor",
+            "timestamp": "2026-06-01T12:01:00Z",
+            "process": "Unknown app",
+            "src_ip": "fe80::1",
+            "dst_ip": "ff02::1:ff00:2",
+            "protocol": "ICMPV6",
+            "finding_status": "open",
+        }, {})
+
+        self.assertIn(link_local["category"], {"Local network traffic", "Local device discovery"})
+        self.assertEqual(link_local["severity"], "info")
+        self.assertEqual(multicast["category"], "Local device discovery")
+        self.assertEqual(multicast["severity"], "info")
+
+    def test_network_semantics_label_rapportd_as_apple_continuity(self):
+        event = cleanhouse_module._network_apply_enrichment({
+            "event_id": "network:rapportd",
+            "timestamp": "2026-06-01T12:00:00Z",
+            "process": "rapportd",
+            "src_ip": "fe80::1c50:5aad:28b2:a737",
+            "src_port": "3722",
+            "dst_ip": "fe80::87:f27c:b334:b56",
+            "dst_port": "3722",
+            "protocol": "UDP",
+            "finding_status": "open",
+        }, {})
+
+        self.assertEqual(event["category"], "Local device discovery")
+        self.assertEqual(event["summary"], "rapportd is checking nearby Apple devices on the local network.")
+        self.assertIn("Apple Continuity", event["meaning"])
+
+    def test_network_findings_projection_keeps_bonjour_as_local_discovery(self):
+        retained = [{
+            "event_id": "network:bonjour",
+            "timestamp": "2026-06-01T12:00:00Z",
+            "process": "Unknown app",
+            "dst_ip": "224.0.0.251",
+            "dst_port": "5353",
+            "protocol": "UDP",
+            "finding_status": "open",
+        }]
+
+        with patch.object(cleanhouse_module, "_network_retained_events", return_value=retained), \
+             patch.object(cleanhouse_module, "_network_enrichment_index", return_value={}), \
+             patch.object(cleanhouse_module, "_network_findings_cache_get", return_value=None), \
+             patch.object(cleanhouse_module, "_network_findings_cache_set", return_value=None):
+            payload, status = cleanhouse_module._network_projection_findings("12mo")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["events"]), 1)
+        self.assertEqual(payload["events"][0]["category"], "Local device discovery")
+        self.assertEqual(payload["events"][0]["severity"], "info")
+        self.assertIn("Bonjour", payload["events"][0]["summary"])
+
+    def test_network_semantics_label_apple_push_service(self):
+        event = cleanhouse_module._network_apply_enrichment({
+            "event_id": "network:apple-push",
+            "timestamp": "2026-06-01T12:00:00Z",
+            "process": "Unknown app",
+            "src_ip": "192.168.1.151",
+            "src_port": "49286",
+            "dst_ip": "17.57.144.135",
+            "dst_port": "5223",
+            "protocol": "TLS",
+            "finding_status": "open",
+        }, {})
+
+        self.assertEqual(event["category"], "Apple service traffic")
+        self.assertIn("Apple Push notification service", event["summary"])
+        self.assertIn("Apple Push notification port", event["reason"])
+
+    def test_network_findings_projection_preserves_unknown_external_as_suspicious(self):
+        retained = [{
+            "event_id": "network:unknown-external",
+            "timestamp": "2026-06-01T12:00:00Z",
+            "process": "Unknown app",
+            "dst_ip": "203.0.113.7",
+            "dst_port": "443",
+            "protocol": "TLS",
+            "severity": "low",
+            "finding_status": "open",
+        }]
+
+        with patch.object(cleanhouse_module, "_network_retained_events", return_value=retained), \
+             patch.object(cleanhouse_module, "_network_enrichment_index", return_value={}):
+            payload, status = cleanhouse_module._network_projection_findings("12mo")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["events"]), 1)
+        event = payload["events"][0]
+        self.assertEqual(event["severity"], "warning")
+        self.assertEqual(event["confidence"], "low")
+        self.assertTrue(event["suspicious"])
+        self.assertIn("unknown process", event["summary"].lower())
+
+    def test_network_semantics_do_not_put_cdn_hostnames_in_known_app_findings_headlines(self):
+        cloudfront = cleanhouse_module._network_apply_enrichment({
+            "event_id": "network:kiro-cloudfront",
+            "timestamp": "2026-06-01T12:00:00Z",
+            "process": "kiro_cli_",
+            "dst_ip": "13.32.164.61",
+            "tls_sni": "server-13-32-164-61.ord58.r.cloudfront.net",
+            "dst_port": "443",
+            "protocol": "TLS",
+            "finding_status": "open",
+        }, {})
+        akamai = cleanhouse_module._network_apply_enrichment({
+            "event_id": "network:apple-akamai",
+            "timestamp": "2026-06-01T12:00:00Z",
+            "process": "com.apple",
+            "dst_ip": "23.198.6.26",
+            "tls_sni": "a23-198-6-26.deploy.static.akamaitechnologies.com",
+            "dst_port": "443",
+            "protocol": "TLS",
+            "finding_status": "open",
+        }, {})
+
+        self.assertEqual(cloudfront["summary"], "kiro_cli_ is securely communicating with a CloudFront-hosted service.")
+        self.assertNotIn("server-13-32-164-61", cloudfront["summary"])
+        self.assertEqual(akamai["summary"], "com.apple is securely communicating with an Akamai-hosted content delivery service.")
+        self.assertNotIn("a23-198-6-26", akamai["summary"])
+        self.assertIn("preserved in metadata", cloudfront["reason"])
+
+    def test_network_findings_projection_rewrites_stored_raw_cdn_headlines(self):
+        retained = [
+            {
+                "event_id": "network:stored-kiro-cloudfront",
+                "timestamp": "2026-06-01T12:00:00Z",
+                "process": "kiro_cli_",
+                "dst_ip": "13.32.164.61",
+                "tls_sni": "server-13-32-164-61.ord58.r.cloudfront.net",
+                "dst_port": "443",
+                "protocol": "TLS",
+                "severity": "warning",
+                "confidence": "high",
+                "system_impact": 6,
+                "category": "External connection",
+                "summary": "kiro_cli_ is connecting to server-13-32-164-61.ord58.r.cloudfront.net:443.",
+                "reason": "Review this if you do not recognize the destination.",
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:stored-apple-akamai",
+                "timestamp": "2026-06-01T12:01:00Z",
+                "process": "com.apple",
+                "dst_ip": "23.198.6.26",
+                "tls_sni": "a23-198-6-26.deploy.static.akamaitechnologies.com",
+                "dst_port": "443",
+                "protocol": "TLS",
+                "severity": "warning",
+                "confidence": "high",
+                "system_impact": 6,
+                "category": "External connection",
+                "summary": "com.apple is connecting to a23-198-6-26.deploy.static.akamaitechnologies.com:443.",
+                "reason": "Review this if you do not recognize the destination.",
+                "finding_status": "open",
+            },
+        ]
+
+        with patch.object(cleanhouse_module, "_network_retained_events", return_value=retained), \
+             patch.object(cleanhouse_module, "_network_enrichment_index", return_value={}):
+            payload, status = cleanhouse_module._network_projection_findings("12mo")
+
+        self.assertEqual(status, 200)
+        summaries = {item["event_id"]: item["summary"] for item in payload["events"]}
+        self.assertEqual(
+            summaries["network:stored-kiro-cloudfront"],
+            "kiro_cli_ is securely communicating with a CloudFront-hosted service.",
+        )
+        self.assertEqual(
+            summaries["network:stored-apple-akamai"],
+            "com.apple is securely communicating with an Akamai-hosted content delivery service.",
+        )
+        self.assertNotIn("cloudfront.net", " ".join(summaries.values()))
+        self.assertNotIn("akamaitechnologies.com", " ".join(summaries.values()))
+
+    def test_network_findings_projection_groups_repeated_semantic_findings(self):
+        retained = [
+            {
+                "event_id": "network:apple-push-1",
+                "timestamp": "2026-06-01T12:00:00Z",
+                "process": "Unknown app",
+                "src_ip": "192.168.1.151",
+                "src_port": "49286",
+                "dst_ip": "17.57.144.135",
+                "dst_port": "5223",
+                "protocol": "TLS",
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:apple-push-2",
+                "timestamp": "2026-06-01T12:01:00Z",
+                "process": "Unknown app",
+                "src_ip": "192.168.1.151",
+                "src_port": "49286",
+                "dst_ip": "17.57.144.244",
+                "dst_port": "5223",
+                "protocol": "TCP",
+                "finding_status": "open",
+            },
+        ]
+
+        with patch.object(cleanhouse_module, "_network_retained_events", return_value=retained), \
+             patch.object(cleanhouse_module, "_network_enrichment_index", return_value={}):
+            payload, status = cleanhouse_module._network_projection_findings("12mo")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["events"]), 1)
+        event = payload["events"][0]
+        self.assertEqual(event["related_event_count"], 2)
+        self.assertEqual(event["summary"], "Apple Push notification service traffic was observed from this Mac.")
+        self.assertEqual(len(event["related_destinations"]), 2)
+
+    def test_network_findings_projection_preserves_distinct_semantic_groups(self):
+        retained = [
+            {
+                "event_id": "network:cloudflare",
+                "timestamp": "2026-06-01T12:00:00Z",
+                "process": "Cloudflare WARP",
+                "dst_ip": "162.159.198.2",
+                "dst_port": "443",
+                "protocol": "TLS",
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:apple-push-1",
+                "timestamp": "2026-06-01T12:01:00Z",
+                "process": "Unknown app",
+                "dst_ip": "17.57.144.135",
+                "dst_port": "5223",
+                "protocol": "TLS",
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:apple-push-2",
+                "timestamp": "2026-06-01T12:02:00Z",
+                "process": "Unknown app",
+                "dst_ip": "17.57.144.244",
+                "dst_port": "5223",
+                "protocol": "TCP",
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:rapportd",
+                "timestamp": "2026-06-01T12:03:00Z",
+                "process": "rapportd",
+                "src_ip": "fe80::1c50:5aad:28b2:a737",
+                "dst_ip": "fe80::87:f27c:b334:b56",
+                "dst_port": "3722",
+                "protocol": "UDP",
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:bonjour",
+                "timestamp": "2026-06-01T12:04:00Z",
+                "process": "Unknown app",
+                "dst_ip": "224.0.0.251",
+                "dst_port": "5353",
+                "protocol": "UDP",
+                "finding_status": "open",
+            },
+            {
+                "event_id": "network:unknown-external",
+                "timestamp": "2026-06-01T12:05:00Z",
+                "process": "Unknown app",
+                "dst_ip": "203.0.113.7",
+                "dst_port": "443",
+                "protocol": "TLS",
+                "finding_status": "open",
+            },
+        ]
+
+        with patch.object(cleanhouse_module, "_network_retained_events", return_value=retained), \
+             patch.object(cleanhouse_module, "_network_enrichment_index", return_value={}):
+            payload, status = cleanhouse_module._network_projection_findings("12mo")
+
+        self.assertEqual(status, 200)
+        summaries = {item["summary"]: item for item in payload["events"]}
+        self.assertEqual(len(payload["events"]), 5)
+        self.assertIn("Cloudflare WARP is using Cloudflare/WARP network traffic.", summaries)
+        self.assertIn("Apple Push notification service traffic was observed from this Mac.", summaries)
+        self.assertIn("rapportd is checking nearby Apple devices on the local network.", summaries)
+        self.assertIn("Local devices are using Bonjour to discover services on this network.", summaries)
+        self.assertIn("An unknown process contacted an external server at 203.0.113.7:443.", summaries)
+        self.assertEqual(summaries["Apple Push notification service traffic was observed from this Mac."]["related_event_count"], 2)
+        self.assertTrue(summaries["An unknown process contacted an external server at 203.0.113.7:443."]["suspicious"])
+
+    def test_network_trend_projection_uses_vvault_samples_when_local_cache_empty(self):
+        now = datetime.now(timezone.utc)
+        sample = {
+            "sample_id": "network_sample:vvault",
+            "event_id": "network:vvault",
+            "source_event_id": "network:vvault",
+            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "app": "Safari",
+            "destination": "example.test",
+            "dst_ip": "203.0.113.20",
+            "dst_port": "443",
+            "tls_sni": "example.test",
+            "protocol": "TLS",
+            "confidence": "high",
+        }
+
+        with patch.object(cleanhouse_module, "_stored_network_trend_ticks", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_ticks", return_value=[]), \
+             patch.object(cleanhouse_module, "_network_stored_observations", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_samples", return_value=[sample]):
+            payload, status = cleanhouse_module._network_projection_trend("1m")
+
+        self.assertEqual(status, 200)
+        observed = [event for event in payload["events"] if not event.get("gap")]
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["connectionCount"], 1)
+        self.assertEqual(observed[0]["related_event_ids"], ["network:vvault"])
+        self.assertEqual(payload["summary"]["measurement"], "observed_connection_count")
+        self.assertEqual(payload["summary"]["history_sources"]["vvault_samples"], 1)
+        self.assertEqual(payload["tags"]["status"], "OBSERVING")
+
+    def test_network_trend_projection_can_present_retained_count_bucket(self):
+        now = datetime.now(timezone.utc)
+        bucket = {
+            "event_id": "network_bucket:vvault-legacy",
+            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "bucket_key": "1m:vvault-legacy",
+            "bucket_range": "1m",
+            "bucket_start": (now - timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
+            "bucket_end": (now + timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
+            "connectionCount": 7,
+            "externalOnlyCount": 4,
+        }
+
+        with patch.object(cleanhouse_module, "_stored_network_buckets", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_buckets", return_value=[bucket]), \
+             patch.object(cleanhouse_module, "_stored_network_trend_ticks", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_ticks", return_value=[]), \
+             patch.object(cleanhouse_module, "_network_stored_observations", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_samples", return_value=[]):
+            payload, status = cleanhouse_module._network_projection_trend("1m")
+
+        self.assertEqual(status, 200)
+        observed = [event for event in payload["events"] if not event.get("gap")]
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["connectionCount"], 7)
+        self.assertEqual(payload["summary"]["measurement"], "observed_connection_count")
+        self.assertEqual(payload["summary"]["history_sources"]["vvault_buckets"], 1)
+        self.assertEqual(payload["summary"]["gap_count"], cleanhouse_module.NETWORK_TREND_BUCKETS["1m"] - 1)
+
+    def test_network_vvault_history_survives_restart_state_reset(self):
+        now = datetime.now(timezone.utc)
+        window_start = now - timedelta(minutes=1)
+        window_end = now + timedelta(seconds=1)
+        users_root = Path(self._data_tmp.name) / "vvault_files" / "users"
+        env = {
+            "CLEANHOUSE_VVAULT_ROOT": str(users_root),
+            "CLEANHOUSE_VVAULT_USER_ID": "restart-user",
+            "CLEANHOUSE_VVAULT_SHARD": "shard_0000",
+        }
+        bucket = {
+            "event_id": "network_bucket:restart",
+            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "bucket_key": "1m:restart",
+            "bucket_range": "1m",
+            "bucket_start": (now - timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
+            "bucket_end": (now + timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
+            "connectionCount": 3,
+        }
+        notable = {
+            "event_id": "network:notable-restart",
+            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "process": "Codex",
+            "summary": "Codex network history restored from VVAULT.",
+            "severity": "warning",
+        }
+
+        with patch.dict(os.environ, env, clear=False):
+            self.assertEqual(cleanhouse_module.vvault_preservation.preserve_network_trend_bucket(bucket)["status"], "ok")
+            self.assertEqual(cleanhouse_module.vvault_preservation.preserve_network_trend_sample({
+                "sample_id": "network_sample:restart",
+                "event_id": "network:restart",
+                "source_event_id": "network:restart",
+                "timestamp": now.isoformat().replace("+00:00", "Z"),
+                "app": "Codex",
+                "destination": "example.test",
+                "dst_ip": "203.0.113.25",
+                "dst_port": "443",
+                "tls_sni": "example.test",
+                "protocol": "TLS",
+                "confidence": "high",
+            })["status"], "ok")
+            self.assertEqual(cleanhouse_module.vvault_preservation.preserve_network_timeline_notable(notable, "history")["status"], "ok")
+            with cleanhouse_module._NETWORK_PROJECTION_CACHE_LOCK:
+                cleanhouse_module._NETWORK_PROJECTION_CACHE.clear()
+            with patch.object(cleanhouse_module, "_network_projection_window", return_value=(window_start, window_end)), \
+                 patch.object(cleanhouse_module, "_stored_network_buckets", return_value=[]), \
+                 patch.object(cleanhouse_module, "_stored_network_trend_ticks", return_value=[]), \
+                 patch.object(cleanhouse_module, "_network_stored_observations", return_value=[]), \
+                 patch.object(cleanhouse_module, "_network_events_in_range", return_value=[]), \
+                 patch.object(cleanhouse_module, "_stored_network_timeline_notables", return_value=[]), \
+                 patch.object(cleanhouse_module, "_stored_network_timeline_gaps", return_value=[]):
+                trend, trend_status = cleanhouse_module._network_projection_trend("1m")
+                timeline, timeline_status = cleanhouse_module._network_projection_timeline("1m")
+
+        self.assertEqual(trend_status, 200)
+        self.assertEqual(timeline_status, 200)
+        observed = [event for event in trend["events"] if not event.get("gap")]
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["related_event_ids"], ["network:restart"])
+        self.assertEqual([event["event_id"] for event in timeline["events"]], ["network:notable-restart"])
+        self.assertEqual(trend["summary"]["history_sources"]["vvault_buckets"], 1)
+        self.assertEqual(timeline["summary"]["event_count"], 1)
+
+    def test_network_trend_projection_aggregates_versioned_series_in_one_bucket(self):
+        now = datetime.now(timezone.utc)
+        local_event = {
+            "event_id": "network:sample-local",
+            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "process": "Codex",
+            "dst_ip": "203.0.113.11",
+            "dst_port": "443",
+            "severity": "low",
+        }
+        vvault_sample = {
+            "sample_id": "network_sample:sample-vvault",
+            "event_id": "network:sample-vvault",
+            "source_event_id": "network:sample-vvault",
+            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "app": "Safari",
+            "destination": "example.com",
+            "dst_ip": "203.0.113.12",
+            "dst_port": "443",
+            "severity": "warning",
+        }
+
+        with patch.object(cleanhouse_module, "_stored_network_trend_ticks", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_ticks", return_value=[]), \
+             patch.object(cleanhouse_module, "_network_stored_observations", return_value=[local_event]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_samples", return_value=[vvault_sample]), \
+             patch.object(cleanhouse_module.vvault_preservation, "preserve_network_trend_tick") as preserve_tick:
+            payload, status = cleanhouse_module._network_projection_trend("1m")
+
+        self.assertEqual(status, 200)
+        observed = [event for event in payload["events"] if not event.get("gap")]
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["connectionCount"], 2)
+        self.assertEqual(set(observed[0]["related_event_ids"]), {"network:sample-local", "network:sample-vvault"})
+        self.assertNotIn("interpretation", observed[0])
+        self.assertEqual(payload["summary"]["history_sources"]["local_samples"], 1)
+        self.assertEqual(payload["summary"]["history_sources"]["vvault_samples"], 1)
+        self.assertEqual(preserve_tick.call_count, 0)
+
+    def test_network_trend_projection_preserves_gap_when_history_empty(self):
+        with patch.object(cleanhouse_module, "_stored_network_trend_ticks", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_ticks", return_value=[]), \
+             patch.object(cleanhouse_module, "_network_stored_observations", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_samples", return_value=[]), \
+             patch.object(cleanhouse_module.vvault_preservation, "preserve_network_timeline_gap") as preserve_gap:
+            payload, status = cleanhouse_module._network_projection_trend("1m")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["events"]), cleanhouse_module.NETWORK_TREND_BUCKETS["1m"])
+        self.assertTrue(all(event.get("gap") and event.get("connectionCount") is None for event in payload["events"]))
+        self.assertEqual(payload["summary"]["gap_count"], cleanhouse_module.NETWORK_TREND_BUCKETS["1m"])
+        preserve_gap.assert_called_once()
+
+    def test_network_live_persistence_creates_sample_and_sealed_tick(self):
+        event = {
+            "event_id": "network:live-tick",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "process": "Codex",
+            "dst_ip": "203.0.113.77",
+            "dst_port": "443",
+        }
+        inserted = []
+
+        with patch.object(cleanhouse_module, "_network_event_already_stored", return_value=False), \
+             patch.object(cleanhouse_module, "_stored_network_trend_ticks", return_value=[]), \
+             patch.object(cleanhouse_module.events, "insert_event", side_effect=lambda **kwargs: inserted.append(kwargs)), \
+             patch.object(cleanhouse_module.vvault_preservation, "preserve_network_trend_sample") as preserve_sample, \
+             patch.object(cleanhouse_module.vvault_preservation, "preserve_network_trend_tick") as preserve_tick, \
+             patch.object(cleanhouse_module, "_enqueue_network_vvault_sync"):
+            cleanhouse_module._persist_network_observation(event, {})
+
+        self.assertTrue(any(item["event_type"] == cleanhouse_module.NETWORK_OBSERVATION_EVENT_TYPE for item in inserted))
+        self.assertTrue(any(item["event_type"] == cleanhouse_module.NETWORK_TREND_TICK_EVENT_TYPE for item in inserted))
+        preserve_sample.assert_called_once()
+        self.assertEqual(preserve_tick.call_count, len(cleanhouse_module.NETWORK_TIME_RANGES_MS))
+
+    def test_network_live_tshark_command_excludes_cleanhouse_transport_port(self):
+        paths = {"tshark": Path("/tmp/tshark")}
+        command = cleanhouse_module._tshark_live_fields_command(
+            paths,
+            ["lo0", "en0"],
+            cleanhouse_module._network_live_capture_filter("3333"),
+        )
+
+        self.assertIn("-f", command)
+        self.assertIn("not port 3333", command)
+        self.assertLess(command.index("-i"), command.index("-f"))
+        self.assertLess(command.index("-f"), command.index("-T"))
+
+    def test_network_trend_projection_does_not_relabel_legacy_ticks_as_interpretation(self):
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        tick = {
+            "event_id": "network_tick:dedupe",
+            "tick_id": "network_tick:dedupe",
+            "timestamp": now,
+            "bucket_key": "tick:1m:network_tick:dedupe",
+            "bucket_range": "1m",
+            "bucket_start": now,
+            "bucket_end": now,
+            "connectionCount": 1,
+            "immutable": True,
+        }
+
+        with patch.object(cleanhouse_module, "_stored_network_trend_ticks", return_value=[tick]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_ticks", return_value=[{**tick, "connectionCount": 99}]), \
+             patch.object(cleanhouse_module, "_network_stored_observations", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_trend_samples", return_value=[]):
+            payload, status = cleanhouse_module._network_projection_trend("1m")
+
+        self.assertEqual(status, 200)
+        observed = [event for event in payload["events"] if not event.get("gap")]
+        self.assertEqual(len(observed), 1)
+        self.assertEqual(observed[0]["connectionCount"], 1)
+        self.assertNotIn("interpretation", observed[0])
+        self.assertEqual(payload["summary"]["gap_count"], cleanhouse_module.NETWORK_TREND_BUCKETS["1m"] - 1)
+
+    def test_network_trend_frontend_keeps_one_live_tick_buffer(self):
+        source = (Path(__file__).resolve().parents[1] / "frontend/js/investigations.js").read_text(encoding="utf-8")
+        live_buffer = source.split("function rememberNetworkLiveTrendTick(event)", 1)[1].split(
+            "function networkTrendLiveTicksForRange", 1
+        )[0]
+
+        self.assertIn("let networkTrendLiveTape = [];", source)
+        self.assertIn("function rememberNetworkLiveTrendTick(event)", source)
+        self.assertIn("function networkTrendProjectionWithLive(", source)
+        self.assertIn("rememberNetworkLiveTrendTick(event);", source)
+        self.assertIn("function networkTrendLiveTicksForRange", source)
+        self.assertEqual(live_buffer.count("connectionCount: (Number(existing.connectionCount)"), 1)
+
+    def test_network_timeline_frontend_uses_the_same_effective_range_for_fetch_and_render(self):
+        source = (Path(__file__).resolve().parents[1] / "frontend/js/investigations.js").read_text(encoding="utf-8")
+
+        self.assertIn("activeRange: networkTimelineDisplayRangeMode()", source)
+        self.assertIn("networkTimelineEventsForRange(Array.isArray(events) ? events.slice() : [], projectionTimelineRangeMode)", source)
+        self.assertIn("networkRangeAxis(projectionTimelineRangeMode)", source)
+        self.assertIn("projection_hydration_completed", source)
+
+    def test_network_findings_frontend_opens_evidence_actions(self):
+        source = (Path(__file__).resolve().parents[1] / "frontend/js/investigations.js").read_text(encoding="utf-8")
+
+        self.assertIn("function networkEvidenceAttributes(event", source)
+        self.assertIn("networkEvidenceAttributes(event, 'findings')", source)
+        self.assertIn("Select Network evidence from Table, Findings, Trend, Distribution, or Timeline", source)
+        self.assertIn("feed.querySelectorAll('.network-finding-item')", source)
+        self.assertIn("openEvidenceActions(descriptor);", source)
+        self.assertIn("requestEvidenceInsight(action);", source)
+        self.assertNotIn("autoRequestEvidenceInsight", source)
+        self.assertIn("networkEvidenceAttributes(bucket, 'trend')", source)
+        self.assertIn("networkDistributionEvidenceAttributes(slice.label, slice.owner)", source)
+        self.assertIn("networkEvidenceAttributes(event, 'timeline')", source)
+        self.assertIn("bindNetworkEvidenceElements('.network-trend-bar[data-evidence-entity-id], .network-timeline-event[data-evidence-entity-id]')", source)
+
+    def test_network_timeline_projection_includes_preserved_gap_without_read_side_effect(self):
+        now = datetime.now(timezone.utc)
+        notable = {
+            "event_id": "network:notable",
+            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "process": "Codex",
+            "dst_ip": "162.159.198.2",
+            "dst_port": "443",
+            "protocol": "TLS",
+            "summary": "Codex is using Cloudflare/WARP network traffic.",
+            "severity": "low",
+        }
+        gap = {
+            "event_id": "network_gap:test",
+            "event_type": "network_timeline_gap",
+            "timestamp": now.isoformat().replace("+00:00", "Z"),
+            "gap_start": (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z"),
+            "gap_end": now.isoformat().replace("+00:00", "Z"),
+            "summary": "CleanHouse network history was interrupted.",
+            "severity": "warning",
+        }
+
+        with patch.object(cleanhouse_module, "_network_events_in_range", return_value=[]), \
+             patch.object(cleanhouse_module, "_stored_network_timeline_notables", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_timeline_notables", return_value=[notable]), \
+             patch.object(cleanhouse_module, "_stored_network_timeline_gaps", return_value=[]), \
+             patch.object(cleanhouse_module, "_vvault_network_timeline_gaps", return_value=[gap]), \
+             patch.object(cleanhouse_module.vvault_preservation, "preserve_network_timeline_gap") as preserve_gap:
+            payload, status = cleanhouse_module._network_projection_timeline("1m")
+
+        self.assertEqual(status, 200)
+        self.assertEqual({item["event_id"] for item in payload["events"]}, {"network:notable", "network_gap:test"})
+        self.assertEqual(payload["tags"]["state"], "DEGRADED")
+        preserve_gap.assert_not_called()
+
+    def test_network_history_sampler_preserves_trend_without_promoting_routine_packets_to_timeline(self):
+        sample_event = {
+            "event_id": "network:sample",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "process": "Codex",
+            "dst_ip": "162.159.198.2",
+            "dst_port": "443",
+            "severity": "low",
+        }
+        persisted = []
+
+        with patch.object(cleanhouse_module, "_network_snapshot_payload", return_value=({"events": [sample_event]}, 200)), \
+             patch.object(cleanhouse_module, "_preserve_network_trend_sample") as preserve_sample, \
+             patch.object(cleanhouse_module, "_persist_network_timeline_notable", side_effect=lambda event, range_key="history": persisted.append((event, range_key))):
+            cleanhouse_module._record_network_history_sample()
+
+        self.assertEqual(persisted, [])
+        preserve_sample.assert_called_once_with(sample_event)
+
+    def test_network_startup_gap_detection_preserves_interrupted_history(self):
+        last_seen = datetime.now(timezone.utc) - timedelta(minutes=10)
+        recorded = []
+
+        with patch.object(cleanhouse_module, "_network_latest_history_timestamp", return_value=last_seen), \
+             patch.object(cleanhouse_module, "_network_history_interval_seconds", return_value=30), \
+             patch.object(cleanhouse_module, "_persist_network_timeline_gap", side_effect=lambda reason, start, end: recorded.append((reason, start, end))):
+            cleanhouse_module._record_network_history_recovery_gap()
+
+        self.assertEqual(recorded[0][0], "history_interrupted")
+        self.assertEqual(recorded[0][1], last_seen)
+
+    def test_network_contract_tags_are_shared_fixed_vocabulary(self):
+        healthy_payload, _ = cleanhouse_module._network_ui_contract("CAPTURING", events=[{
+            "event_id": "network:healthy",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "process": "Safari",
+            "dst_ip": "93.184.216.34",
+            "dns_query": "example.com",
+            "dst_port": "443",
+        }])
+        unknown_event = {
+            "event_id": "network:unknown",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "process": "Unknown app",
+            "dst_ip": "203.0.113.7",
+            "dst_port": "443",
+            "suspicious": True,
+        }
+        degraded_payload, _ = cleanhouse_module._network_ui_contract("CAPTURING", events=[unknown_event])
+        local_payload, _ = cleanhouse_module._network_ui_contract("CAPTURING", events=[{
+            "event_id": "network:local",
+            "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "process": "rapportd",
+            "dst_ip": "fe80::1",
+            "dst_port": "5353",
+        }])
+
+        self.assertEqual(healthy_payload["tags"]["status"], "OBSERVING")
+        self.assertEqual(healthy_payload["tags"]["state"], "HEALTHY")
+        self.assertEqual(healthy_payload["tags"]["reasons"], [])
+        self.assertEqual(degraded_payload["tags"]["state"], "HEALTHY")
+        self.assertEqual(degraded_payload["tags"]["reasons"], [])
+        assessments, _indicators = cleanhouse_module.assess_network_event(unknown_event)
+        self.assertEqual([assessment["category"] for assessment in assessments], ["vulnerability"])
+        self.assertEqual(local_payload["tags"]["status"], "LOCAL ONLY")
 
     def test_data_flow_tracer_connection_delta_primitives(self):
         from corefiles.collectors.data_flow_tracer import DataFlowTracer
@@ -2336,10 +3663,21 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertEqual(result["contact"], "analyst@example.com")
         self.assertEqual(result["target"], "staging-1")
         self.assertEqual(result["context"], "weekly audit check")
+        self.assertEqual(result["metadata"]["template"], "letter_of_concern_v1")
 
         self.assertGreater(len(result["evidence_links"]), 0)
         for link in result["evidence_links"]:
             self.assertTrue(link.startswith("local://cleanhouse/timeline/"))
+
+        concern_letter = result["concern_letter"]
+        self.assertEqual(concern_letter["template"], "letter_of_concern_v1")
+        self.assertEqual(concern_letter["subject"], "Letter of Concern Regarding Audit")
+        self.assertEqual(concern_letter["recipient"], "analyst@example.com")
+        self.assertIn("weekly audit check", concern_letter["facts"][1])
+        self.assertIn("Review the attached CleanHouse receipt", concern_letter["requested_actions"][0])
+        stored_reports = adapter.get_reports(report_type="audit")["reports"]
+        stored_report = next(report for report in stored_reports if report["id"] == result["id"])
+        self.assertEqual(stored_report["concern_letter"]["subject"], concern_letter["subject"])
 
         receipt = result["receipt"]
         self.assertIn("id", receipt)

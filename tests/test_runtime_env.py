@@ -10,6 +10,11 @@ from backend import runtime_env
 
 
 class RuntimeEnvTests(unittest.TestCase):
+    def test_server_disables_flask_implicit_dotenv_loading(self):
+        server_source = (Path(__file__).resolve().parents[1] / "backend" / "server.py").read_text(encoding="utf-8")
+
+        self.assertIn("load_dotenv=False,", server_source)
+
     def test_candidates_prefer_managed_runtime_before_active_and_repo_environments(self):
         with patch.dict(
             os.environ,

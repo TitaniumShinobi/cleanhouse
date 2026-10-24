@@ -117,6 +117,22 @@ class AuthRuntimeConfigTests(unittest.TestCase):
         ):
             self.assertEqual(auth_runtime_config._keychain_secret("service", "account"), "")
 
+    def test_mfa_key_file_fallback_requires_owner_only_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            key_file = Path(tmp) / "mfa-key"
+            key_file.write_text("ab" * 32 + "\n", encoding="utf-8")
+            key_file.chmod(0o600)
+            with patch.object(auth_runtime_config, "_keychain_secret", return_value=""):
+                self.assertEqual(
+                    auth_runtime_config.mfa_encryption_key({"CLEANHOUSE_MFA_ENCRYPTION_KEY_FILE": str(key_file)}),
+                    "ab" * 32,
+                )
+                key_file.chmod(0o640)
+                self.assertEqual(
+                    auth_runtime_config.mfa_encryption_key({"CLEANHOUSE_MFA_ENCRYPTION_KEY_FILE": str(key_file)}),
+                    "",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

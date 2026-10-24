@@ -40,6 +40,7 @@
     function modal() { return document.getElementById('settings-modal'); }
     function body() { return document.getElementById('settings-body'); }
     function footer() { return document.getElementById('settings-footer'); }
+    function policyModal() { return document.getElementById('policy-consent-modal'); }
 
     async function readJson(response) {
         const payload = await response.json().catch(() => ({}));
@@ -75,6 +76,35 @@
             return await request(path, Object.assign({}, options || {}, { sensitive: true }));
         } finally {
             reauthToken = '';
+        }
+    }
+
+    async function mfaStepUp(operation, target) {
+        const challenge = await request('/api/auth/mfa/challenge', { method: 'POST', body: { operation, target: target || '' } });
+        const factors = await request('/api/auth/mfa/factors');
+        const factor = (factors.factors || [])[0];
+        const entered = window.prompt('Enter your six-digit authenticator code, or prefix a recovery code with recovery:');
+        if (!entered) throw new Error('MFA verification was cancelled.');
+        const body = { challengeId: challenge.challengeId };
+        if (entered.startsWith('recovery:')) body.recoveryCode = entered.slice(9).trim();
+        else { body.factorId = factor && factor.factor_id; body.code = entered.trim(); }
+        const verified = await request('/api/auth/mfa/verify', { method: 'POST', body });
+        if (!verified.proof) throw new Error('MFA verification did not return an operation proof.');
+        return verified.proof;
+    }
+
+    async function sensitiveMfaRequest(path, options, operation, target) {
+        try {
+            return await sensitiveRequest(path, options);
+        } catch (error) {
+            if (error.code !== 'MFA_STEP_UP_REQUIRED') throw error;
+            const proof = await mfaStepUp(operation, target || '');
+            const retry = Object.assign({}, options || {});
+            retry.headers = Object.assign({}, retry.headers || {}, {
+                'X-CleanHouse-MFA': proof,
+                'X-CleanHouse-MFA-Target': target || '',
+            });
+            return request(path, retry);
         }
     }
 
@@ -115,8 +145,33 @@
         setFooter();
     }
 
-    function reauthControl() {
-        return '<form id="settings-reauth-form" class="settings-reauth"><h3>Recent reauthentication</h3><p>Sensitive changes require a fresh human confirmation for this section.</p><label for="settings-reauth-password">Current password</label><div><input id="settings-reauth-password" name="password" type="password" autocomplete="current-password"><button type="submit" class="btn-secondary">Confirm password</button><button type="button" class="btn-secondary" data-settings-action="reauth-email">Confirm by email</button></div></form>';
+    function reauthControl(payload) {
+        const capabilities = payload && payload.reauthentication ? payload.reauthentication : null;
+        if (!capabilities) {
+            return '<section class="settings-reauth" aria-labelledby="settings-reauth-title"><h3 id="settings-reauth-title">Recent reauthentication</h3><p role="status">Confirmation methods are currently unavailable. Retry this Settings section before making a sensitive change.</p></section>';
+        }
+        const password = capabilities.password || {};
+        const email = capabilities.verified_email || {};
+        const connectedProviders = Array.isArray(capabilities.providers)
+            ? capabilities.providers.filter(provider => provider && provider.connected)
+            : [];
+        const providerNote = connectedProviders.length
+            ? '<p class="settings-reauth-note">Signed in with ' + connectedProviders.map(provider => esc(provider.id === 'google' ? 'Google' : (provider.label || provider.id))).join(' and ') + '. Use an available verified confirmation method below.</p>'
+            : '';
+        const passwordControl = password.available
+            ? '<label for="settings-reauth-password">Current password</label><div><input id="settings-reauth-password" name="password" type="password" autocomplete="current-password"><button type="submit" class="btn-secondary">' + esc(password.label || 'Confirm password') + '</button></div>'
+            : '';
+        const emailControl = email.available
+            ? '<button type="button" class="btn-secondary" data-settings-action="reauth-email">' + esc(email.label || 'Confirm by verified email') + '</button>'
+            : '';
+        const unavailable = !password.available && !email.available
+            ? '<p class="settings-result error" role="status">No fresh confirmation method is currently available. Verified-email delivery is not configured.</p>'
+            : '';
+        return '<form id="settings-reauth-form" class="settings-reauth"><h3 id="settings-reauth-title">Recent reauthentication</h3><p>Sensitive changes require a fresh human confirmation for this section.</p>' + providerNote + passwordControl + emailControl + unavailable + '</form>';
+    }
+
+    async function loadReauthCapabilities() {
+        return request('/api/auth/reauth');
     }
 
     async function renderGeneral() {
@@ -134,7 +189,7 @@
     async function renderProviders() {
         setLoading('Loading provider status…');
         try {
-            const payload = await request('/api/auth/providers');
+            const [payload, reauth] = await Promise.all([request('/api/auth/providers'), loadReauthCapabilities()]);
             const rows = providerRows(payload);
             body().innerHTML = '<section class="settings-section"><span class="settings-eyebrow">Identity connections</span><h2>Providers</h2><p>Provider credentials stay in macOS Keychain. Unavailable providers remain visibly unavailable.</p><div class="settings-list">' + rows.map(provider => {
                 const id = String(provider.id).toLowerCase();
@@ -142,12 +197,44 @@
                 const available = Boolean(provider.available || provider.configured);
                 const detail = connected ? 'Connected to this CleanHouse identity.' : (available ? 'Available to connect.' : 'Unavailable until owner configuration is complete.');
                 const action = connected
-                    ? '<button type="button" class="btn-secondary" data-settings-action="provider-unlink" data-provider="' + esc(id) + '">Unlink</button>'
+                    ? '<button type="button" class="btn-secondary" data-settings-action="provider-avatar-refresh" data-provider="' + esc(id) + '"' + (available ? '' : ' disabled') + '>Refresh photo</button><button type="button" class="btn-secondary" data-settings-action="provider-unlink" data-provider="' + esc(id) + '">Unlink</button>'
                     : '<button type="button" class="btn-primary" data-settings-action="provider-link" data-provider="' + esc(id) + '"' + (available ? '' : ' disabled') + '>Connect</button>';
                 return '<article class="settings-row"><div><h3>' + esc(provider.name || id) + '</h3><p>' + esc(detail) + '</p></div><div class="settings-row-action"><span class="settings-badge ' + (connected ? 'ok' : (available ? 'ready' : 'unavailable')) + '">' + (connected ? 'Connected' : (available ? 'Available' : 'Unavailable')) + '</span>' + action + '</div></article>';
-            }).join('') + '</div>' + reauthControl() + '<div id="settings-action-result" aria-live="polite"></div></section>';
+            }).join('') + '</div>' + reauthControl(reauth) + '<div id="settings-action-result" aria-live="polite"></div></section>';
             setFooter();
+            await showProviderPhotoReturn();
         } catch (error) { setError(error.message); }
+    }
+
+    async function showProviderPhotoReturn() {
+        const url = new URL(window.location.href);
+        const provider = url.searchParams.get('photo_refreshed');
+        const failure = url.searchParams.get('error');
+        const errors = {
+            photo_identity_mismatch: 'Photo refresh was rejected because the provider or device session changed.',
+            photo_unavailable: 'The provider did not return a usable profile photo.',
+            photo_denied: 'Photo refresh was cancelled at the provider.',
+            photo_provider_error: 'The provider could not complete photo refresh.',
+            photo_token_exchange_failed: 'CleanHouse could not complete photo refresh with the provider.',
+            photo_user_info_failed: 'CleanHouse could not read the provider profile photo.',
+        };
+        if (provider !== 'google' && provider !== 'github' && !Object.hasOwn(errors, failure)) return;
+        if (provider === 'google' || provider === 'github') {
+            try {
+                const profile = await request('/api/auth/me');
+                renderSidebarProfile(profile.user || null);
+                actionResult(profile.user && profile.user.avatar_url
+                    ? (provider === 'google' ? 'Google' : 'GitHub') + ' profile photo refreshed.'
+                    : 'Photo refresh returned without an available image.', !profile.user || !profile.user.avatar_url);
+            } catch (_) {
+                actionResult('CleanHouse could not confirm the refreshed profile photo. Retry this section.', true);
+            }
+        } else {
+            actionResult(errors[failure], true);
+        }
+        url.searchParams.delete('photo_refreshed');
+        url.searchParams.delete('error');
+        history.replaceState(history.state, '', url.pathname + url.search + url.hash);
     }
 
     function normalizeTokens(payload) {
@@ -157,14 +244,14 @@
     async function renderApi() {
         setLoading('Loading personal API tokens…');
         try {
-            const payload = await request('/api/auth/tokens');
+            const [payload, reauth] = await Promise.all([request('/api/auth/tokens'), loadReauthCapabilities()]);
             const tokens = normalizeTokens(payload);
             body().innerHTML = '<section class="settings-section"><span class="settings-eyebrow">Local automation</span><h2>Personal API tokens</h2><p>Tokens can operate antivirus features as you, but cannot change authentication, sessions, providers, consent, tokens, or account ownership.</p>' +
                 '<form id="settings-token-form" class="settings-inline-form"><label for="settings-token-days">Expires in</label><select id="settings-token-days" name="expires_in_days"><option value="30">30 days</option><option value="60">60 days</option><option value="90">90 days</option></select><button type="submit" class="btn-primary">Create token</button></form>' +
                 '<div id="settings-token-reveal" aria-live="assertive"></div><div class="settings-list">' + (tokens.length ? tokens.map(token =>
                     '<article class="settings-row"><div><h3>' + esc(token.name || token.prefix || 'CleanHouse token') + '</h3><p>Created ' + esc(token.created_at || 'unknown') + ' · expires ' + esc(token.expires_at || 'unknown') + '</p></div><div class="settings-row-action"><span class="settings-badge ' + (token.revoked_at ? 'unavailable' : 'ok') + '">' + (token.revoked_at ? 'Revoked' : 'Active') + '</span>' +
                     (token.revoked_at ? '' : '<button type="button" class="btn-secondary" data-settings-action="token-rotate" data-token-id="' + esc(token.id) + '">Rotate</button><button type="button" class="btn-danger" data-settings-action="token-revoke" data-token-id="' + esc(token.id) + '">Revoke</button>') + '</div></article>'
-                ).join('') : '<div class="settings-empty">No personal API tokens.</div>') + '</div>' + reauthControl() + '<div id="settings-action-result" aria-live="polite"></div></section>';
+                ).join('') : '<div class="settings-empty">No personal API tokens.</div>') + '</div>' + reauthControl(reauth) + '<div id="settings-action-result" aria-live="polite"></div></section>';
             setFooter();
         } catch (error) { setError(error.message); }
     }
@@ -172,12 +259,14 @@
     async function renderSecurity() {
         setLoading('Loading device sessions…');
         try {
-            const payload = await request('/api/auth/sessions');
+            const [payload, reauth, mfa] = await Promise.all([request('/api/auth/sessions'), loadReauthCapabilities(), request('/api/auth/mfa/factors')]);
             const sessions = Array.isArray(payload.sessions) ? payload.sessions : [];
-            body().innerHTML = '<section class="settings-section"><span class="settings-eyebrow">Access to this antivirus</span><h2>Security</h2><p>Review device and browser sessions. Revocation survives CleanHouse and Mac restarts.</p><div class="settings-list">' + (sessions.length ? sessions.map(session => {
+            const factors = Array.isArray(mfa.factors) ? mfa.factors : [];
+            const factorRows = factors.length ? factors.map(factor => '<article class="settings-row"><div><h3>' + esc(factor.label || 'Authenticator') + '</h3><p>Added ' + esc(factor.created_at || 'unknown') + '</p></div><button type="button" class="btn-danger" data-settings-action="mfa-remove" data-factor-id="' + esc(factor.factor_id) + '">Remove</button></article>').join('') : '<div class="settings-empty">No authenticator factors enrolled.</div>';
+            body().innerHTML = '<section class="settings-section"><span class="settings-eyebrow">Access to this antivirus</span><h2>Security</h2><p>Review device and browser sessions. Revocation survives CleanHouse and Mac restarts.</p><h3>Multi-factor authentication</h3><p>TOTP factors protect admission and sensitive operations. Recovery codes are displayed once.</p>' + (factors.length && !mfa.admissionAuthorized ? '<div class="settings-notice"><strong>MFA verification required.</strong><button type="button" class="btn-primary" data-settings-action="mfa-admit">Verify this session</button></div>' : '') + '<div class="settings-list">' + factorRows + '</div><form id="settings-mfa-enroll-form" class="settings-inline-form"><label for="settings-mfa-label">Factor label</label><input id="settings-mfa-label" value="Authenticator" maxlength="80"><button type="submit" class="btn-primary">Add authenticator</button></form><button type="button" class="btn-secondary" data-settings-action="mfa-recovery-rotate"' + (factors.length ? '' : ' disabled') + '>Rotate recovery codes</button><div id="settings-mfa-result" aria-live="assertive"></div><h3>Sessions</h3><div class="settings-list">' + (sessions.length ? sessions.map(session => {
                 const current = Boolean(session.current);
                 return '<article class="settings-row"><div><h3>' + esc(session.label || session.device_name || 'Local session') + (current ? ' <span class="sr-only">current</span>' : '') + '</h3><p>Last used ' + esc(session.last_used_at || 'unknown') + ' · expires ' + esc(session.expires_at || 'unknown') + '</p></div><div class="settings-row-action"><span class="settings-badge ' + (current ? 'ok' : 'ready') + '">' + (current ? 'Current' : 'Other') + '</span>' + (current ? '' : '<button type="button" class="btn-danger" data-settings-action="session-revoke" data-session-id="' + esc(session.id) + '">Revoke</button>') + '</div></article>';
-            }).join('') : '<div class="settings-empty">No session records were returned.</div>') + '</div>' + reauthControl() + '<div id="settings-action-result" aria-live="polite"></div></section>';
+            }).join('') : '<div class="settings-empty">No session records were returned.</div>') + '</div>' + reauthControl(reauth) + '<div id="settings-action-result" aria-live="polite"></div></section>';
             setFooter('<button type="button" class="btn-danger" data-settings-action="sessions-revoke-others">Revoke other sessions</button><button type="button" class="btn-secondary" data-settings-action="close">Close</button>');
         } catch (error) { setError(error.message); }
     }
@@ -185,13 +274,13 @@
     async function renderAccount() {
         setLoading('Loading account and consent…');
         try {
-            const [me, consent] = await Promise.all([request('/api/auth/me'), request('/api/auth/consent')]);
+            const [me, consent, reauth] = await Promise.all([request('/api/auth/me'), request('/api/auth/consent'), loadReauthCapabilities()]);
             const user = me.user || me;
             const required = Array.isArray(consent.required) ? consent.required : [];
             const missing = Array.isArray(consent.missing) ? consent.missing : [];
             body().innerHTML = '<section class="settings-section"><span class="settings-eyebrow">CleanHouse identity</span><h2>Account</h2><dl class="settings-facts"><div><dt>Name</dt><dd>' + esc(user.full_name || user.name || 'Not provided') + '</dd></div><div><dt>Email</dt><dd>' + esc(user.email || 'Not provided') + '</dd></div><div><dt>Consent</dt><dd>' + (missing.length ? 'Action required' : 'Current') + '</dd></div></dl>' +
                 (missing.length ? '<div class="settings-notice" role="status"><h3>Review required</h3><p>Review the current <a href="/legal/terms" target="_blank" rel="noopener">Terms of Service</a>, <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Notice</a>, and <a href="/legal/eeccd" target="_blank" rel="noopener">EECCD disclosure</a>. Acceptance is required before protected antivirus controls are available.</p><label class="settings-consent"><input id="settings-consent-check" type="checkbox"> I accept the current required policies (' + esc(required.join(', ') || missing.join(', ')) + ').</label><button type="button" class="btn-primary" data-settings-action="consent-accept">Accept current policies</button></div>' : '<div class="settings-notice ok" role="status">Current required policy versions are accepted.</div>') +
-                reauthControl() +
+                reauthControl(reauth) +
                 '<div id="settings-action-result" aria-live="polite"></div></section>';
             setFooter('<a class="btn-secondary settings-link-button" href="/account/delete">Account deletion</a><button type="button" class="btn-danger" data-settings-action="logout">Log out</button><button type="button" class="btn-secondary" data-settings-action="close">Close</button>');
         } catch (error) { setError(error.message); }
@@ -298,9 +387,116 @@
     }
 
     function safeLocalPath(value) {
-        if (!value || typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//')) return '';
-        if (value.startsWith('/settings')) return '';
-        return value;
+        if (!value || typeof value !== 'string' || new TextEncoder().encode(value).length > 2048) return '';
+        let decoded = value;
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+            if (!decoded.startsWith('/') || decoded.startsWith('//') || decoded.includes('\\') || /[\x00-\x1f\x7f]/.test(decoded)) return '';
+            let next;
+            try { next = decodeURIComponent(decoded); } catch (_) { return ''; }
+            if (next === decoded) break;
+            decoded = next;
+            if (attempt === 3) return '';
+        }
+        let parsed;
+        try { parsed = new URL(decoded, window.location.origin); } catch (_) { return ''; }
+        if (parsed.origin !== window.location.origin) return '';
+        const segments = [];
+        for (const segment of parsed.pathname.split('/')) {
+            if (!segment || segment === '.') continue;
+            if (segment === '..') segments.pop(); else segments.push(segment);
+        }
+        const normalized = '/' + segments.join('/');
+        const loopTarget = normalized.replace(/\/+$/, '') || '/';
+        if (loopTarget === '/login' || loopTarget === '/signup' || normalized.startsWith('/settings')) return '';
+        return parsed.pathname + parsed.search + parsed.hash;
+    }
+
+    function policyReturnPath() {
+        const query = new URLSearchParams(window.location.search);
+        return safeLocalPath(query.get('return_to')) || safeLocalPath(window.location.pathname) || '/overview';
+    }
+
+    function policyFocusable() {
+        const node = policyModal();
+        return node ? Array.from(node.querySelectorAll('button:not([disabled]), a[href], input:not([disabled])')).filter(item => item.offsetParent !== null) : [];
+    }
+
+    function openPolicyConsent() {
+        const node = policyModal();
+        if (!node) return;
+        node.hidden = false;
+        document.body.classList.add('policy-consent-open');
+        const first = policyFocusable()[0];
+        if (first) first.focus();
+    }
+
+    function closePolicyConsent() {
+        const node = policyModal();
+        if (!node) return;
+        node.hidden = true;
+        document.body.classList.remove('policy-consent-open');
+        const url = new URL(window.location.href);
+        url.searchParams.delete('consent');
+        url.searchParams.delete('return_to');
+        history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+    }
+
+    function onPolicyKeydown(event) {
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            closePolicyConsent();
+            return;
+        }
+        if (event.key !== 'Tab') return;
+        const focusable = policyFocusable();
+        if (!focusable.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+        if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
+
+    function syncPolicyAccept() {
+        const checked = document.getElementById('policy-consent-checkbox');
+        const accept = document.getElementById('policy-consent-accept');
+        if (accept) accept.disabled = !checked || !checked.checked;
+    }
+
+    async function acceptCurrentPolicies() {
+        const checked = document.getElementById('policy-consent-checkbox');
+        const result = document.getElementById('policy-consent-result');
+        if (!checked || !checked.checked) return;
+        try {
+            await request('/api/auth/consent', { method: 'POST', body: { accept_current: true } });
+            window.location.assign(policyReturnPath());
+        } catch (error) {
+            if (result) result.textContent = error.message;
+        }
+    }
+
+    function renderSidebarProfile(user) {
+        const link = document.getElementById('settings-profile-link');
+        const image = document.getElementById('settings-profile-image');
+        const fallback = document.getElementById('settings-profile-fallback');
+        if (!link || !image || !fallback || !user) return;
+        const label = String(user.full_name || user.name || user.email || 'Account');
+        link.setAttribute('aria-label', 'Open settings for ' + label);
+        link.dataset.label = label;
+        const avatarUrl = String(user.avatar_url || user.picture || '').trim();
+        if (!avatarUrl) return;
+        image.addEventListener('load', () => { image.hidden = false; fallback.hidden = true; }, { once: true });
+        image.addEventListener('error', () => { image.hidden = true; fallback.hidden = false; }, { once: true });
+        image.src = avatarUrl;
+    }
+
+    async function hydrateAccountChromeAndPolicyGate(forceOpen) {
+        try {
+            const payload = await request('/api/auth/me');
+            renderSidebarProfile(payload.user || null);
+            if (forceOpen || payload.consent_required === true) openPolicyConsent();
+        } catch (_) {
+            if (forceOpen) openPolicyConsent();
+        }
     }
 
     function actionResult(message, error) {
@@ -348,24 +544,52 @@
                 false
             );
         }
+        if (action === 'provider-avatar-refresh') {
+            const provider = button.dataset.provider;
+            if (!['google', 'github'].includes(provider)) return;
+            return mutate(async () => {
+                const result = await request('/api/auth/oauth/' + encodeURIComponent(provider) + '?intent=photo', { method: 'POST', body: {} });
+                const target = new URL(result.authorization_url || '');
+                const expectedOrigin = provider === 'google' ? 'https://accounts.google.com' : 'https://github.com';
+                if (target.origin !== expectedOrigin) throw new Error('Provider start did not return the expected authorization URL.');
+                window.location.assign(target.href);
+            }, 'Opening provider authorization…', false);
+        }
         if (action === 'provider-link') {
             const provider = button.dataset.provider;
             if (!['google', 'github'].includes(provider)) return;
             return mutate(async () => {
-                const result = await sensitiveRequest('/api/auth/providers/' + encodeURIComponent(provider) + '/start', { method: 'POST', body: { intent: 'link' } });
+                const result = await sensitiveMfaRequest('/api/auth/providers/' + encodeURIComponent(provider) + '/start', { method: 'POST', body: { intent: 'link' } }, 'provider.manage', provider);
                 const target = result.authorization_url || result.redirect_url;
                 if (!target || !String(target).startsWith('/') || String(target).startsWith('//')) throw new Error('Provider start did not return a safe local redirect.');
                 window.location.assign(target);
             }, 'Opening provider authorization…', false);
         }
-        if (action === 'provider-unlink') return mutate(() => sensitiveRequest('/api/auth/providers/' + encodeURIComponent(button.dataset.provider), { method: 'DELETE' }), 'Provider unlinked.', true);
+        if (action === 'provider-unlink') return mutate(() => sensitiveMfaRequest('/api/auth/providers/' + encodeURIComponent(button.dataset.provider), { method: 'DELETE' }, 'provider.manage', button.dataset.provider), 'Provider unlinked.', true);
         if (action === 'token-rotate') return mutate(async () => {
-            const result = await sensitiveRequest('/api/auth/tokens/' + encodeURIComponent(button.dataset.tokenId) + '/rotate', { method: 'POST', body: {} });
+            const result = await sensitiveMfaRequest('/api/auth/tokens/' + encodeURIComponent(button.dataset.tokenId) + '/rotate', { method: 'POST', body: {} }, 'token.manage', button.dataset.tokenId);
             revealToken(result);
         }, 'Token rotated. Copy the replacement now.', false);
-        if (action === 'token-revoke') return mutate(() => sensitiveRequest('/api/auth/tokens/' + encodeURIComponent(button.dataset.tokenId), { method: 'DELETE' }), 'Token revoked.', true);
-        if (action === 'session-revoke') return mutate(() => sensitiveRequest('/api/auth/sessions/' + encodeURIComponent(button.dataset.sessionId), { method: 'DELETE' }), 'Session revoked.', true);
-        if (action === 'sessions-revoke-others') return mutate(() => sensitiveRequest('/api/auth/sessions/revoke-others', { method: 'POST', body: {} }), 'Other sessions revoked.', true);
+        if (action === 'token-revoke') return mutate(() => sensitiveMfaRequest('/api/auth/tokens/' + encodeURIComponent(button.dataset.tokenId), { method: 'DELETE' }, 'token.manage', button.dataset.tokenId), 'Token revoked.', true);
+        if (action === 'session-revoke') return mutate(() => sensitiveMfaRequest('/api/auth/sessions/' + encodeURIComponent(button.dataset.sessionId), { method: 'DELETE' }, 'session.manage', button.dataset.sessionId), 'Session revoked.', true);
+        if (action === 'sessions-revoke-others') return mutate(() => sensitiveMfaRequest('/api/auth/sessions/revoke-others', { method: 'POST', body: {} }, 'session.manage', 'others'), 'Other sessions revoked.', true);
+        if (action === 'mfa-remove') return mutate(async () => {
+            const target = button.dataset.factorId;
+            const proof = await mfaStepUp('factor.remove', target);
+            await request('/api/auth/mfa/remove', { method: 'POST', body: { factorId: target, proof } });
+        }, 'Authenticator removed.', true);
+        if (action === 'mfa-admit') return mutate(async () => {
+            await mfaStepUp('authenticate', '');
+            const url = new URL(window.location.href);
+            const destination = safeLocalPath(url.searchParams.get('return_to')) || '/overview';
+            window.location.assign(destination);
+        }, 'MFA verification complete.', false);
+        if (action === 'mfa-recovery-rotate') return mutate(async () => {
+            const proof = await mfaStepUp('recovery.rotate', '');
+            const result = await request('/api/auth/mfa/recovery/rotate', { method: 'POST', body: { proof } });
+            const target = document.getElementById('settings-mfa-result');
+            if (target) target.innerHTML = '<div class="settings-token-reveal" role="alert"><strong>Save these one-time recovery codes now.</strong><code>' + esc((result.recoveryCodes || []).join('\n')) + '</code></div>';
+        }, 'Recovery codes rotated.', false);
         if (action === 'consent-accept') {
             const checked = document.getElementById('settings-consent-check');
             if (!checked || !checked.checked) return actionResult('Confirm acceptance before continuing.', true);
@@ -429,11 +653,27 @@
     }
 
     async function onSubmit(event) {
+        if (event.target.id === 'settings-mfa-enroll-form') {
+            event.preventDefault();
+            try {
+                const current = await request('/api/auth/mfa/factors');
+                let proof = '';
+                if ((current.factors || []).length) proof = await mfaStepUp('factor.add', '');
+                const enrolled = await request('/api/auth/mfa/enroll', { method: 'POST', body: { label: document.getElementById('settings-mfa-label').value, proof } });
+                const code = window.prompt('Add this provisioning URI to your authenticator, then enter its six-digit code:\n\n' + enrolled.provisioningUri);
+                if (!code) throw new Error('Enrollment confirmation was cancelled.');
+                const confirmed = await request('/api/auth/mfa/confirm', { method: 'POST', body: { factorId: enrolled.factorId, code: code.trim() } });
+                const target = document.getElementById('settings-mfa-result');
+                if (target && (confirmed.recoveryCodes || []).length) target.innerHTML = '<div class="settings-token-reveal" role="alert"><strong>Save these one-time recovery codes now.</strong><code>' + esc(confirmed.recoveryCodes.join('\n')) + '</code></div>';
+                actionResult('Authenticator activated.', false);
+            } catch (error) { actionResult(error.message, true); }
+            return;
+        }
         if (event.target.id === 'settings-token-form') {
             event.preventDefault();
             const days = Number(document.getElementById('settings-token-days').value || 30);
             try {
-                const result = await sensitiveRequest('/api/auth/tokens', { method: 'POST', body: { expires_in_days: days } });
+                const result = await sensitiveMfaRequest('/api/auth/tokens', { method: 'POST', body: { expires_in_days: days } }, 'token.manage', 'create');
                 revealToken(result);
             } catch (error) { actionResult(error.message, true); }
             return;
@@ -486,6 +726,23 @@
             openSettingsPanel('general');
         }));
         if (window.location.pathname === '/settings' || new URLSearchParams(window.location.search).has('settings')) openSettingsPanel();
+        const consent = new URLSearchParams(window.location.search).get('consent');
+        const policy = policyModal();
+        if (policy) {
+            policy.addEventListener('keydown', onPolicyKeydown);
+            policy.addEventListener('change', event => {
+                if (event.target && event.target.id === 'policy-consent-checkbox') syncPolicyAccept();
+            });
+            policy.addEventListener('click', event => {
+                const action = event.target.closest('[data-policy-action]');
+                if (!action) return;
+                event.preventDefault();
+                if (action.dataset.policyAction === 'close') closePolicyConsent();
+                if (action.dataset.policyAction === 'accept') acceptCurrentPolicies();
+            });
+        }
+        if (window.location.pathname !== '/settings') hydrateAccountChromeAndPolicyGate(consent === 'required');
+        else if (window.authState && window.authState.ready) window.authState.ready.then(() => renderSidebarProfile(window.authState.getUser()));
     });
 
     window.openSettingsPanel = openSettingsPanel;

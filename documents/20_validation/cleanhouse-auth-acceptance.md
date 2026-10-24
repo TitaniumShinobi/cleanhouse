@@ -278,3 +278,17 @@ the disposable supervisor through `ps`, so the stop receipt retained
 This is a sandbox observation, not live Start/launchd proof. Live port 3333,
 staged runtime, databases, sessions, browser windows, and provider configuration
 were untouched. Real email delivery and live GitHub acceptance remain external.
+
+# MFA readiness addendum — 2026-10-22
+
+The authoritative CleanHouse MFA source contract is
+`documents/00_start-here/cleanhouse-mfa.md`. This bounded pass implements the
+product-native adapter without activating it against the canonical runtime or
+live authentication database. Manual-test readiness requires a configured
+`CLEANHOUSE_MFA_ENCRYPTION_KEY`, an isolated database migration, focused
+service/API/UI tests, and then separately authorized browser acceptance.
+
+Ordinary Terms acceptance remains independent and idempotent. It must not
+request password, provider, magic-email, or MFA proof. If the session itself
+requires MFA admission, that admission completes once before consent and the
+bounded pending action resumes once without an authentication/consent loop.

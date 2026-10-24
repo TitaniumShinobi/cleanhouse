@@ -25,6 +25,10 @@ const LOW_PROCESSING_RECEIPT_LIMIT = 5;
 const CLEANHOUSE_BOOT_FETCH_TIMEOUT_MS = 1800;
 const CLEANHOUSE_VIEW_FETCH_TIMEOUT_MS = 3500;
 
+// Access denial is not collector evidence. This state lasts only until navigation;
+// successful policy acceptance already performs a full reload of the return route.
+window.CleanHouseAccess = { consentRequired: false };
+
 // All cookie-authenticated antivirus mutations share one CSRF path. Keeping
 // this at the HTTP boundary prevents individual product surfaces from silently
 // omitting protection as new controls are added.
@@ -53,7 +57,15 @@ if (typeof window !== 'undefined' && typeof window.fetch === 'function') {
                 init.headers = Object.assign({}, init.headers || {}, { 'X-CSRF-Token': await productCsrfToken() });
             }
         }
-        return nativeFetch(input, init);
+        const response = await nativeFetch(input, init);
+        if (target.origin === window.location.origin && response.status === 428) {
+            const payload = await response.clone().json().catch(() => ({}));
+            if (payload.code === 'consent_required') {
+                window.CleanHouseAccess.consentRequired = true;
+                window.dispatchEvent(new CustomEvent('cleanhouse:consent-required'));
+            }
+        }
+        return response;
     };
 }
 

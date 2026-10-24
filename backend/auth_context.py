@@ -35,6 +35,7 @@ class RequestIdentity:
     credential_id: str
     user: dict[str, Any]
     consent_current: bool
+    credential_metadata: dict[str, Any] | None = None
 
 
 _store: AuthStore | None = None
@@ -117,11 +118,16 @@ def resolve_identity(
             return None
         if result.replacement:
             g.cleanhouse_session_replacement = result.replacement
+            previous = str(result.record.get("previous_session_id") or "")
+            if previous:
+                from backend.auth_mfa import CleanHouseMFA
+                CleanHouseMFA(store.path).rebind_rotated_session(user_id=str(result.record["user_id"]), old_session_id=previous, new_session_id=result.replacement.id)
         user_id = str(result.record["user_id"])
         user = _user_dict(user_loader(user_id))
         if not user:
             return None
-        identity = RequestIdentity(user_id, "session", str(result.record["id"]), user, consent_checker(user_id))
+        metadata = result.record.get("metadata") if isinstance(result.record.get("metadata"), dict) else {}
+        identity = RequestIdentity(user_id, "session", str(result.record["id"]), user, consent_checker(user_id), metadata)
         g.cleanhouse_identity = identity
         return identity
 

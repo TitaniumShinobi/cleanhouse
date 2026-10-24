@@ -36,7 +36,7 @@ CHATTY_API_URL=http://localhost:5000
 /bin/bash scripts/cleanhouse-up.sh
 ```
 
-Then open your browser to: **http://localhost:3333/overview**
+Then open your browser to: **http://localhost:3333/dashboard**
 
 ### 3c. Debug-only startup paths
 
@@ -54,12 +54,10 @@ cleanhouse-raw() {
 
 `cleanhouse` is the operator-facing launcher:
 - starts/reuses the local app from `127.0.0.1:3333`
-- waits for `operator_ready=true` at `http://127.0.0.1:3333/cleanhouse/status?ready=1`
-- requires the explicit readiness contract: healthy state, warm startup, live supervisor/backend, exactly one matching CleanHouse-owned listener, no foreign listener, fresh heartbeat, successful readiness probe, and no active self-deviation or hard resource block
-- treats bootstrap timestamps and LaunchAgent persistence as evidence only; neither can make a recovering or degraded runtime ready
-- resolves the runtime interpreter deterministically and proves `backend.server` plus its transitive launch imports before supervisor start
-- opens `http://localhost:3333/overview`
-- prints `cleanhouse is running at http://localhost:3333/overview`
+- waits for readiness at `http://127.0.0.1:3333/cleanhouse/status`
+- resolves the runtime interpreter deterministically before supervisor start
+- opens `http://localhost:3333/dashboard`
+- prints `cleanhouse is running at http://localhost:3333/dashboard`
 
 Debug-only paths (non-canonical):
 
@@ -104,12 +102,10 @@ Smoke checks (after launch from a separate shell):
 python3 - <<'PY'
 import json
 import urllib.request
-print("overview:", urllib.request.urlopen("http://127.0.0.1:3333/overview").status)
-print("readiness:", json.loads(urllib.request.urlopen("http://127.0.0.1:3333/cleanhouse/status?ready=1").read().decode("utf-8")))
+print("dashboard:", urllib.request.urlopen("http://127.0.0.1:3333/dashboard").status)
+print("status:", json.loads(urllib.request.urlopen("http://127.0.0.1:3333/cleanhouse/status").read().decode("utf-8")))
 PY
 ```
-
-Normal operator startup opens `/overview`; `/dashboard` remains available for its existing route.
 
 Delivery scope for v1: deterministic local install and launch. This is not an auto-update or remote-distribution workflow.
 
