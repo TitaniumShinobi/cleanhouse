@@ -94,6 +94,10 @@ class AuthSettingsUiTests(unittest.TestCase):
         self.assertIn("String(target).startsWith('//')", JS)
         self.assertNotIn("window.location.assign('/api/auth/oauth/", JS)
 
+    def test_profile_is_hydrated_from_the_session(self):
+        self.assertIn("hydrateAccountChrome", JS)
+        self.assertIn("user.avatar_url || user.picture", JS)
+
     def test_keyboard_focus_and_deep_link_behavior_are_present(self):
         self.assertIn("event.key === 'Escape'", JS)
         self.assertIn("event.key !== 'Tab'", JS)

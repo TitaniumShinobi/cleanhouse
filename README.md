@@ -6,8 +6,8 @@
 
 > **Cleanup safety boundary:** CleanHouse observations or capacity findings are
 > not deletion, resize, power, migration, or purchase authorization. The
-> controlling production-storage and incident report is
-> [`STORAGE_AND_DATA_OPERATIONS_REPORT.md`](../STORAGE_AND_DATA_OPERATIONS_REPORT.md).
+> controlling production-storage and incident report is maintained externally
+> as `STORAGE_AND_DATA_OPERATIONS_REPORT.md`.
 
 A local-first observability and evidence platform built with **Python**, **pywebview**, and **Flask** — designed for local process, file, and network observation with registry-aware authentication.
 
@@ -330,8 +330,8 @@ available as an explicitly labeled fallback.
 The Wazuh `4.14.7` Apple-silicon bundle is vendored locally with its agent
 package, corresponding source archive, manifest, upstream license, notices,
 and source-compliance record. The vendoring gate fails closed unless the fixed
-package and source SHA-512 pins, exact Wazuh signer and fingerprint, trusted
-Apple notarization, and source-archive readability all verify. The LaunchAgent
+package and source SHA-512 pins, exact Wazuh signer and fingerprint, trusted Apple
+notarization, and source-archive readability all verify. The LaunchAgent
 stages that complete shipping closure into its isolated runtime, and runtime
 bundle verification remains required before use. Remote manager deployment,
 administrator-authorized agent installation/enrollment, and hosted smoke

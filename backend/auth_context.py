@@ -113,7 +113,10 @@ def resolve_identity(
     raw = str(getattr(request, "cookies", {}).get(DEVICE_COOKIE, "") or "")
     if raw:
         store = get_store()
-        result = store.validate_session(raw)
+        # Ordinary reads must not revoke the cookie that concurrent requests
+        # are still presenting. Rotation is an explicit, CSRF-protected
+        # operation at /api/auth/session/refresh.
+        result = store.validate_session(raw, rotate_if_due=False)
         if result.status not in {"valid", "rotated"} or not result.record:
             return None
         if result.replacement:

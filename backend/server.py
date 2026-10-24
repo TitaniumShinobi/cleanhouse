@@ -210,7 +210,7 @@ def _has_cleanhouse_session():
         from backend.auth_context import resolve_identity
 
         return resolve_identity(
-            lambda user_id: auth_api.get_user_service().get_user_by_id(user_id=str(user_id)),
+            auth_api.load_session_user,
             auth_api.user_has_current_consent,
         )
     except Exception:

@@ -39,6 +39,21 @@ class AuthStoreTests(unittest.TestCase):
         self.assertEqual(result.status, "valid")
         self.assertEqual(result.record["user_id"], "user-1")
 
+    def test_provider_avatar_updates_matching_sessions_only(self):
+        now = datetime.now(timezone.utc)
+        google = self.store.issue_session("user-1", auth_method="oauth:google", now=now)
+        current = self.store.issue_session("user-1", auth_method="password", now=now)
+        other = self.store.issue_session("user-1", auth_method="password", now=now)
+        foreign = self.store.issue_session("user-2", auth_method="oauth:google", now=now)
+        avatar = "https://lh3.googleusercontent.com/a/owner"
+        self.assertEqual(self.store.refresh_provider_session_avatar(
+            "user-1", "google", avatar, current_session_id=current.id
+        ), 2)
+        self.assertEqual(self.store.validate_session(google.secret, now=now).record["metadata"]["avatar_url"], avatar)
+        self.assertEqual(self.store.validate_session(current.secret, now=now).record["metadata"]["avatar_url"], avatar)
+        self.assertNotIn("avatar_url", self.store.validate_session(other.secret, now=now).record["metadata"])
+        self.assertNotIn("avatar_url", self.store.validate_session(foreign.secret, now=now).record["metadata"])
+
     def test_session_lifetimes_and_coalesced_last_use(self):
         issued = self.store.issue_session("user-1", auth_method="password", now=NOW)
         first = self.store.validate_session(issued.secret, now=NOW + timedelta(minutes=1))

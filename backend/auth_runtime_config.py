@@ -123,7 +123,28 @@ def resolve_runtime_config(
         for value in contract.get("allowedOrigins", [])
         if (normalized := _origin(str(value)))
     ]
-    configured_origin = _origin(str(source.get("CLEANHOUSE_PUBLIC_ORIGIN") or contract.get("publicOrigin") or ""))
+    explicit_origin = _origin(str(source.get("CLEANHOUSE_PUBLIC_ORIGIN") or ""))
+    for value in str(source.get("CLEANHOUSE_ALLOWED_ORIGINS") or "").split(","):
+        normalized = _origin(value)
+        if normalized and normalized not in allowed_origins:
+            allowed_origins.append(normalized)
+    if explicit_origin and explicit_origin not in allowed_origins:
+        allowed_origins.append(explicit_origin)
+
+    runtime_origin = ""
+    configured_port = str(source.get("CLEANHOUSE_PORT") or "").strip()
+    if configured_port:
+        try:
+            port = int(configured_port)
+        except ValueError:
+            port = 0
+        if 1 <= port <= 65535:
+            runtime_origin = f"http://localhost:{port}"
+            for candidate in (runtime_origin, f"http://127.0.0.1:{port}"):
+                if candidate not in allowed_origins:
+                    allowed_origins.append(candidate)
+
+    configured_origin = explicit_origin or runtime_origin or _origin(str(contract.get("publicOrigin") or ""))
     public_origin = configured_origin if configured_origin in allowed_origins else (allowed_origins[0] if allowed_origins else "")
     overlay_providers = overlay.get("providers") if isinstance(overlay.get("providers"), dict) else {}
     resolved_providers: dict[str, Any] = {}

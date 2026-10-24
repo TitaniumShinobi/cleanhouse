@@ -97,6 +97,26 @@ def _mark_primary_session(user_id: str, session_id: str | None):
     get_mfa().mark_primary(user_id, session_id)
 
 
+def _oauth_avatar_url(provider: str, value: Any) -> str:
+    """Keep only bounded HTTPS image URLs from the expected provider host."""
+    if not isinstance(value, str):
+        return ''
+    url = value.strip()
+    if not url or len(url) > 2048:
+        return ''
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return ''
+    host = (parsed.hostname or '').lower()
+    allowed = (provider == 'google' and host.endswith('.googleusercontent.com')) or (
+        provider == 'github' and host == 'avatars.githubusercontent.com'
+    )
+    if parsed.scheme != 'https' or not allowed or parsed.username or parsed.password or parsed.fragment:
+        return ''
+    return url
+
+
 @bp.after_request
 def _auth_no_store(response):
     response.headers['Cache-Control'] = 'no-store'
@@ -340,6 +360,17 @@ def user_has_current_consent(user_id: str) -> bool:
     return bool(user_id) and get_store().consent_status(str(user_id), _required_consent_digests())['current']
 
 
+def load_session_user(user_id: str):
+    """Resolve both sharded IDs and historical SQLite integer identities."""
+    value = str(user_id).strip()
+    service = get_user_service()
+    if value.isdigit():
+        legacy = service.get_user_by_id(legacy_id=int(value))
+        if legacy is not None:
+            return legacy
+    return service.get_user_by_id(user_id=value)
+
+
 def _record_current_consent(user_id: str, consent: Dict[str, Any], method: str, transaction_id: str) -> None:
     missing = _missing_required_consent(consent)
     if missing:
@@ -357,7 +388,7 @@ def _record_current_consent(user_id: str, consent: Dict[str, Any], method: str, 
 
 def _current_identity(*, allow_api_token: bool = False):
     identity = resolve_identity(
-        lambda user_id: get_user_service().get_user_by_id(user_id=str(user_id)),
+        load_session_user,
         user_has_current_consent,
     )
     if identity is None or (identity.kind == 'api_token' and not allow_api_token):

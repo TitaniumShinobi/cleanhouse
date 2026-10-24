@@ -857,14 +857,14 @@ class AuthEndpointTests(unittest.TestCase):
             self.assertIsNone(auth_api.get_oauth_user_info("github", "provider-token"))
 
         verified = [
-            _Response({"id": 7, "login": "owner", "avatar_url": "https://images.example.test/github.png"}),
+            _Response({"id": 7, "login": "owner", "avatar_url": "https://avatars.githubusercontent.com/u/7"}),
             _Response([{"email": "owner@example.test", "primary": True, "verified": True}]),
         ]
         with patch.object(auth_api.requests, "get", side_effect=verified):
             result = auth_api.get_oauth_user_info("github", "provider-token")
         self.assertEqual(result["id"], "7")
         self.assertEqual(result["email"], "owner@example.test")
-        self.assertEqual(result["avatar_url"], "https://images.example.test/github.png")
+        self.assertEqual(result["avatar_url"], "https://avatars.githubusercontent.com/u/7")
 
     def test_google_picture_is_mapped_to_oauth_avatar(self):
         class _Response:
@@ -873,11 +873,11 @@ class AuthEndpointTests(unittest.TestCase):
 
             def json(self):
                 return {"id": "google-subject", "email": "owner@example.test",
-                        "picture": "https://images.example.test/google.png"}
+                        "picture": "https://lh3.googleusercontent.com/a/owner"}
 
         with patch.object(auth_api.requests, "get", return_value=_Response()):
             result = auth_api.get_oauth_user_info("google", "provider-token")
-        self.assertEqual(result["avatar_url"], "https://images.example.test/google.png")
+        self.assertEqual(result["avatar_url"], "https://lh3.googleusercontent.com/a/owner")
 
 
 if __name__ == "__main__":

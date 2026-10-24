@@ -9,6 +9,12 @@ from backend import auth_runtime_config
 
 
 class AuthRuntimeConfigTests(unittest.TestCase):
+    def setUp(self):
+        auth_runtime_config._runtime = None
+
+    def tearDown(self):
+        auth_runtime_config._runtime = None
+
     def _files(self, root: Path):
         contract = root / "auth-runtime.json"
         overlay = root / "public.json"
@@ -55,6 +61,25 @@ class AuthRuntimeConfigTests(unittest.TestCase):
                 "CLEANHOUSE_LAUNCHD_OWNED": "1",
             }, keychain_reader=lambda service, account: "")
         self.assertFalse(config["providers"]["google"]["available"])
+
+    def test_runtime_port_and_explicit_origins_extend_the_auth_allowlist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contract, overlay = self._files(Path(tmp))
+            config = auth_runtime_config.resolve_runtime_config({
+                "CLEANHOUSE_AUTH_CONFIG_PATH": str(contract),
+                "CLEANHOUSE_AUTH_PUBLIC_CONFIG_PATH": str(overlay),
+                "CLEANHOUSE_PORT": "3334",
+                "CLEANHOUSE_ALLOWED_ORIGINS": "http://127.0.0.1:3334,https://cleanhouse.example",
+            }, keychain_reader=lambda service, account: "secret")
+
+        self.assertEqual(config["public_origin"], "http://localhost:3334")
+        self.assertIn("http://localhost:3334", config["allowed_origins"])
+        self.assertIn("http://127.0.0.1:3334", config["allowed_origins"])
+        self.assertIn("https://cleanhouse.example", config["allowed_origins"])
+        self.assertEqual(
+            config["providers"]["google"]["callback_url"],
+            "http://localhost:3334/api/auth/google/callback",
+        )
 
     def test_initialization_does_not_export_resolved_secret(self):
         resolved = {
