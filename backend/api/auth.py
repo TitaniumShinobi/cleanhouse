@@ -321,6 +321,17 @@ def user_has_current_consent(user_id: str) -> bool:
     return bool(user_id) and get_store().consent_status(str(user_id), _required_consent_digests())['current']
 
 
+def load_session_user(user_id: str):
+    """Resolve both sharded IDs and historical SQLite integer identities."""
+    value = str(user_id).strip()
+    service = get_user_service()
+    if value.isdigit():
+        legacy = service.get_user_by_id(legacy_id=int(value))
+        if legacy is not None:
+            return legacy
+    return service.get_user_by_id(user_id=value)
+
+
 def _record_current_consent(user_id: str, consent: Dict[str, Any], method: str, transaction_id: str) -> None:
     missing = _missing_required_consent(consent)
     if missing:
@@ -334,7 +345,7 @@ def _record_current_consent(user_id: str, consent: Dict[str, Any], method: str, 
 
 def _current_identity(*, allow_api_token: bool = False):
     identity = resolve_identity(
-        lambda user_id: get_user_service().get_user_by_id(user_id=str(user_id)),
+        load_session_user,
         user_has_current_consent,
     )
     if identity is None or (identity.kind == 'api_token' and not allow_api_token):

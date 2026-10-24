@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -84,6 +85,18 @@ class AuthContextTests(unittest.TestCase):
         second = self.client.get("/identity")
         self.assertEqual(second.status_code, 200)
         self.assertEqual(second.get_json()["user_id"], "user-1")
+
+    def test_ordinary_parallel_requests_do_not_rotate_and_revoke_the_shared_cookie(self):
+        issued_at = datetime.now(timezone.utc) - timedelta(days=2)
+        issued = auth_context.get_store().issue_session("user-1", auth_method="password", now=issued_at)
+        self._set_device_cookie(issued.secret)
+
+        first = self.client.get("/identity")
+        second = self.client.get("/identity")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertNotIn("Set-Cookie", first.headers)
 
     def test_legacy_signed_session_migrates_once_to_opaque_cookie(self):
         with self.client.session_transaction() as legacy:

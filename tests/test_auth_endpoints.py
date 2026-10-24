@@ -38,6 +38,16 @@ class _UserService:
         return self.user if str(email).lower() == self.user.email else None
 
 
+class _LegacyUserService(_UserService):
+    def __init__(self) -> None:
+        self.user = _User("7")
+
+    def get_user_by_id(self, user_id=None, legacy_id=None, **_kwargs):
+        if legacy_id == 7:
+            return self.user
+        return None
+
+
 class AuthEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -86,6 +96,17 @@ class AuthEndpointTests(unittest.TestCase):
         auth_api._login_rate_events.clear()
         self.env.stop()
         self.temp.cleanup()
+
+    def test_current_user_resolves_legacy_sqlite_identity_from_device_session(self):
+        self.service = _LegacyUserService()
+        auth_api.get_user_service.return_value = self.service
+        issued = auth_context.get_store().issue_session("7", auth_method="password")
+        self.client.set_cookie(auth_context.DEVICE_COOKIE, issued.secret, domain="localhost")
+
+        response = self.client.get("/api/auth/me")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["user"]["id"], "7")
 
     def test_denied_callback_requires_and_consumes_state(self):
         with self.client.session_transaction(base_url="http://localhost:3333") as state:
