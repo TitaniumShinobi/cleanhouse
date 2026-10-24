@@ -620,6 +620,7 @@ class AuthEndpointTests(unittest.TestCase):
             auth_api.validate_local_return("/network?range=30m#active"),
             "/network?range=30m#active",
         )
+        self.assertEqual(auth_api.validate_local_return("/..example"), "/..example")
 
     def test_consent_never_invokes_reauth_for_magic_or_mfa_sessions(self):
         for method in ("magic_email", "mfa"):

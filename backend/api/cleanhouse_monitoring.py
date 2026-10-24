@@ -15323,14 +15323,13 @@ class CleanHouseMonitoringAdapter:
         report_type: Optional[str] = None,
         summary_only: bool = False,
     ) -> Dict[str, Any]:
-        max_records = limit if limit is not None else LOW_PROCESSING_HISTORY_LIMIT
-        records = self._report_dicts(max_records=max_records)
+        records = self._report_dicts()
         if session_id:
             records = [r for r in records if r.get("session_id") == session_id]
         if report_type:
             records = [r for r in records if r.get("report_type") == report_type]
-        if limit is not None:
-            records = records[:max(0, int(limit))]
+        max_records = limit if limit is not None else LOW_PROCESSING_HISTORY_LIMIT
+        records = records[:max(0, int(max_records))]
         if summary_only:
             records = [self._summary_report_dict(r) for r in records]
         return {

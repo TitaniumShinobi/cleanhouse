@@ -470,16 +470,16 @@ def validate_local_return(candidate: Any) -> str:
 
     parsed = urllib.parse.urlsplit(value)
     path = parsed.path
-    normalized = '/' + '/'.join(segment for segment in path.split('/') if segment not in {'', '.'})
-    while '/..' in normalized:
-        parts = []
-        for segment in normalized.split('/'):
-            if segment == '..':
-                if parts:
-                    parts.pop()
-            elif segment:
-                parts.append(segment)
-        normalized = '/' + '/'.join(parts)
+    parts = []
+    for segment in path.split('/'):
+        if segment in {'', '.'}:
+            continue
+        if segment == '..':
+            if parts:
+                parts.pop()
+            continue
+        parts.append(segment)
+    normalized = '/' + '/'.join(parts)
     loop_target = normalized.rstrip('/') or '/'
     if loop_target in {'/login', '/signup'}:
         return ''

@@ -3845,6 +3845,21 @@ class CleanHouseMonitoringApiTests(unittest.TestCase):
         self.assertNotIn("receipts", report["receipt"])
         self.assertNotIn("reports", report["receipt"])
 
+        adapter._reports["newer-other-type"] = monitoring_module.SessionReport(
+            id="newer-other-type",
+            session_id="session-a",
+            timestamp="2026-05-26T12:00:00",
+            report_type="ctrl_action",
+            contact="",
+            target="",
+            context="",
+            receipt={},
+            evidence_links=(),
+        )
+        filtered = adapter.get_reports(report_type="login_summary", limit=1)
+        self.assertEqual(filtered["count"], 1)
+        self.assertEqual(filtered["reports"][0]["id"], result["id"])
+
     def test_login_report_route_status_codes_follow_job_state(self):
         self._set_request_json({"user_id": "user-1", "email": "user@example.com"})
 
