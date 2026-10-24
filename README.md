@@ -1,8 +1,13 @@
 <div align="center">
-  <img src="/assets/cleanhouse.png" alt="CleanHouse Logo">
+  <img src="/assets/cleanhouse.svg" alt="CleanHouse Logo">
 </div>
 
 # 🏠 CleanHouse
+
+> **Cleanup safety boundary:** CleanHouse observations or capacity findings are
+> not deletion, resize, power, migration, or purchase authorization. The
+> controlling production-storage and incident report is maintained externally
+> as `STORAGE_AND_DATA_OPERATIONS_REPORT.md`.
 
 A local-first observability and evidence platform built with **Python**, **pywebview**, and **Flask** — designed for local process, file, and network observation with registry-aware authentication.
 
@@ -109,7 +114,7 @@ print("status:", json.loads(urllib.request.urlopen("http://127.0.0.1:3333/cleanh
 PY
 ```
 
-Normal operator startup opens `/overview`; `/dashboard` remains available for its existing route.
+Normal operator startup opens `/overview`; `/dashboard` is a legacy redirect to `/advanced`.
 If startup is blocked by an open runtime self-deviation, review the printed evidence and receipt, then run `cleanhouse --acknowledge-self-deviation` for one guarded restart attempt.
 
 Delivery scope for v1: deterministic local install and launch. This is not an auto-update or remote-distribution workflow.
@@ -118,13 +123,13 @@ Delivery scope for v1: deterministic local install and launch. This is not an au
 
 ## 🔐 Authentication
 
-CleanHouse features a unified authentication system that connects to Chatty's MongoDB user database, ensuring seamless account management across all your applications.
+CleanHouse uses product-native Python/Flask authentication aligned by the transient lowercase `auth` wizard.
 
 **Supported Authentication Methods:**
 - **Email/Password** — Secure password-based authentication
-- **OAuth Providers** — Google, Apple, Microsoft (opens in system browser)
-- **Unified Registry** — Shared user database with Chatty and VVAULT
-- **Local Fallback** — Automatic SQLite fallback if Chatty API unavailable
+- **OAuth Provider** — Google is shown only when its complete provider configuration is available
+- **Server sessions** — Browser identity is held in an HttpOnly CleanHouse session
+- **Account recovery** — Single-use, expiring recovery links through Resend or SMTP
 - **Runtime toggle** — Auth routes are available only when `CLEANHOUSE_ENABLE_AUTH=1`
 
 **Features:**
@@ -138,7 +143,7 @@ CleanHouse features a unified authentication system that connects to Chatty's Mo
 ## 🗂️ Core Features
 
 ### 🔒 Identity & Registry
-- **Unified User Registry** — All apps (Chatty, VVAULT, CleanHouse) share the same MongoDB user database
+- **Product-native user registry** — CleanHouse owns its authentication records and lifecycle
 - **Access Control Surface** — Session and permission handling via local auth and token flows
 - **Observed process activity** — Process/platform observations reported from `corefiles/collectors/process_monitor.py`
 - **Observed file-state activity** — Integrity baseline and hash observations from `corefiles/integrity.py`
@@ -221,29 +226,38 @@ pytest-cov>=4.0.0
 
 ## 🔧 Configuration
 
-### Unified User Registry
+### Authentication ownership
 
-CleanHouse connects to Chatty's MongoDB for unified user management:
-
-1. **Primary:** Connects to Chatty API at `http://localhost:5000/api/auth/`
-2. **Fallback:** Automatically falls back to local SQLite (`user_auth.db`) if Chatty unavailable
-3. **Integration:** All apps (Chatty, VVAULT, CleanHouse) share the same user database
-
-**Note:** For unified registry, ensure Chatty server is running. If not, CleanHouse will use local SQLite fallback.
+CleanHouse owns its native authentication UI, persistence, sessions, and provider configuration. `auth` assesses and aligns the implementation, emits evidence, and exits; it does not remain installed or run beside CleanHouse. Start owns startup and readiness on port 3333.
 
 ### Environment Variables
 
 ```bash
-# Optional: Override Chatty API URL
-CHATTY_API_URL=http://localhost:5000
-
-# Optional: Database configuration
-DATABASE_URL=sqlite:///user_auth.db
+CLEANHOUSE_ENABLE_AUTH=1
+CLEANHOUSE_REQUIRE_LOGIN=1
+CLEANHOUSE_PUBLIC_ORIGIN=http://localhost:3333
 ```
 
 ---
 
 ## 🧪 Testing
+
+### Authentication regression gate
+
+```bash
+python -m pip install Flask==3.1.3 requests==2.32.5
+# Node.js 22 must be on PATH (minimum supported: 20).
+python scripts/run-auth-regression.py
+```
+
+This product-owned command runs the focused backend, real Flask logout-isolation,
+and Node UI failure/retry tests with a temporary HOME and synthetic secret. It
+requires no AUTH wizard, live server, provider credentials, or browser session.
+The `Authentication regression` workflow runs the same command on every push and
+pull request, without path filters. It becomes active after these files are
+committed and pushed; required-status protection is configured separately.
+See [the acceptance contract](documents/20_validation/cleanhouse-auth-acceptance.md)
+for evidence boundaries and regression coverage.
 
 ### Run Tests
 
@@ -254,11 +268,11 @@ pytest tests/
 
 ### Manual Testing Checklist
 
-- [x] OAuth buttons open in system browser (no popup errors)
-- [x] Signup form creates account via unified registry
-- [x] Signup auto-logs in after account creation
-- [x] Login authenticates via unified registry
-- [x] Fallback to local DB when Chatty unavailable
+- [ ] Complete live Google provider acceptance with owner-controlled credentials
+- [x] Signup establishes a CleanHouse server session
+- [x] Signin authenticates through the product-native registry
+- [x] Logout clears only the current browser session; other browser sessions and shared saved state remain intact
+- [x] Recovery tokens are hashed, expiring, and single-use
 - [x] Navigation links work without scrolling
 - [x] Form validation works (email format, password strength)
 - [x] Error messages display correctly
@@ -299,25 +313,29 @@ python3 scripts/separate_css_js.py
 
 ## 📚 Documentation
 
-### Runtime supervision
+### Files evidence foundation
 
 On macOS, `scripts/cleanhouse-up.sh` installs and starts the current user's
 `org.cleanhouse.runtime` LaunchAgent. The launcher can exit while `launchd`
-keeps the supervisor alive. Persistence alone is not readiness: the explicit
-operator contract still requires healthy/warm state, live process and listener
-ownership, a fresh heartbeat, a passing readiness probe, and no active runtime
-block. A stale state file or bootstrap timestamp is never sufficient evidence.
+keeps the supervisor alive. Runtime status still checks process ownership,
+port ownership, readiness, heartbeat freshness, and LaunchAgent state; a stale
+state file is never sufficient evidence of health.
 
-### Wazuh agent packaging
+The `/files` API uses the compatible `cleanhouse.files.v2` contract. It exposes
+collector identity and health, authenticated Wazuh powered state, immutable
+integrity generations, reconciliation receipts, OVVAULTS backlog, durable SSE
+cursors, and a non-executing mediation workflow. Watchdog observations remain
+available as an explicitly labeled fallback.
 
 The Wazuh `4.14.7` Apple-silicon bundle is vendored locally with its agent
 package, corresponding source archive, manifest, upstream license, notices,
-and source-compliance record. Vendoring fails closed unless the fixed package
-and source SHA-512 pins, exact Wazuh signer and fingerprint, trusted Apple
-notarization, and source-archive readability all verify. The separately
-reviewed LaunchAgent prerequisite stages the complete shipping closure into its
-isolated runtime. Manager deployment, administrator-authorized installation or
-enrollment, hosted smoke testing, and VVAULT work remain operator-gated. See
+and source-compliance record. The vendoring gate fails closed unless the fixed
+package and source SHA-512 pins, exact Wazuh signer and fingerprint, trusted Apple
+notarization, and source-archive readability all verify. The LaunchAgent
+stages that complete shipping closure into its isolated runtime, and runtime
+bundle verification remains required before use. Remote manager deployment,
+administrator-authorized agent installation/enrollment, and hosted smoke
+testing each remain separate operator-approved actions. See
 `documents/20_validation/wazuh-agent-packaging.md`.
 
 - **Quick Start:** `QUICK_START.md`
@@ -334,14 +352,19 @@ enrollment, hosted smoke testing, and VVAULT work remain operator-gated. See
 Built and maintained by Devon Allen Woodson
 Design, architecture, and framework extensions by Katana Systems
 
-© 2025 Woodson & Associates / WRECK LLC
-All rights reserved.
+© 2025-2026 Devon Allen Woodson / WRECK LLC
 
 ---
 
 ## 📝 License
 
-See `LICENSE` file for details.
+CleanHouse code is offered under GPL-2.0-only, subject to final legal review.
+The CleanHouse name and visual identity are governed separately by
+`TRADEMARK.md`. See `LICENSE`, `CLA.md`, and `CONTRIBUTING.md`.
+
+Bundled Wazuh components retain their own copyright and license notices. A
+release must not include the agent package until its pinned checksum,
+signature, corresponding source, and notices have passed the release gate.
 
 ---
 
