@@ -1,14 +1,37 @@
 # CLEANHOUSE PRODUCT BOARD
 
-Last verified: 2026-05-29
+Last verified: 2026-05-30
 Verification method:
 - Runtime spot checks: `python3 scripts/gate_a_observability.py --pretty`; `python3 -m scripts.native_notification_runtime_probe --output /tmp/cleanhouse-native-notification-probe.json`
 - Targeted tests: `python3 -m pytest tests/test_events_api.py -q`; `python3 -m pytest tests/test_gate_a_observability.py -q`; `python3 -m pytest tests/test_production_readiness_proving_run.py -q`; `python3 -m pytest tests/test_cleanhouse_monitoring_api.py -q -k "prompt_context_persistence_and_timeline or approval_queue_create_list_resolve or notification_policy_defaults_cover_required_agent_notifications or native_operator_notification_allowlist_is_noise_controlled_to_objective_and_drift or integrity_baseline_determinism or integrity_changed_file_detection or receipt_includes_prompt_and_approval_queue_entries or replay_or_signature_failure_notification_from_tampered_bundle"`
+- Product walkthrough (operator perspective):
+  - `/login`, `/signup`, `/dashboard`, `/incident-receipt` screenshot capture
+  - Route probe evidence at `docs/evidence/product_reality/route_probe.txt`
+  - Product reality report: `docs/reports/CLEANHOUSE_PRODUCT_REALITY_REPORT_2026-05-30.md`
 
 Calibration rubric:
 - `[x]` requires `operational` with concrete proof.
 - `[ ]` is used for `partial`, `substrate-only`, `unsupported`, or `unknown`.
 - Status labels align with `docs/plans/CLEANHOUSE_PHASED_EXECUTION_PLAN.md:907`.
+
+## PRODUCT REALITY DISTINCTION (2026-05-30)
+
+### PRODUCT (OPERATOR-ACCESSIBLE NOW)
+- [x] Login surface (`/login`) rendered and screenshot captured.
+- [x] Signup surface (`/signup`) rendered and screenshot captured.
+- [x] Dashboard surface (`/dashboard`) rendered and screenshot captured.
+- [x] Incident receipt surface (`/incident-receipt`) rendered and screenshot captured.
+
+### INFRASTRUCTURE (IMPLEMENTED, BUT NOT OPERATOR-RELIABLE IN THIS WALKTHROUGH)
+- [ ] Runtime status/control APIs (`/cleanhouse/status`, `/cleanhouse/runtime`) timed out during probe.
+- [ ] Workstation aggregation API (`/cleanhouse/workstation`) timed out during probe.
+- [ ] Receipt/incident data APIs showed timeout/degraded accessibility in the same walkthrough lane.
+- [ ] Attribution/enforcement subsystems (actor/channel/trust/scope) remain primarily backend evidence-chain capability until consistently visible and actionable in live UI.
+
+### MISSING CAPABILITIES (PRODUCT GAP)
+- [ ] Deterministic low-latency operator path for dashboard core APIs.
+- [ ] Reliable end-to-end operator loop: start session -> declare objective -> monitor -> receipt/replay without route timeout degradation.
+- [ ] First-class UI surfacing of scope enforcement deviation records and mediation outcomes.
 
 ## PROCESS MEDIATION
 - [x] Objective ingestion — `operational` — refs: `backend/api/cleanhouse.py:362`, `backend/api/cleanhouse.py:396`, `tests/test_events_api.py:284`
@@ -70,6 +93,6 @@ Operator interruption test for every new monitoring source (AWS, OpenAI, launchd
 If the answer is no, it belongs in the timeline, evidence chain, or dashboard, not a desktop notification.
 
 ## NEXT-TO-CLOSE QUEUE (TOP 3)
-1. Events API validation (`partial`) -> close formal route/schema validation and explicit failure-state proofs.
-2. Zero-spam guarantees (`partial`) -> close dedupe/reminder/cooldown behavior gaps into deterministic, replay-verified policy outcomes.
-3. Approval mediation (`partial`) -> close transition from review-state metadata to deterministic mediation proof in the runtime spine.
+1. Operator API responsiveness (`missing`) -> close `/cleanhouse/status`, `/cleanhouse/runtime`, `/cleanhouse/workstation` timeout behavior so dashboard controls are product-usable.
+2. End-to-end operator loop reliability (`missing`) -> close session start/objective declaration/receipt path consistency under live runtime conditions.
+3. Scope enforcement UI exposure (`missing`) -> close gap between backend deviation records and operator-visible actionable panel state.

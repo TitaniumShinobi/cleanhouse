@@ -14,33 +14,11 @@ import tempfile
 import json
 import plistlib
 import os
+import subprocess
 import time
+import urllib.request
 from pathlib import Path
 from unittest.mock import patch
-
-if "flask" not in sys.modules:
-    flask_stub = types.ModuleType("flask")
-
-    class _Blueprint:
-        def __init__(self, name, import_name):
-            self.name = name
-            self.import_name = import_name
-
-        def route(self, *args, **kwargs):
-            def decorator(func):
-                return func
-
-            return decorator
-
-        def after_request(self, func):
-            return func
-
-    flask_stub.Blueprint = _Blueprint
-    flask_stub.Response = lambda payload="", mimetype=None, **kwargs: {"payload": payload, "mimetype": mimetype, **kwargs}
-    flask_stub.jsonify = lambda obj=None, **kwargs: obj if obj is not None else kwargs
-    flask_stub.send_file = lambda path, mimetype=None, **kwargs: {"path": path, "mimetype": mimetype, **kwargs}
-    flask_stub.request = types.SimpleNamespace(args={}, headers={})
-    sys.modules["flask"] = flask_stub
 
 from backend.api.cleanhouse_monitoring import CleanHouseMonitoringAdapter
 from corefiles.collectors.command_observer import get_observer
@@ -119,16 +97,36 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         repo_root = Path(__file__).resolve().parents[1]
         html = (repo_root / "frontend" / "investigations.html").read_text(encoding="utf-8")
         js = (repo_root / "frontend" / "js" / "investigations.js").read_text(encoding="utf-8")
+        protected_js = (repo_root / "frontend" / "js" / "protected-routes.js").read_text(encoding="utf-8")
         css = (repo_root / "frontend" / "css" / "investigations.css").read_text(encoding="utf-8")
+        help_html = (repo_root / "frontend" / "help.html").read_text(encoding="utf-8")
         dashboard_html = (repo_root / "frontend" / "dashboard.html").read_text(encoding="utf-8")
         server_py = (repo_root / "backend" / "server.py").read_text(encoding="utf-8")
+        launcher_sh = (repo_root / "scripts" / "cleanhouse-up.sh").read_text(encoding="utf-8")
+        wrapper_py = (repo_root / "desktop" / "wrapper.py").read_text(encoding="utf-8")
         cleanhouse_py = (repo_root / "backend" / "api" / "cleanhouse.py").read_text(encoding="utf-8")
 
+        self.assertIn("@app.route('/overview')", server_py)
         self.assertIn("@app.route('/investigations')", server_py)
         self.assertIn("@app.route('/applications')", server_py)
         self.assertIn("@app.route('/network')", server_py)
         self.assertIn("@app.route('/files')", server_py)
         self.assertIn("@app.route('/custom-scan')", server_py)
+        self.assertIn("@app.route('/advanced')", server_py)
+        self.assertIn("@app.route('/help')", server_py)
+        self.assertIn("'/help'", protected_js)
+        self.assertIn("return redirect('/advanced', code=302)", server_py)
+        self.assertIn('URL="http://${HOST}:${PORT}/overview"', launcher_sh)
+        self.assertIn('cleanhouse_url("/overview")', wrapper_py)
+        self.assertNotIn('URL="http://localhost:${PORT}/dashboard"', launcher_sh)
+        self.assertIn("backend.runtime_supervisor", launcher_sh)
+        self.assertIn("PREFLIGHT_ARGS=(preflight", launcher_sh)
+        self.assertIn("refusing automatic restart", launcher_sh)
+        self.assertIn("backend.runtime_supervisor stop", launcher_sh)
+        self.assertIn("--acknowledge-self-deviation", launcher_sh)
+        self.assertIn("startup_preflight", (repo_root / "backend" / "runtime_supervisor.py").read_text(encoding="utf-8"))
+        self.assertNotIn("CLEANHOUSE_RUNTIME_ALLOW_AFTER_SELF_DEVIATION", launcher_sh)
+        self.assertIn('acknowledge_self_deviation', (repo_root / "backend" / "runtime_supervisor.py").read_text(encoding="utf-8"))
         self.assertIn('@bp.route("/cleanhouse/applications"', cleanhouse_py)
         self.assertIn('@bp.route("/cleanhouse/scan/system"', cleanhouse_py)
         self.assertIn('@bp.route("/cleanhouse/network/wireshark"', cleanhouse_py)
@@ -152,7 +150,19 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("Inside Applications", html)
         self.assertIn("Wireshark evidence engine", html)
         self.assertIn("Scan Network", html)
-        self.assertIn("Scan Files", html)
+        self.assertIn("Reconcile Files", html)
+        self.assertIn('id="files-mediation-toggle"', html)
+        self.assertIn('id="files-mediation-panel"', html)
+        self.assertIn('id="files-mediation-open-board"', html)
+        self.assertIn('aria-controls="files-mediation-board"', html)
+        self.assertIn('aria-expanded="false" title="Open full mediation board"', html)
+        self.assertIn('id="files-mediation-board"', html)
+        self.assertIn('data-testid="files-mediation-board" hidden inert', html)
+        self.assertIn('data-testid="files-mediation-column-queue"', html)
+        self.assertIn('data-testid="files-mediation-column-progress"', html)
+        self.assertIn('data-testid="files-mediation-column-ready"', html)
+        self.assertIn('data-testid="files-mediation-column-ledger"', html)
+        self.assertIn("Suggestions are optional until added to the queue.", html)
         self.assertIn("Select apps or filters", html)
         self.assertIn("Communication apps", html)
         self.assertIn('aria-label="Overview"', html)
@@ -175,15 +185,19 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn('aria-label="Applications"', html)
         self.assertIn('aria-label="Network"', html)
         self.assertIn('aria-label="Files"', html)
+        self.assertIn('aria-label="Help"', html)
+        self.assertIn('href="/help"', html)
+        self.assertIn('data-label="Help"', html)
         self.assertIn('aria-label="Advanced"', html)
         self.assertIn('data-label="Overview"', html)
         self.assertNotIn('title="Overview"', html)
         self.assertNotIn('title="Applications"', html)
         self.assertNotIn('title="Network"', html)
         self.assertNotIn('title="Files"', html)
+        self.assertNotIn('title="Help"', html)
         self.assertNotIn('title="Advanced"', html)
         self.assertNotIn('class="nav-link" href="#custom-scan"', html)
-        for first_screen_label in ("Incidents", "Reports", "History"):
+        for first_screen_label in ("Incidents",):
             self.assertNotIn(first_screen_label, html)
         self.assertNotIn("What do you want to check?", html)
         self.assertNotIn("Why is Terminal busy?", html)
@@ -215,6 +229,9 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("getRuntime", js)
         self.assertIn("customFilterMatch", js)
         self.assertIn("runApplicationInvestigation", js)
+        self.assertIn("setFilesMediationPanelOpen", js)
+        self.assertIn("setFilesMediationBoardOpen", js)
+        self.assertIn("syncFilesMediationView", js)
         self.assertIn("target: selectedApp.path", js)
         self.assertIn("evidence_artifact_path", js)
         self.assertIn("receipt_artifact_path", js)
@@ -224,6 +241,8 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("background: transparent", css)
         self.assertIn("box-shadow: none", css)
         self.assertIn(".nav-link.active::before", css)
+        self.assertIn(".sidebar-utility", css)
+        self.assertIn(".advanced-entry.active", css)
         self.assertIn("content: attr(data-label)", css)
         self.assertIn(".corner-actions", css)
         self.assertIn(".notification-center-button", css)
@@ -232,6 +251,10 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn(".route-context", css)
         self.assertIn(".notification-center-badge", css)
         self.assertIn(".sidebar-brand", css)
+        self.assertIn(".files-mediation-toggle", css)
+        self.assertIn(".files-mediation-panel", css)
+        self.assertIn(".files-mediation-board", css)
+        self.assertIn(".files-mediation-board__columns", css)
         self.assertNotIn("blur(28px) saturate(160%)", css)
         self.assertNotIn("grid-template-columns: 230px minmax(0, 1fr)", css)
         self.assertIn(".truth-panel", css)
@@ -252,12 +275,611 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertNotIn(".report-actions", css)
         self.assertNotIn(".history-list", css)
 
-        self.assertIn('href="/investigations"', dashboard_html)
-        self.assertIn('href="/dashboard" aria-label="Advanced"', html)
+        self.assertIn('href="/overview"', dashboard_html)
+        self.assertIn("CleanHouse Advanced Monitor", dashboard_html)
+        self.assertIn("<title>Help - CleanHouse</title>", help_html)
+        self.assertIn('aria-label="Help"', help_html)
+        self.assertIn('class="advanced-entry active" href="/help"', help_html)
+        self.assertIn("Clean restart ladder", help_html)
+        self.assertIn("Request Help", help_html)
+        self.assertIn('href="/advanced" aria-label="Advanced"', html)
+        self.assertNotIn("CleanHouse Local Monitor", dashboard_html)
         self.assertNotIn("QPB Action Queue", html)
         self.assertNotIn("Runtime Spine", html)
         self.assertNotIn("Collector Manifest", html)
         self.assertNotIn("Mediator Queue", html)
+
+    def test_files_mediation_shell_matches_code_transition_contract(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        html = (repo_root / "frontend" / "investigations.html").read_text(encoding="utf-8")
+        js = (repo_root / "frontend" / "js" / "investigations.js").read_text(encoding="utf-8")
+        css = (repo_root / "frontend" / "css" / "investigations.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="files-mediation-toggle"', html)
+        self.assertIn('aria-controls="files-mediation-panel"', html)
+        self.assertGreater(html.index('id="files-mediation-toggle"'), html.index('</main>'))
+        self.assertLess(html.index('id="files-mediation-toggle"'), html.index('id="files-mediation-panel"'))
+        self.assertIn('id="files-mediation-panel"', html)
+        self.assertIn('id="files-mediation-open-board"', html)
+        self.assertIn('id="files-mediation-board"', html)
+        self.assertIn('id="files-mediation-close-board"', html)
+        for column in ("queue", "progress", "ready", "ledger"):
+            self.assertIn(f'data-testid="files-mediation-column-{column}"', html)
+        self.assertIn("Suggestions are optional until added to the queue.", html)
+        self.assertNotIn("No mediations in progress", html)
+        self.assertNotIn("No mediations ready for review", html)
+        self.assertNotIn("No mediation history", html)
+        self.assertIn('id="files-mediation-composer"', html)
+        self.assertIn('id="files-mediation-request"', html)
+        self.assertIn('id="files-mediation-add-evidence"', html)
+        self.assertIn('id="files-mediation-scope"', html)
+        self.assertIn('id="files-mediation-submit"', html)
+        self.assertIn('id="files-mediation-panel-composer"', html)
+        self.assertIn('id="files-mediation-panel-request"', html)
+        self.assertIn('id="files-mediation-panel-add-evidence"', html)
+        self.assertIn('id="files-mediation-panel-scope"', html)
+        self.assertIn('id="files-mediation-panel-submit"', html)
+        self.assertEqual(html.count("data-mediation-composer"), 2)
+        self.assertNotIn('data-mediation-suggestion="Reconcile current file evidence"', html)
+        self.assertNotIn("data-mediation-demo", html)
+        quick_panel_html = html.split('id="files-mediation-panel"', 1)[1].split('id="files-mediation-board"', 1)[0]
+        self.assertIn('class="files-mediation-summary"', quick_panel_html)
+        self.assertNotIn("files-mediation-panel__section", quick_panel_html)
+        self.assertNotIn("Recent ledger", quick_panel_html)
+        queue_lane_html = html.split('data-testid="files-mediation-column-queue"', 1)[1].split('data-testid="files-mediation-column-progress"', 1)[0]
+        ledger_lane_html = html.split('data-testid="files-mediation-column-ledger"', 1)[1].split('</section>', 1)[0]
+        self.assertIn('class="files-mediation-summary"', queue_lane_html)
+        self.assertIn('id="files-mediation-composer"', queue_lane_html)
+        self.assertIn('id="files-mediation-search"', ledger_lane_html)
+
+        self.assertIn("function setFilesMediationPanelOpen", js)
+        self.assertIn("function setFilesMediationBoardOpen", js)
+        self.assertIn("function syncFilesMediationView", js)
+        self.assertIn("function handleFilesMediationOutsideClick", js)
+        self.assertIn("board.hidden = !nextOpen", js)
+        self.assertIn("board.inert = !nextOpen", js)
+        self.assertIn("panel.inert = !panelInteractive", js)
+        self.assertIn("panel.contains(document.activeElement)", js)
+        self.assertIn("board.contains(document.activeElement)", js)
+        self.assertIn("if (filesMediationBoardOpen)", js)
+        self.assertIn("if (nextOpen && actionSidebarOpen)", js)
+        self.assertIn("if (nextOpen && filesMediationBoardOpen)", js)
+        self.assertIn("handleFilesMediationOutsideClick(event)", js)
+        self.assertIn("function renderFilesMediationQueue", js)
+        self.assertIn("function selectFilesMediationSuggestion", js)
+        self.assertIn("function queueFilesMediationRequest", js)
+        self.assertIn("function syncFilesMediationComposers", js)
+        self.assertIn("let filesMediationDraft = ''", js)
+        self.assertIn("(event.metaKey || event.ctrlKey) && event.key === 'Enter'", js)
+
+        self.assertIn(".files-mediation-toggle", css)
+        self.assertIn("left: calc(82px + max(0px, (100vw - 1390px) / 2))", css)
+        self.assertIn("bottom: 26px", css)
+        self.assertIn(".files-mediation-panel.is-open", css)
+        mediation_panel_css = css.split(".files-mediation-panel {", 1)[1].split("}", 1)[0]
+        control_panel_css = css.split(".action-sidebar {", 1)[1].split("}", 1)[0]
+        for shared_rule in (
+            "top: 96px",
+            "bottom: 76px",
+            "height: calc(100vh - 176px)",
+            "width: min(360px, calc(100vw - 42px))",
+            "border-radius: 12px",
+            "box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42)",
+            "transition: opacity 160ms ease, transform 160ms ease",
+        ):
+            self.assertIn(shared_rule, mediation_panel_css)
+            self.assertIn(shared_rule, control_panel_css)
+        self.assertIn("transform: translateX(calc(-100% - 36px))", mediation_panel_css)
+        self.assertNotIn("body.files-mediation-panel-open .main-canvas", css)
+        self.assertIn(".files-mediation-board", css)
+        mediation_board_css = css.split(".files-mediation-board {", 1)[1].split("}", 1)[0]
+        self.assertIn("--mediation-surface: linear-gradient", css)
+        self.assertIn("--mediation-board-surface: linear-gradient", css)
+        uniform_mediation_surface = "linear-gradient(180deg, rgba(22, 25, 31, 0.96) 0%, rgba(22, 25, 31, 0.96) 68%, rgba(0, 0, 0, 0.96) 100%)"
+        self.assertIn(f"--mediation-surface: {uniform_mediation_surface}", css)
+        self.assertIn(f"--mediation-board-surface: {uniform_mediation_surface}", css)
+        self.assertIn("background: var(--mediation-surface)", mediation_panel_css)
+        self.assertIn("background: var(--mediation-board-surface)", mediation_board_css)
+        self.assertIn("backdrop-filter: blur(12px) saturate(108%)", mediation_panel_css)
+        self.assertIn("backdrop-filter: blur(6px) saturate(106%)", mediation_board_css)
+        for floating_rule in (
+            "top: 96px",
+            "right: 24px",
+            "bottom: 76px",
+            "left: calc(82px + max(0px, (100vw - 1390px) / 2))",
+            "border-radius: 12px",
+            "box-shadow: 0 24px 70px rgba(0, 0, 0, 0.42)",
+        ):
+            self.assertIn(floating_rule, mediation_board_css)
+        self.assertNotIn("inset: 0", mediation_board_css)
+        self.assertNotIn("animation:", mediation_board_css)
+        self.assertNotIn("@keyframes files-mediation-board-enter", css)
+        self.assertIn("grid-template-columns: 358px repeat(3, minmax(0, 1fr))", css)
+        self.assertIn(".files-mediation-column + .files-mediation-column", css)
+        self.assertIn(".files-mediation-composer", css)
+        self.assertIn(".files-mediation-composer--panel", css)
+        self.assertIn(".files-mediation-suggestions", css)
+        self.assertNotIn(".files-mediation-panel__section", css)
+        self.assertNotIn(".files-mediation-panel__suggestions", css)
+
+    def test_files_mediation_board_is_quick_panel_extension(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        html = (repo_root / "frontend" / "investigations.html").read_text(encoding="utf-8")
+        css = (repo_root / "frontend" / "css" / "investigations.css").read_text(encoding="utf-8")
+
+        board_html = html.split('id="files-mediation-board"', 1)[1].split('id="action-sidebar"', 1)[0]
+        queue_lane_html = board_html.split('data-testid="files-mediation-column-queue"', 1)[1].split('data-testid="files-mediation-column-progress"', 1)[0]
+        ledger_lane_html = board_html.split('data-testid="files-mediation-column-ledger"', 1)[1].split('</section>', 1)[0]
+
+        self.assertEqual(board_html.count('data-testid="files-mediation-column-'), 4)
+        self.assertIn('class="files-mediation-summary"', queue_lane_html)
+        self.assertIn('files-mediation-composer--panel', queue_lane_html)
+        self.assertIn('id="files-mediation-search"', ledger_lane_html)
+        self.assertNotIn("files-mediation-board__filters", board_html)
+        self.assertNotIn("No mediation", board_html)
+        self.assertIn("grid-template-columns: 358px repeat(3, minmax(0, 1fr))", css)
+        self.assertIn(".files-mediation-column + .files-mediation-column", css)
+        self.assertIn("height: calc(100vh - 176px)", css.split(".files-mediation-board {", 1)[1].split("}", 1)[0])
+
+    def test_files_lineage_tabs_render_from_current_file_evidence(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        html = (repo_root / "frontend" / "investigations.html").read_text(encoding="utf-8")
+        js = (repo_root / "frontend" / "js" / "investigations.js").read_text(encoding="utf-8")
+        css = (repo_root / "frontend" / "css" / "investigations.css").read_text(encoding="utf-8")
+
+        self.assertIn('role="tablist" aria-label="File lineage views"', html)
+        for view in ("changes", "findings", "integrity", "locations", "timeline"):
+            self.assertIn(f'id="files-tab-{view}"', html)
+            self.assertIn(f'data-files-view="{view}"', html)
+        self.assertIn('id="files-search"', html)
+        self.assertIn('id="reconcile-files-btn" class="files-refresh-pill"', html)
+        self.assertNotIn('id="files-watched-locations"', html)
+
+        self.assertIn("function filteredFileEvents", js)
+        self.assertIn("function renderFileChanges", js)
+        self.assertIn("function renderFileFindings", js)
+        self.assertIn("function renderFileIntegrity", js)
+        self.assertIn("function renderFileLocations", js)
+        self.assertIn("function renderFileTimeline", js)
+        self.assertIn("function selectFilesView", js)
+        self.assertIn("filesSearchQuery = String(event.target?.value || '')", js)
+        self.assertIn("selectFilesView(filesTabs[nextIndex].dataset.filesView", js)
+        self.assertIn("<th>Time</th><th>Change</th><th>File</th><th>Actor</th><th>Source</th>", js)
+        self.assertNotIn("<th>Location</th>", js)
+        self.assertNotIn("<th>Status</th>", js)
+        self.assertNotIn("files-row-status", js)
+
+        self.assertIn(".files-display-controls", css)
+        self.assertIn(".files-table-wrap", css)
+        self.assertIn("overflow-wrap: anywhere", css.split(".files-table td small {", 1)[1].split("}", 1)[0])
+        self.assertIn("white-space: normal", css.split(".files-table td small {", 1)[1].split("}", 1)[0])
+        self.assertIn(".files-integrity-summary", css)
+        self.assertIn(".files-location-row", css)
+        self.assertIn(".files-timeline", css)
+
+    def test_cleanhouse_launcher_refuses_open_self_deviation_without_starting(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as home_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
+            evidence_path = Path(home_tmp) / "evidence.json"
+            receipt_path = Path(home_tmp) / "receipt.json"
+            evidence_path.write_text("{}", encoding="utf-8")
+            receipt_path.write_text("{}", encoding="utf-8")
+            fake_python = Path(home_tmp) / "fake-python"
+            calls_path = Path(home_tmp) / "calls.log"
+            fake_python.write_text(f"""#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+calls = Path(__file__).with_name("calls.log")
+with calls.open("a", encoding="utf-8") as handle:
+    handle.write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:2] == ["-"]:
+    source = sys.stdin.read()
+    sys.argv = sys.argv[1:]
+    exec(compile(source, "<stdin>", "exec"))
+if sys.argv[1:4] == ["-m", "backend.runtime_env", "print-path"]:
+    print(__file__)
+    raise SystemExit(0)
+if sys.argv[1:4] == ["-m", "backend.runtime_supervisor", "preflight"]:
+    print(json.dumps({{
+        "schema": "cleanhouse.runtime_startup_preflight.v1",
+        "status": "blocked_self_deviation",
+        "should_start": False,
+        "self_deviation": {{
+            "id": "runtime_self_deviation:test",
+            "status": "open",
+            "finding": {{"title": "CleanHouse became the suspicious process"}},
+            "next_action": "Review evidence before restart.",
+            "evidence_artifact_path": {str(evidence_path)!r},
+            "receipt_artifact_path": {str(receipt_path)!r},
+        }},
+        "next_action": "Resolve the current CleanHouse port/process condition, then try cleanhouse again.",
+    }}))
+    raise SystemExit(1)
+raise SystemExit(1)
+""", encoding="utf-8")
+            fake_python.chmod(0o755)
+            env = {
+                **os.environ,
+                "HOME": home_tmp,
+                "CLEANHOUSE_RUNTIME_DIR": runtime_tmp,
+                "CLEANHOUSE_OPEN_BROWSER": "0",
+                "CLEANHOUSE_PORT": "45555",
+                "CLEANHOUSE_PYTHON": str(fake_python),
+                "PYTHONPATH": str(repo_root),
+            }
+            result = subprocess.run(
+                ["/bin/bash", str(repo_root / "scripts" / "cleanhouse-up.sh")],
+                cwd=str(repo_root),
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            calls = calls_path.read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("current runtime state is unsafe; refusing automatic restart", result.stderr)
+        self.assertIn("CleanHouse became the suspicious process", result.stderr)
+        self.assertIn(str(evidence_path), result.stderr)
+        self.assertIn(str(receipt_path), result.stderr)
+        self.assertIn("backend.runtime_supervisor preflight", calls)
+        self.assertNotIn("backend.launch_agent install", calls)
+        self.assertNotIn("backend.runtime_supervisor start", calls)
+        self.assertNotIn("/dashboard", result.stdout + result.stderr)
+        self.assertNotIn("cleanhouse is running", result.stdout + result.stderr)
+
+    def test_cleanhouse_launcher_does_not_refuse_recoverable_self_deviation(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as home_tmp:
+            fake_python = Path(home_tmp) / "fake-python"
+            calls_path = Path(home_tmp) / "calls.log"
+            fake_python.write_text("""#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+calls = Path(__file__).with_name("calls.log")
+calls.write_text(calls.read_text() + " ".join(sys.argv[1:]) + "\\n" if calls.exists() else " ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:4] == ["-m", "backend.runtime_env", "print-path"]:
+    print(__file__)
+    raise SystemExit(0)
+if sys.argv[1:3] == ["-m", "backend.runtime_supervisor"] and len(sys.argv) > 3 and sys.argv[3] == "preflight":
+    print(json.dumps({
+        "schema": "cleanhouse.runtime_startup_preflight.v1",
+        "status": "ready_to_start",
+        "should_start": True,
+        "startup_warning": {
+            "type": "recoverable_self_deviation",
+            "self_deviation": {"id": "runtime_self_deviation:soft"}
+        }
+    }))
+    raise SystemExit(0)
+if sys.argv[1:3] == ["-m", "backend.runtime_supervisor"] and len(sys.argv) > 3 and sys.argv[3] == "start":
+    print(json.dumps({"runtime_state": "unhealthy", "reason_codes": ["test_start_failed"]}))
+    raise SystemExit(1)
+if sys.argv[1:3] == ["-m", "backend.launch_agent"] and len(sys.argv) > 3 and sys.argv[3] == "install":
+    print(json.dumps({"status": "error", "message": "test install stopped before lifecycle"}))
+    raise SystemExit(1)
+raise SystemExit(1)
+""", encoding="utf-8")
+            fake_python.chmod(0o755)
+            env = {
+                **os.environ,
+                "HOME": home_tmp,
+                "CLEANHOUSE_RUNTIME_DIR": str(Path(home_tmp) / "runtime"),
+                "CLEANHOUSE_OPEN_BROWSER": "0",
+                "CLEANHOUSE_PORT": "45556",
+                "CLEANHOUSE_PYTHON": str(fake_python),
+                "PYTHONPATH": str(repo_root),
+            }
+            result = subprocess.run(
+                ["/bin/bash", str(repo_root / "scripts" / "cleanhouse-up.sh")],
+                cwd=str(repo_root),
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            calls = calls_path.read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("backend.runtime_supervisor preflight", calls)
+        lifecycle_calls = [
+            line for line in calls.splitlines()
+            if "backend.runtime_supervisor start" in line or "backend.launch_agent install" in line
+        ]
+        self.assertEqual(len(lifecycle_calls), 1)
+        if sys.platform == "darwin":
+            self.assertIn("backend.launch_agent install", lifecycle_calls[0])
+        else:
+            self.assertIn("backend.runtime_supervisor start", lifecycle_calls[0])
+        self.assertNotIn("runtime self-deviation is open; refusing automatic restart", result.stderr)
+        self.assertNotIn("Previous CleanHouse self-deviation evidence", result.stderr)
+        self.assertNotIn("Finding: CleanHouse became the suspicious process", result.stderr)
+        self.assertNotIn("To try again after reviewing evidence", result.stderr)
+        self.assertNotIn("/dashboard", result.stdout + result.stderr)
+
+    def test_cleanhouse_launcher_darwin_readiness_failure_never_unloads_launch_agent(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as home_tmp:
+            fake_python = Path(home_tmp) / "fake-python"
+            fake_bin = Path(home_tmp) / "bin"
+            fake_bin.mkdir()
+            fake_uname = fake_bin / "uname"
+            fake_uname.write_text("#!/bin/sh\necho Darwin\n", encoding="utf-8")
+            fake_uname.chmod(0o755)
+            calls_path = Path(home_tmp) / "calls.log"
+            evidence_path = Path(home_tmp) / "evidence.json"
+            receipt_path = Path(home_tmp) / "receipt.json"
+            evidence_path.write_text("{}", encoding="utf-8")
+            receipt_path.write_text("{}", encoding="utf-8")
+            fake_python.write_text(f"""#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+calls = Path(__file__).with_name("calls.log")
+calls.write_text(calls.read_text() + " ".join(sys.argv[1:]) + "\\n" if calls.exists() else " ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:4] == ["-m", "backend.runtime_env", "print-path"]:
+    print(__file__)
+    raise SystemExit(0)
+if sys.argv[1:3] == ["-m", "backend.runtime_supervisor"] and len(sys.argv) > 3 and sys.argv[3] == "preflight":
+    print(json.dumps({{
+        "schema": "cleanhouse.runtime_startup_preflight.v1",
+        "status": "ready_to_start",
+        "should_start": True
+    }}))
+    raise SystemExit(0)
+if sys.argv[1:3] == ["-m", "backend.launch_agent"] and len(sys.argv) > 3 and sys.argv[3] == "install":
+    print(json.dumps({{
+        "status": "ok",
+        "loaded": True,
+        "runtime_root": "/tmp/fixture-runtime",
+    }}))
+    raise SystemExit(0)
+if sys.argv[1:3] == ["-m", "backend.launch_agent"] and len(sys.argv) > 3 and sys.argv[3] == "stop":
+    print(json.dumps({{"status": "ok", "loaded": False}}))
+    raise SystemExit(0)
+if len(sys.argv) > 2 and sys.argv[1] == "-":
+    target = sys.argv[2]
+    if "/cleanhouse/status?ready=1" in target:
+        if len(sys.argv) > 4 and sys.argv[4] == "1":
+            print("Canonical readiness contract was not satisfied.", file=sys.stderr)
+            print("Failed checks: ['heartbeat_fresh']", file=sys.stderr)
+        print(json.dumps({{
+            "status": "ok",
+            "ready": True,
+            "runtime_state": "healthy",
+            "reason_codes": ["operator_readiness_heartbeat_fresh"],
+            "readiness_contract": {{
+                "schema": "cleanhouse.runtime_operator_readiness.v1",
+                "satisfied": False,
+                "checks": {{"runtime_healthy": True}},
+                "failed_checks": ["heartbeat_fresh"],
+            }},
+        }}))
+        raise SystemExit(1)
+raise SystemExit(1)
+""", encoding="utf-8")
+            fake_python.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                "HOME": home_tmp,
+                "CLEANHOUSE_RUNTIME_DIR": str(Path(home_tmp) / "runtime"),
+                "CLEANHOUSE_OPEN_BROWSER": "0",
+                "CLEANHOUSE_STARTUP_TIMEOUT_SECONDS": "1",
+                "CLEANHOUSE_PORT": "45557",
+                "CLEANHOUSE_PYTHON": str(fake_python),
+                "PYTHONPATH": str(repo_root),
+            }
+            result = subprocess.run(
+                ["/bin/bash", str(repo_root / "scripts" / "cleanhouse-up.sh")],
+                cwd=str(repo_root),
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            calls = calls_path.read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("backend.launch_agent install", calls)
+        self.assertNotIn("backend.launch_agent stop", calls)
+        self.assertIn("readiness endpoint unavailable", result.stderr)
+        self.assertIn("Canonical readiness contract was not satisfied", result.stderr)
+        self.assertIn("heartbeat_fresh", result.stderr)
+        self.assertNotIn("cleanhouse is running", result.stdout + result.stderr)
+
+    def test_cleanhouse_launcher_non_darwin_ignores_historical_spawn_metadata_on_readiness_failure(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as home_tmp:
+            fake_python = Path(home_tmp) / "fake-python"
+            fake_bin = Path(home_tmp) / "bin"
+            fake_bin.mkdir()
+            fake_uname = fake_bin / "uname"
+            fake_uname.write_text("#!/bin/sh\necho Linux\n", encoding="utf-8")
+            fake_uname.chmod(0o755)
+            calls_path = Path(home_tmp) / "calls.log"
+            fake_python.write_text("""#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+calls = Path(__file__).with_name("calls.log")
+calls.write_text(calls.read_text() + " ".join(sys.argv[1:]) + "\\n" if calls.exists() else " ".join(sys.argv[1:]) + "\\n")
+if sys.argv[1:4] == ["-m", "backend.runtime_env", "print-path"]:
+    print(__file__)
+    raise SystemExit(0)
+if sys.argv[1:3] == ["-m", "backend.runtime_supervisor"] and len(sys.argv) > 3 and sys.argv[3] == "preflight":
+    print(json.dumps({
+        "schema": "cleanhouse.runtime_startup_preflight.v1",
+        "status": "ready_to_start",
+        "should_start": True
+    }))
+    raise SystemExit(0)
+if sys.argv[1:3] == ["-m", "backend.runtime_supervisor"] and len(sys.argv) > 3 and sys.argv[3] == "start":
+    print(json.dumps({
+        "runtime_state": "healthy",
+        "operator_ready": True,
+        "last_start_attempt": {"status": "spawned", "supervisor_pid": 100},
+    }))
+    raise SystemExit(0)
+if sys.argv[1:3] == ["-m", "backend.runtime_supervisor"] and len(sys.argv) > 3 and sys.argv[3] == "stop":
+    print(json.dumps({"runtime_state": "unhealthy", "reason_codes": ["runtime_stop_requested"]}))
+    raise SystemExit(0)
+if len(sys.argv) > 2 and sys.argv[1] == "-":
+    target = sys.argv[2]
+    if "/cleanhouse/status?ready=1" in target:
+        raise SystemExit(1)
+raise SystemExit(1)
+""", encoding="utf-8")
+            fake_python.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+                "HOME": home_tmp,
+                "CLEANHOUSE_RUNTIME_DIR": str(Path(home_tmp) / "runtime"),
+                "CLEANHOUSE_OPEN_BROWSER": "0",
+                "CLEANHOUSE_STARTUP_TIMEOUT_SECONDS": "1",
+                "CLEANHOUSE_PORT": "45558",
+                "CLEANHOUSE_PYTHON": str(fake_python),
+                "PYTHONPATH": str(repo_root),
+            }
+            result = subprocess.run(
+                ["/bin/bash", str(repo_root / "scripts" / "cleanhouse-up.sh")],
+                cwd=str(repo_root),
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            calls = calls_path.read_text(encoding="utf-8")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("backend.runtime_supervisor start", calls)
+        self.assertNotIn("backend.runtime_supervisor stop", calls)
+        self.assertIn("readiness endpoint unavailable", result.stderr)
+        self.assertNotIn("cleanhouse is running", result.stdout + result.stderr)
+
+    def test_cleanhouse_bootstrap_reaches_ready_within_five_seconds(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        port = 45678
+        with tempfile.TemporaryDirectory() as home_tmp, tempfile.TemporaryDirectory() as runtime_tmp:
+            runtime_dir = Path(runtime_tmp)
+            stdout_path = runtime_dir / "server.stdout.log"
+            stderr_path = runtime_dir / "server.stderr.log"
+            stdout_handle = stdout_path.open("w", encoding="utf-8")
+            stderr_handle = stderr_path.open("w", encoding="utf-8")
+            env = {
+                **os.environ,
+                "HOME": home_tmp,
+                "CLEANHOUSE_RUNTIME_DIR": runtime_tmp,
+                "CLEANHOUSE_EVENTS_DB": str(runtime_dir / "events" / "events.db"),
+                "CLEANHOUSE_OPEN_BROWSER": "0",
+                "CLEANHOUSE_ENABLE_AUTH": "0",
+                "CLEANHOUSE_REQUIRE_LOGIN": "0",
+                "CLEANHOUSE_NETWORK_HISTORY_ENABLED": "0",
+                "CLEANHOUSE_HOST": "127.0.0.1",
+                "CLEANHOUSE_PORT": str(port),
+                "PYTHONPATH": str(repo_root),
+            }
+            proc = subprocess.Popen(
+                [sys.executable, str(repo_root / "backend" / "server.py")],
+                cwd=str(repo_root),
+                env=env,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                text=True,
+            )
+            stdout = ""
+            stderr = ""
+            ready_payload = None
+            runtime_payload = None
+            start = time.monotonic()
+            deadline = start + 5.0
+            try:
+                while time.monotonic() < deadline:
+                    if proc.poll() is not None:
+                        proc.wait(timeout=1)
+                        stdout = stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else ""
+                        stderr = stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else ""
+                        self.fail(f"CleanHouse exited before readiness: rc={proc.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+                    try:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/cleanhouse/status?ready=1", timeout=0.5) as response:
+                            ready_payload = json.loads(response.read().decode("utf-8") or "{}")
+                        if ready_payload.get("ready") is True:
+                            with urllib.request.urlopen(f"http://127.0.0.1:{port}/cleanhouse/runtime", timeout=0.5) as response:
+                                runtime_payload = json.loads(response.read().decode("utf-8") or "{}")
+                            break
+                    except Exception:
+                        time.sleep(0.1)
+                elapsed = time.monotonic() - start
+                self.assertIsNotNone(ready_payload, msg=f"No readiness payload observed within 5s; rc={proc.returncode}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+                self.assertTrue(ready_payload.get("ready"), msg=f"Readiness never became true; payload={ready_payload}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}")
+                self.assertLess(elapsed, 5.0)
+                self.assertIsInstance(runtime_payload, dict)
+                self.assertTrue(runtime_payload.get("operator_ready"))
+                self.assertIn(runtime_payload.get("startup", {}).get("phase"), {"bootstrap_ready", "warming", "warm", "degraded", "booting"})
+            finally:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                stdout_handle.close()
+                stderr_handle.close()
+                stdout = stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else stdout
+                stderr = stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else stderr
+
+    def test_runtime_status_allows_new_backend_before_first_heartbeat_without_probe(self):
+        from backend import runtime_supervisor
+
+        repo_root = Path(__file__).resolve().parents[1]
+        previous = {
+            "backend_pid": 123,
+            "supervisor_pid": 456,
+            "heartbeat_at": None,
+            "heartbeat_sequence": 0,
+        }
+
+        def pid_alive(pid):
+            try:
+                return int(pid) in {123, 456}
+            except (TypeError, ValueError):
+                return False
+
+        with patch.object(runtime_supervisor, "listener_pids", return_value=[123]), patch.object(
+            runtime_supervisor,
+            "_pid_alive",
+            side_effect=pid_alive,
+        ), patch.object(
+            runtime_supervisor,
+            "_pid_info",
+            return_value={
+                "pid": 123,
+                "alive": True,
+                "command": str(repo_root / "backend" / "server.py"),
+                "cwd": str(repo_root),
+            },
+        ), patch.object(
+            runtime_supervisor,
+            "_pid_resource_usage",
+            return_value={"status": "observed", "pid": 123, "rss_mb": 100.0, "cpu_percent": 0.0},
+        ):
+            state = runtime_supervisor.classify_state(previous, host="localhost", port=3333, probe=False)
+
+        self.assertEqual(state["runtime_state"], "healthy")
+        self.assertTrue(state["backend_alive"])
+        self.assertEqual(state["resource_guard"]["status"], "ok")
+        self.assertNotIn("listener_not_ready", state["reason_codes"])
 
     def test_application_inventory_auto_adopts_apps_with_badge_contract(self):
         from backend.api import cleanhouse as cleanhouse_module
@@ -447,6 +1069,32 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertEqual(evidence_payload["comparison_result"], "Investigation Timeout")
         self.assertEqual(receipt_payload["id"], report["self_deviation"]["id"])
 
+    def test_application_investigation_allows_historical_self_deviation(self):
+        from backend import runtime_supervisor
+        from backend.api import cleanhouse as cleanhouse_module
+
+        runtime_payload = {
+            "runtime_state": "unhealthy",
+            "reason_codes": ["runtime_stuck_watchdog"],
+            "backend": {"alive": False},
+            "supervisor": {"alive": False},
+            "blocked_recovery": {"type": "runtime_stuck_watchdog"},
+            "self_deviation": {
+                "id": "runtime_self_deviation:history",
+                "status": "open",
+                "review_status": "needs_review",
+                "runtime_impact": "historical_record",
+                "blocks_investigations": False,
+            },
+        }
+        with patch.object(runtime_supervisor, "current_runtime_payload", return_value=runtime_payload), patch.object(
+            cleanhouse_module, "run_application_investigation", return_value={"status": "ok", "summary": "ran"}
+        ):
+            report = cleanhouse_module.run_application_investigation_with_timeout({"target": "terminal"})
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["summary"], "ran")
+
     def test_official_signup_uses_cleanhouse_auth_canon(self):
         repo_root = Path(__file__).resolve().parents[1]
         auth_root = repo_root.parent / "auth"
@@ -508,6 +1156,7 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertIn("/legal/terms", simple_webview_auth)
         self.assertIn("/legal/privacy", simple_webview_auth)
         self.assertIn("/legal/eeccd", simple_webview_auth)
+        self.assertIn("'/health'", server_py)
         self.assertIn("turnstileToken", simple_webview_auth)
         self.assertNotIn("Turnstile disabled", simple_webview_auth)
         self.assertNotIn("AI-friendly signup", simple_webview_auth)
@@ -1105,9 +1754,18 @@ class CleanHouseIntegrationTests(unittest.TestCase):
             def scan_dns_queries(self):
                 pass
 
+        empty_anomalies = {
+            "status": "safe",
+            "issues": [],
+            "data": {},
+        }
         with patch(
             "backend.api.cleanhouse_monitoring.DataFlowTracer",
             FailingDataFlowTracerStub,
+        ), patch.object(
+            adapter,
+            "_collect_anomalies",
+            return_value=empty_anomalies,
         ):
             status = adapter.get_status(refresh=True)
 
@@ -1232,3 +1890,76 @@ class CleanHouseIntegrationTests(unittest.TestCase):
         self.assertGreaterEqual(alert["confidence"], 0.0)
         self.assertLessEqual(alert["confidence"], 1.0)
         self._assert_local_evidence(alert["evidence_refs"])
+
+    def test_zaelith_manual_audit_ui_routes_to_report_ledger(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        zaelith_html = (repo_root / "frontend" / "zaelith.html").read_text(encoding="utf-8")
+        zaelith_js = (repo_root / "frontend" / "js" / "zaelith.js").read_text(encoding="utf-8")
+        product_css = (repo_root / "frontend" / "css" / "product-pages.css").read_text(encoding="utf-8")
+        investigations_css = (repo_root / "frontend" / "css" / "investigations.css").read_text(encoding="utf-8")
+        reports_html = (repo_root / "frontend" / "reports.html").read_text(encoding="utf-8")
+        reports_js = (repo_root / "frontend" / "js" / "reports.js").read_text(encoding="utf-8")
+        server_py = (repo_root / "backend" / "server.py").read_text(encoding="utf-8")
+
+        self.assertIn("zaelith-monitor-stage", zaelith_html)
+        self.assertIn("Connect Provider", zaelith_html)
+        self.assertNotIn("zaelith-stage-icon", zaelith_html)
+        self.assertIn("zaelith-notification-btn", zaelith_html)
+        self.assertIn("zaelith-composer-row", zaelith_html)
+        self.assertIn("data-testid=\"zaelith-message-input\"", zaelith_html)
+        self.assertIn("placeholder=\"Not-A-Lie Detector\"", zaelith_html)
+        self.assertIn("class=\"notification-center-button\"", zaelith_html)
+        self.assertIn("class=\"zaelith-message-pair\" hidden", zaelith_html)
+        self.assertNotIn("zaelith-composer-footer", zaelith_html)
+        self.assertNotIn(">Ready</span>", zaelith_html)
+        dock_block = product_css.split(".zaelith-composer-dock {", 1)[1].split("}", 1)[0]
+        self.assertNotIn("background:", dock_block)
+        self.assertNotIn("box-shadow:", dock_block)
+        self.assertNotIn("border:", dock_block)
+        for css in (product_css, investigations_css):
+            shell_block = css.split(".app-shell {", 1)[1].split("}", 1)[0]
+            body_block = css.split("}\n\nbody {\n", 1)[1].split("}", 1)[0]
+            self.assertIn("overflow: hidden", body_block)
+            self.assertIn("height: 100vh", shell_block)
+            self.assertIn("overflow: hidden", shell_block)
+        self.assertIn("overflow: auto", product_css.split(".page-canvas {", 1)[1].split("}", 1)[0])
+        self.assertIn("overflow: auto", investigations_css.split(".main-canvas {", 1)[1].split("}", 1)[0])
+        self.assertIn("href=\"/zaelith/connect\"", zaelith_html)
+        self.assertIn("@app.route('/zaelith/connect')", server_py)
+        self.assertIn("window.location.replace(`/reports?source=zaelith&open=", zaelith_js)
+        self.assertIn("zaelith_audit", reports_html)
+        self.assertIn("params.get('source') === 'zaelith'", reports_js)
+
+        adapter = CleanHouseMonitoringAdapter(cache_ttl_seconds=0.0)
+        long_text = "Model response. " * 80
+        report = adapter.build_zaelith_report(
+            analysis={
+                "risk_level": "medium",
+                "summary": {
+                    "grade": "Review",
+                    "analysis_confidence": "high",
+                    "triggered_indicators": 2,
+                    "total_indicators": 7,
+                },
+                "zaelith_report": {
+                    "patronization": {"triggered": True, "evidence": ["obviously"]},
+                    "drift": {"triggered": True, "evidence": ["topic shift"]},
+                },
+            },
+            prompt="Manual Zaelith conversation audit",
+            response=long_text,
+            source="zaelith-page",
+        )
+
+        self.assertEqual(report["status"], "ok")
+        self.assertEqual(report["report_type"], "zaelith_audit")
+        self.assertFalse(report["receipt"]["metadata"]["full_text_retained"])
+        self.assertLess(len(report["receipt"]["metadata"]["response_preview"]), len(long_text))
+        ledger = adapter.get_reports(report_type="zaelith_audit", summary_only=True)
+        self.assertEqual(ledger["count"], 1)
+        self.assertEqual(ledger["reports"][0]["id"], report["id"])
+
+    def test_health_route_is_public_for_readiness_probes(self):
+        repo_root = Path(__file__).resolve().parents[1]
+        server_py = (repo_root / "backend" / "server.py").read_text(encoding="utf-8")
+        self.assertIn("'/health'", server_py)

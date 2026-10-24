@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from models import UserService, DatabaseManager
 from backend import auth_runtime_config
 from backend.auth_recovery import issue_recovery, consume_recovery, deliver_recovery
-from backend.auth_email import deliver_auth_email
+from backend.auth_email import deliver_auth_email, email_delivery_available
+from backend.auth_mfa import CleanHouseMFA, MfaError
 from backend import auth_context
 from backend.auth_context import (
     DEVICE_COOKIE,
@@ -56,6 +57,44 @@ _magic_rate_lock = threading.Lock()
 _magic_rate_events: Dict[str, list[int]] = {}
 _login_rate_lock = threading.Lock()
 _login_rate_events: Dict[str, list[int]] = {}
+_mfa_service = None
+_mfa_path = None
+
+
+def _oauth_avatar_url(provider: str, value: Any) -> str:
+    """Keep only bounded HTTPS image URLs from the expected provider host."""
+    if not isinstance(value, str):
+        return ''
+    url = value.strip()
+    if not url or len(url) > 2048:
+        return ''
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return ''
+    host = (parsed.hostname or '').lower()
+    allowed = (provider == 'google' and host.endswith('.googleusercontent.com')) or (
+        provider == 'github' and host == 'avatars.githubusercontent.com'
+    )
+    if parsed.scheme != 'https' or not allowed or parsed.username or parsed.password or parsed.fragment:
+        return ''
+    return url
+
+
+def get_mfa():
+    global _mfa_service, _mfa_path
+    path = str(get_store().path)
+    if _mfa_service is None or _mfa_path != path:
+        _mfa_service = CleanHouseMFA(path)
+        _mfa_path = path
+    return _mfa_service
+
+
+def _mark_primary_session(user_id: str, session_id: str | None):
+    """Record primary auth; tolerate intentionally minimal unit-test store seams."""
+    if not session_id or not hasattr(get_store(), 'path'):
+        return
+    get_mfa().mark_primary(user_id, session_id)
 
 
 def _oauth_avatar_url(provider: str, value: Any) -> str:
@@ -336,7 +375,11 @@ def _record_current_consent(user_id: str, consent: Dict[str, Any], method: str, 
     missing = _missing_required_consent(consent)
     if missing:
         raise ValueError(f"Please confirm you agree to {missing['label']}")
-    for document, digest in _required_consent_digests().items():
+    required = _required_consent_digests()
+    accepted = get_store().consent_status(str(user_id), required)['accepted']
+    for document, digest in required.items():
+        if document in accepted:
+            continue
         get_store().record_consent(
             str(user_id), document, digest, method,
             transaction_id=transaction_id,
@@ -359,17 +402,88 @@ def _require_cookie_mutation():
     return None
 
 
+def _mfa_error(error: MfaError):
+    return _public_error(error.code, error.message, error.status)
+
+
+def _rotate_after_mfa(identity, payload):
+    raw = str(request.cookies.get(DEVICE_COOKIE) or '')
+    result = get_store().refresh_session(raw)
+    if result.status != 'rotated' or not result.replacement:
+        return _public_error('MFA_SESSION_ROTATION_FAILED', 'The initiating session could not be rotated.', 503)
+    get_mfa().rebind_rotated_session(identity.user_id, identity.credential_id, result.replacement.id)
+    response = jsonify(payload)
+    apply_session_cookie(response, result.replacement.secret)
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
 def _issue_session_response(user_data: Dict[str, Any], payload: Dict[str, Any], *, auth_method: str):
     issued = get_store().issue_session(
         str(user_data['user_id']),
         auth_method=auth_method,
         metadata={'role': user_data.get('role', 'user')},
     )
-    response = jsonify(payload)
+    _mark_primary_session(str(user_data['user_id']), getattr(issued, 'id', None))
+    factors = get_mfa().factors(str(user_data['user_id']))
+    payload = {**payload, 'mfaRequired': bool(factors), 'admissionAuthorized': not bool(factors)}
+    pending_return = _pop_pending_consent_return()
+    response = jsonify({**payload, **({'return_to': pending_return} if pending_return else {})})
     apply_session_cookie(response, issued.secret)
     session.pop('user_id', None)
     session.pop('email', None)
     return response
+
+
+def _pop_pending_consent_return() -> str:
+    return validate_local_return(session.pop('pending_consent_return', ''))
+
+
+def validate_local_return(candidate: Any) -> str:
+    """Return one bounded same-origin path, or an empty string when unsafe."""
+    if not isinstance(candidate, str) or not candidate:
+        return ''
+    try:
+        if len(candidate.encode('utf-8')) > 2048:
+            return ''
+    except UnicodeError:
+        return ''
+
+    value = candidate
+    for _ in range(4):
+        if (
+            not value.startswith('/')
+            or value.startswith('//')
+            or '\\' in value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            return ''
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme or parsed.netloc:
+            return ''
+        decoded = urllib.parse.unquote(value)
+        if decoded == value:
+            break
+        value = decoded
+    else:
+        return ''
+
+    parsed = urllib.parse.urlsplit(value)
+    path = parsed.path
+    parts = []
+    for segment in path.split('/'):
+        if segment in {'', '.'}:
+            continue
+        if segment == '..':
+            if parts:
+                parts.pop()
+            continue
+        parts.append(segment)
+    normalized = '/' + '/'.join(parts)
+    loop_target = normalized.rstrip('/') or '/'
+    if loop_target in {'/login', '/signup'}:
+        return ''
+    return urllib.parse.urlunsplit(('', '', parsed.path, parsed.query, parsed.fragment))
 
 
 def _consent_payload_for(user_id: str) -> Dict[str, Any]:
@@ -382,7 +496,20 @@ def _consent_payload_for(user_id: str) -> Dict[str, Any]:
     }
 
 
-def _require_sensitive(identity, scope: str):
+def _require_sensitive(identity, scope: str, target: str = ''):
+    factors = get_mfa().factors(identity.user_id)
+    if factors:
+        operation = {
+            'provider_link': 'provider.manage', 'token_manage': 'token.manage',
+            'session_manage': 'session.manage', 'account': 'account.delete',
+        }.get(scope, 'authenticate')
+        supplied_target = str(request.headers.get('X-CleanHouse-MFA-Target') or '')
+        if not secrets.compare_digest(supplied_target, target):
+            return _public_error('MFA_STEP_UP_REQUIRED', 'A matching one-use MFA step-up is required.', 403)
+        proof = str(request.headers.get('X-CleanHouse-MFA') or '')
+        if not proof or not get_mfa().consume_grant(identity.user_id, identity.credential_id, operation, target, proof):
+            return _public_error('MFA_STEP_UP_REQUIRED', 'A matching one-use MFA step-up is required.', 403)
+        return None
     raw = str(request.headers.get(REAUTH_HEADER) or '')
     if not raw or not get_store().consume_reauth_grant(
         raw,
@@ -671,9 +798,7 @@ def auth_config():
         'data': {
             'credentials': {'enabled': True},
             'magicEmail': {
-                'enabled': bool(os.getenv('FROM_EMAIL', '').strip() and (
-                    os.getenv('RESEND_API_KEY', '').strip() or os.getenv('EMAIL_HOST', '').strip()
-                )),
+                'enabled': email_delivery_available(),
                 'intents': ['signin', 'signup'],
             },
             'docs': _cleanhouse_auth_docs(),
@@ -1105,6 +1230,8 @@ def oauth_callback():
                 ))
             return redirect('/login?error=access_denied' if str(error) == 'access_denied' else '/login?error=provider_error')
         if not isinstance(code, str) or not code.strip():
+            if intent == 'photo':
+                return redirect('/settings?settings=providers&error=photo_provider_error')
             return redirect('/login?error=invalid_callback')
         code = code.strip()
 
@@ -1112,12 +1239,16 @@ def oauth_callback():
         token_data = exchange_oauth_token(provider, code, code_verifier)
         if not token_data:
             logging.error("Failed to exchange OAuth token")
+            if intent == 'photo':
+                return redirect('/settings?settings=providers&error=photo_token_exchange_failed')
             return redirect('/login?error=token_exchange_failed')
 
         # Get user info
         user_info = get_oauth_user_info(provider, token_data.get('access_token'))
         if not user_info or not user_info.get('email'):
             logging.error("Failed to get user info from OAuth provider")
+            if intent == 'photo':
+                return redirect('/settings?settings=providers&error=photo_user_info_failed')
             return redirect('/login?error=user_info_failed')
 
         # Resolve by provider subject. GitHub email is never an account-linking
@@ -1125,6 +1256,8 @@ def oauth_callback():
         user_service = get_user_service()
         provider_subject = str(user_info.get('id') or '').strip()
         if not provider_subject:
+            if intent == 'photo':
+                return redirect('/settings?settings=providers&error=photo_identity_mismatch')
             return redirect('/login?error=provider_identity_invalid')
         binding = get_store().external_identity(provider, provider_subject)
         existing_user = user_service.get_user_by_id(user_id=str(binding['user_id'])) if binding else None
@@ -1165,6 +1298,15 @@ def oauth_callback():
                 )
             except ValueError:
                 return redirect('/settings?settings=providers&error=provider_link_conflict')
+            avatar_url = _oauth_avatar_url(provider, user_info.get('avatar_url'))
+            if avatar_url:
+                current_link_identity = _current_identity()
+                get_store().refresh_provider_session_avatar(
+                    link_user_id, provider, avatar_url,
+                    current_session_id=(current_link_identity.credential_id if current_link_identity
+                                        and current_link_identity.kind == 'session'
+                                        and current_link_identity.user_id == link_user_id else ''),
+                )
             return redirect('/settings?settings=providers&linked=' + urllib.parse.quote(provider))
         if intent == 'login' and not existing_user:
             return redirect('/login?error=provider_not_linked&provider=' + urllib.parse.quote(provider))
@@ -1220,7 +1362,8 @@ def oauth_callback():
             trigger=f'auth/oauth/{provider}',
         )
 
-        response = redirect('/overview')
+        pending_return = _pop_pending_consent_return()
+        response = redirect(pending_return or '/overview')
         issued = get_store().issue_session(
             str(user_data['user_id']), auth_method=f'oauth:{provider}',
             metadata={
@@ -1228,6 +1371,7 @@ def oauth_callback():
                 'avatar_url': _oauth_avatar_url(provider, user_info.get('avatar_url')),
             },
         )
+        _mark_primary_session(str(user_data['user_id']), getattr(issued, 'id', None))
         apply_session_cookie(response, issued.secret)
         return response
 
@@ -1254,6 +1398,8 @@ def get_current_user():
             'success': True,
             'auth_kind': identity.kind,
             'consent_required': not identity.consent_current,
+            'mfaRequired': identity.kind == 'session' and bool(get_mfa().factors(identity.user_id)),
+            'admissionAuthorized': identity.kind != 'session' or get_mfa().admitted(identity.user_id, identity.credential_id),
             'user': {
                 'id': identity.user_id,
                 'user_id': identity.user_id,
@@ -1317,7 +1463,7 @@ def revoke_session(session_id):
     identity = _current_identity()
     if not identity:
         return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
-    sensitive_error = _require_sensitive(identity, 'session_manage')
+    sensitive_error = _require_sensitive(identity, 'session_manage', str(session_id))
     if sensitive_error:
         return sensitive_error
     if session_id == identity.credential_id:
@@ -1334,21 +1480,75 @@ def revoke_other_sessions():
     identity = _current_identity()
     if not identity:
         return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
-    sensitive_error = _require_sensitive(identity, 'session_manage')
+    sensitive_error = _require_sensitive(identity, 'session_manage', 'others')
     if sensitive_error:
         return sensitive_error
     count = get_store().revoke_other_sessions(identity.user_id, identity.credential_id)
     return jsonify({'success': True, 'revoked': count})
 
 
-@bp.route('/auth/reauth', methods=['POST'])
+def _email_reauthentication_available() -> bool:
+    sender = os.getenv('FROM_EMAIL', '').strip()
+    service = os.getenv('EMAIL_SERVICE', 'resend').strip().lower()
+    if not sender:
+        return False
+    if service == 'resend':
+        return bool(os.getenv('RESEND_API_KEY', '').strip())
+    return bool(os.getenv('EMAIL_HOST', '').strip())
+
+
+def _reauthentication_capabilities(identity) -> dict[str, Any]:
+    store = get_store()
+    sessions = store.list_sessions(identity.user_id)
+    current = next((item for item in sessions if item.get('id') == identity.credential_id), {})
+    session_method = str(current.get('auth_method') or '')
+    password_available = any(
+        str(item.get('auth_method') or '') == 'password'
+        for item in sessions
+    )
+    connected = {item['provider'] for item in store.list_external_identities(identity.user_id)}
+    provider_methods = []
+    for provider in ('google', 'github'):
+        if provider not in connected:
+            continue
+        configured = bool(auth_runtime_config.provider_config(provider).get('available'))
+        provider_methods.append({
+            'id': provider,
+            'label': f'Confirm with {provider.title()}',
+            'connected': True,
+            'configured': configured,
+            'available': False,
+            'reason': 'Provider reauthentication is not supported; use a verified human method.',
+        })
+    return {
+        'session_method': session_method,
+        'password': {
+            'id': 'password',
+            'label': 'Confirm password',
+            'available': password_available,
+        },
+        'verified_email': {
+            'id': 'magic_email',
+            'label': 'Confirm by verified email',
+            'available': _email_reauthentication_available(),
+        },
+        'providers': provider_methods,
+    }
+
+
+@bp.route('/auth/reauth', methods=['GET', 'POST'])
 def reauthenticate():
-    csrf_error = _require_cookie_mutation()
-    if csrf_error:
-        return csrf_error
     identity = _current_identity()
     if not identity:
         return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
+    capabilities = _reauthentication_capabilities(identity)
+    if request.method == 'GET':
+        response = jsonify({'success': True, 'reauthentication': capabilities})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    csrf_error = _require_cookie_mutation()
+    if csrf_error:
+        return csrf_error
     payload, error = _get_json_payload()
     if error:
         return error
@@ -1403,6 +1603,12 @@ def reauthenticate():
         ):
             return _public_error('REAUTHENTICATION_FAILED', 'Human reauthentication failed.', 401)
     elif method == 'password':
+        if not capabilities['password']['available']:
+            return _public_error(
+                'REAUTHENTICATION_METHOD_UNAVAILABLE',
+                'Password confirmation is not available for this identity.',
+                409,
+            )
         password, error = _require_string(payload.get('password'), 'password', max_len=4096)
         if error:
             return error
@@ -1411,6 +1617,7 @@ def reauthenticate():
             return _public_error('REAUTHENTICATION_FAILED', 'Human reauthentication failed.', 401)
     else:
         return _bad_request('Unsupported reauthentication method')
+    get_mfa().mark_primary(identity.user_id, identity.credential_id)
     issued = get_store().issue_reauth_grant(identity.user_id, identity.credential_id, scope)
     response = jsonify({'success': True, 'reauthToken': issued.secret, 'expires_at': issued.expires_at, 'scope': scope})
     response.headers['Cache-Control'] = 'no-store'
@@ -1575,6 +1782,132 @@ def verify_magic_email():
     return response
 
 
+@bp.route('/auth/mfa/factors', methods=['GET'])
+def mfa_factors():
+    identity = _current_identity()
+    if not identity:
+        return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
+    response = jsonify({'success': True, 'factors': get_mfa().factors(identity.user_id),
+                        'admissionAuthorized': get_mfa().admitted(identity.user_id, identity.credential_id)})
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+@bp.route('/auth/mfa/enroll', methods=['POST'])
+def mfa_enroll():
+    identity = _current_identity()
+    if not identity:
+        return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
+    if (error := _require_cookie_mutation()):
+        return error
+    payload, error = _get_json_payload()
+    if error:
+        return error
+    try:
+        existing = get_mfa().factors(identity.user_id)
+        if existing:
+            proof = str(payload.get('proof') or '')
+            if not proof or not get_mfa().consume_grant(identity.user_id, identity.credential_id, 'factor.add', '', proof):
+                return _public_error('MFA_STEP_UP_REQUIRED', 'A matching one-use MFA step-up is required.', 403)
+        result = get_mfa().enroll(identity.user_id, identity.credential_id, 'CleanHouse', str(payload.get('label') or 'Authenticator'))
+        response = jsonify({'success': True, **result})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except MfaError as exc:
+        return _mfa_error(exc)
+
+
+@bp.route('/auth/mfa/confirm', methods=['POST'])
+def mfa_confirm():
+    identity = _current_identity()
+    if not identity:
+        return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
+    if (error := _require_cookie_mutation()):
+        return error
+    payload, error = _get_json_payload()
+    if error:
+        return error
+    try:
+        result = get_mfa().confirm(identity.user_id, identity.credential_id, str(payload.get('factorId') or ''), str(payload.get('code') or ''))
+        return _rotate_after_mfa(identity, {'success': True, **result})
+    except MfaError as exc:
+        return _mfa_error(exc)
+
+
+@bp.route('/auth/mfa/challenge', methods=['POST'])
+def mfa_challenge():
+    identity = _current_identity()
+    if not identity:
+        return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
+    if (error := _require_cookie_mutation()):
+        return error
+    payload, error = _get_json_payload()
+    if error:
+        return error
+    try:
+        result = get_mfa().challenge(identity.user_id, identity.credential_id, str(payload.get('operation') or 'authenticate'), str(payload.get('target') or ''))
+        response = jsonify({'success': True, **result})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except MfaError as exc:
+        return _mfa_error(exc)
+
+
+@bp.route('/auth/mfa/verify', methods=['POST'])
+def mfa_verify():
+    identity = _current_identity()
+    if not identity:
+        return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
+    if (error := _require_cookie_mutation()):
+        return error
+    payload, error = _get_json_payload()
+    if error:
+        return error
+    try:
+        result = get_mfa().verify(identity.user_id, identity.credential_id, str(payload.get('challengeId') or ''),
+                                  str(payload.get('factorId') or '') or None, str(payload.get('code') or '') or None,
+                                  str(payload.get('recoveryCode') or '') or None)
+        return _rotate_after_mfa(identity, {'success': True, **result})
+    except MfaError as exc:
+        return _mfa_error(exc)
+
+
+@bp.route('/auth/mfa/remove', methods=['POST'])
+def mfa_remove():
+    identity = _current_identity()
+    if not identity:
+        return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
+    if (error := _require_cookie_mutation()):
+        return error
+    payload, error = _get_json_payload()
+    if error:
+        return error
+    try:
+        get_mfa().remove(identity.user_id, identity.credential_id, str(payload.get('factorId') or ''), str(payload.get('proof') or ''))
+        return jsonify({'success': True, 'removed': True})
+    except MfaError as exc:
+        return _mfa_error(exc)
+
+
+@bp.route('/auth/mfa/recovery/rotate', methods=['POST'])
+def mfa_recovery_rotate():
+    identity = _current_identity()
+    if not identity:
+        return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
+    if (error := _require_cookie_mutation()):
+        return error
+    payload, error = _get_json_payload()
+    if error:
+        return error
+    try:
+        codes = get_mfa().rotate_recovery(identity.user_id, identity.credential_id, str(payload.get('proof') or ''))
+        response = jsonify({'success': True, 'recoveryCodes': codes})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except MfaError as exc:
+        return _mfa_error(exc)
+
+
 @bp.route('/auth/providers', methods=['GET'])
 def providers():
     identity = _current_identity()
@@ -1598,7 +1931,7 @@ def prepare_provider_link(provider):
     identity = _current_identity()
     if not identity:
         return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
-    sensitive_error = _require_sensitive(identity, 'provider_link')
+    sensitive_error = _require_sensitive(identity, 'provider_link', str(provider).lower())
     if sensitive_error:
         return sensitive_error
     provider = str(provider).lower()
@@ -1629,7 +1962,7 @@ def unlink_provider(provider):
     identity = _current_identity()
     if not identity:
         return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
-    sensitive_error = _require_sensitive(identity, 'provider_link')
+    sensitive_error = _require_sensitive(identity, 'provider_link', str(provider).lower())
     if sensitive_error:
         return sensitive_error
     changed = get_store().unbind_external_identity(identity.user_id, str(provider).lower())
@@ -1659,7 +1992,7 @@ def create_api_token():
     identity = _current_identity()
     if not identity or not identity.consent_current:
         return _public_error('CONSENT_REQUIRED', 'Current consent and a device session are required.', 428)
-    sensitive_error = _require_sensitive(identity, 'token_manage')
+    sensitive_error = _require_sensitive(identity, 'token_manage', 'create')
     if sensitive_error:
         return sensitive_error
     payload, error = _get_json_payload()
@@ -1684,7 +2017,7 @@ def rotate_api_token(token_id):
     identity = _current_identity()
     if not identity:
         return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
-    sensitive_error = _require_sensitive(identity, 'token_manage')
+    sensitive_error = _require_sensitive(identity, 'token_manage', str(token_id))
     if sensitive_error:
         return sensitive_error
     issued = get_store().rotate_api_token(str(token_id), identity.user_id)
@@ -1703,7 +2036,7 @@ def revoke_api_token(token_id):
     identity = _current_identity()
     if not identity:
         return _public_error('AUTHENTICATION_REQUIRED', 'A device session is required.', 401)
-    sensitive_error = _require_sensitive(identity, 'token_manage')
+    sensitive_error = _require_sensitive(identity, 'token_manage', str(token_id))
     if sensitive_error:
         return sensitive_error
     changed = get_store().revoke_api_token(str(token_id), identity.user_id)
@@ -1724,7 +2057,7 @@ def delete_account():
                 'success': False,
                 'message': 'Invalid or expired token',
             }), 401
-        sensitive_error = _require_sensitive(identity, 'account')
+        sensitive_error = _require_sensitive(identity, 'account', 'delete')
         if sensitive_error:
             return sensitive_error
         user_data = identity.user

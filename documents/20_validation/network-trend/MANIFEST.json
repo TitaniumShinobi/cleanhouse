@@ -1,0 +1,307 @@
+{
+  "boundary_id": "NETWORK-TREND-RATIONALIZATION-001",
+  "captured_at": "2026-10-16T13:07:05.755991Z",
+  "delta_paths": [
+    "backend/api/cleanhouse.py",
+    "documents/00_start-here/INDEX.md",
+    "documents/00_start-here/network-trend-implementation.md",
+    "frontend/css/investigations.css",
+    "frontend/investigations.html",
+    "frontend/js/investigations.js",
+    "tests/test_network_trend_interpretation.py"
+  ],
+  "dependency_analysis": {
+    "assertion": "excluded dirty deltas are not part of the Trend patch",
+    "excluded_patch_occurrences": 0,
+    "path": "DEPENDENCY_ANALYSIS.md"
+  },
+  "excluded_paths": [
+    "backend/vvault_sync.py",
+    "documents/00_start-here/canon-runtime-spine.md",
+    "tests/test_runtime_liveness_probe.py"
+  ],
+  "files": {
+    "backend/api/cleanhouse.py": {
+      "after": {
+        "bytes": 400555,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "d00332b5128ce3718b3e1afc3aef62d0d566867e024d1519226e1dc609f8b3ce",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 388964,
+        "provenance": {
+          "method": "synthetic_pre_trend_image_from_after_with_reviewed_trend_hunks_reversed",
+          "source_anchor": {
+            "kind": "managed_runtime_comparison_snapshot",
+            "sha256": "fc58fd8843e52e6624942279ac65f3f1ec34acf77adb7d63584df7a5affb9e82"
+          }
+        },
+        "sha256": "bac67a8672034540c6f5614f34e25bc9bc5ae3f8fd92ad5a0016d487cbf773ad",
+        "state": "present"
+      },
+      "role": "implementation_delta"
+    },
+    "documents/00_start-here/INDEX.md": {
+      "after": {
+        "bytes": 1593,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "ac23f81274aceaa195c926cbe571d37236ba43a917a2a097eb0c85a466bf366d",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 1278,
+        "provenance": {
+          "method": "synthetic_pre_trend_image_from_after_with_reviewed_trend_hunks_reversed",
+          "source_anchor": {
+            "kind": "2026-10-15_network_audit_snapshot",
+            "sha256": "fabbd87718abc3d1a0da6e6a0de41284b2d6cbd246270e24b00096e045756b74"
+          }
+        },
+        "sha256": "21d5458685a88a12262798b7504b16e1e44ee7cfb80ebde36370ef2cdc6ce548",
+        "state": "present"
+      },
+      "role": "canonical_index_delta"
+    },
+    "documents/00_start-here/network-trend-implementation.md": {
+      "after": {
+        "bytes": 12121,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "769e587c2d0c492c3e629cd4e613b2d852bec2ba7b46546dae8d0dfa5190674e",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 0,
+        "provenance": {
+          "method": "path_absent_before_bounded_trend_delta"
+        },
+        "sha256": null,
+        "state": "absent"
+      },
+      "role": "canonical_document_delta"
+    },
+    "frontend/css/investigations.css": {
+      "after": {
+        "bytes": 91179,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "28e0adde544088685c6aef96153efbb9c7039d501cce6c12e74544101cb69e5f",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 85726,
+        "provenance": {
+          "method": "synthetic_pre_trend_image_from_after_with_reviewed_trend_hunks_reversed",
+          "source_anchor": {
+            "kind": "managed_runtime_comparison_snapshot",
+            "sha256": "efb45b1183778396317c466b2cd57f1898a6e75ab7ed1c5d458f3e5efd36f5c8"
+          }
+        },
+        "sha256": "08b73d2f5d03669e66c9643b9b32f2732015d57a9681ee329bcffe150418f70f",
+        "state": "present"
+      },
+      "role": "implementation_delta"
+    },
+    "frontend/investigations.html": {
+      "after": {
+        "bytes": 30899,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "9cfb2418ace05494fbbafb06003fc293d0ce2ab420e0a42a13701d18c0ad45f3",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 30848,
+        "provenance": {
+          "method": "synthetic_pre_trend_image_from_after_with_reviewed_trend_hunks_reversed",
+          "source_anchor": {
+            "kind": "managed_runtime_comparison_snapshot",
+            "sha256": "08c5a4002757b633cf83c1487297e25d0d534a9618c5c214cff8e69d1e6b3527"
+          }
+        },
+        "sha256": "024ec268025225ebc89551ce45bbc5a36bdebf3c2aab359319d41c26e4789bce",
+        "state": "present"
+      },
+      "role": "implementation_delta"
+    },
+    "frontend/js/investigations.js": {
+      "after": {
+        "bytes": 375000,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "7c69dd6c0ed2b4c080d009a040d8137aba034c7cf46c5d94e374344badee471a",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 363844,
+        "provenance": {
+          "method": "synthetic_pre_trend_image_from_after_with_reviewed_trend_hunks_reversed",
+          "source_anchor": {
+            "kind": "managed_runtime_comparison_snapshot",
+            "sha256": "b5b6ca311ea81ebe575839fd12b5fc0b5ab3d3bdf6a6a059bd7d657ff5fb1564"
+          }
+        },
+        "sha256": "65a8cc388a912969c0bcf19a71faf26cfb14703ca0a9ea2173a96b14b37dfee7",
+        "state": "present"
+      },
+      "role": "implementation_delta"
+    },
+    "tests/network_resilience_node.test.mjs": {
+      "after": {
+        "bytes": 51846,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "b83e14bf08342c28bba95edf07195d647610449a36ceb4564caced1478698622",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 51846,
+        "provenance": {
+          "method": "byte_identical_proof_input_snapshot"
+        },
+        "sha256": "b83e14bf08342c28bba95edf07195d647610449a36ceb4564caced1478698622",
+        "state": "present"
+      },
+      "role": "proof_only"
+    },
+    "tests/test_cleanhouse_monitoring_api.py": {
+      "after": {
+        "bytes": 363974,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "b3140b76d57977f880eb3d67e176d71c17361ce80dcc68b39557bee8a47947e2",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 363974,
+        "provenance": {
+          "method": "byte_identical_proof_input_snapshot"
+        },
+        "sha256": "b3140b76d57977f880eb3d67e176d71c17361ce80dcc68b39557bee8a47947e2",
+        "state": "present"
+      },
+      "role": "proof_only"
+    },
+    "tests/test_network_header_static.py": {
+      "after": {
+        "bytes": 39303,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "5ae4ed1eb7d73dea78575b1a81c113a741401a82d9d283a40b126ac1e488c123",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 39303,
+        "provenance": {
+          "method": "byte_identical_proof_input_snapshot"
+        },
+        "sha256": "5ae4ed1eb7d73dea78575b1a81c113a741401a82d9d283a40b126ac1e488c123",
+        "state": "present"
+      },
+      "role": "proof_only"
+    },
+    "tests/test_network_trend_interpretation.py": {
+      "after": {
+        "bytes": 7146,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "eba76e8b25180a347afff63ed913f8f48ecbc6a15f07c77627bb29a3ef3a33f9",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 0,
+        "provenance": {
+          "method": "path_absent_before_bounded_trend_delta"
+        },
+        "sha256": null,
+        "state": "absent"
+      },
+      "role": "focused_test_delta"
+    },
+    "tests/test_vvault_preservation.py": {
+      "after": {
+        "bytes": 33822,
+        "provenance": {
+          "method": "authorized_shared_worktree_snapshot"
+        },
+        "sha256": "dff973481a0eb9ca3b83e302d2edc368acff7fad1c4d213f78424bcc645dde72",
+        "state": "present"
+      },
+      "before": {
+        "bytes": 33822,
+        "provenance": {
+          "method": "byte_identical_proof_input_snapshot"
+        },
+        "sha256": "dff973481a0eb9ca3b83e302d2edc368acff7fad1c4d213f78424bcc645dde72",
+        "state": "present"
+      },
+      "role": "proof_only"
+    }
+  },
+  "included_paths": [
+    "backend/api/cleanhouse.py",
+    "frontend/css/investigations.css",
+    "frontend/investigations.html",
+    "frontend/js/investigations.js",
+    "documents/00_start-here/network-trend-implementation.md",
+    "documents/00_start-here/INDEX.md",
+    "tests/network_resilience_node.test.mjs",
+    "tests/test_cleanhouse_monitoring_api.py",
+    "tests/test_network_header_static.py",
+    "tests/test_network_trend_interpretation.py",
+    "tests/test_vvault_preservation.py"
+  ],
+  "limitations": [
+    "Synthetic before-images isolate the reviewed Trend delta; they are not represented as a historical full-worktree snapshot.",
+    "Proof-only files are included as validation inputs and remain byte-identical across replay.",
+    "The bundle proves byte reconstruction and excluded-path isolation, not live provider availability."
+  ],
+  "patch": {
+    "apply_command": "git apply -p2 TREND_DELTA.patch",
+    "baseline_tree": "baseline",
+    "bytes": 86066,
+    "expected_tree": "after",
+    "path": "TREND_DELTA.patch",
+    "sha256": "64859fbb9c6289b04f7436a1556a93d3261182aba9a3b7ed1bf03d37e10e6f39"
+  },
+  "proof_only_paths": [
+    "tests/network_resilience_node.test.mjs",
+    "tests/test_cleanhouse_monitoring_api.py",
+    "tests/test_network_header_static.py",
+    "tests/test_vvault_preservation.py"
+  ],
+  "repository": {
+    "branch": "codex/cleanhouse-cleanup-split",
+    "canon_modified": false,
+    "head": "068b72f6c3024c22179b5c806805946bad4f5958",
+    "index_sha256": "20b5579cfc74505b919fcca13654fac7bc040a323bcb12071b98ffcbfe22fe82",
+    "worktree_state": "dirty_preserved"
+  },
+  "schema": "cleanhouse.network.trend.reproducibility.v1",
+  "verification": {
+    "command": "python3 documents/20_validation/network-trend/verify_replay.py",
+    "focused_result_path": "FOCUSED_VERIFICATION.json",
+    "focused_test_baseline": {
+      "node": 46,
+      "note": "Re-run in this artifact-only pass; browser acceptance was intentionally not repeated.",
+      "python": 51,
+      "status": "pass",
+      "total": 97,
+      "verified_at": "2026-10-16T13:07:47.632711Z"
+    },
+    "result_path": "replay-result.json"
+  }
+}

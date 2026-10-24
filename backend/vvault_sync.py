@@ -48,6 +48,7 @@ KEYCHAIN_READ_TIMEOUT_SECONDS = 15
 REMOTE_TIMEOUT_SECONDS = 10
 MAX_REMOTE_RESPONSE_BYTES = 2 * 1024 * 1024
 _LOCK = threading.RLock()
+_DB_INIT_IDENTITIES: dict[str, tuple[int, int]] = {}
 _STOP = threading.Event()
 _THREAD: threading.Thread | None = None
 _KEYCHAIN_CACHE: dict[str, Any] = {"loaded_at": 0.0, "payload": {}}
@@ -118,6 +119,15 @@ def _managed_connection():
 
 def init_db() -> None:
     """Create or migrate the original Files outbox without replacing rows."""
+    path = _db_path()
+    path_key = str(path)
+    try:
+        identity = (int(path.stat().st_dev), int(path.stat().st_ino))
+    except OSError:
+        identity = None
+    with _LOCK:
+        if identity is not None and _DB_INIT_IDENTITIES.get(path_key) == identity:
+            return
     with _LOCK, _managed_connection() as conn:
         conn.execute(
             """
@@ -169,9 +179,16 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS files_outbox_pending_surface_idx "
             "ON files_outbox(surface, synced_at, created_at)"
         )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS files_outbox_pending_idx "
+            "ON files_outbox(synced_at, created_at, evidence_id)"
+        )
+    final_stat = path.stat()
+    with _LOCK:
+        _DB_INIT_IDENTITIES[path_key] = (int(final_stat.st_dev), int(final_stat.st_ino))
 
 
-def _keychain_credentials() -> dict[str, str]:
+def _keychain_credentials(*, allow_refresh: bool = True) -> dict[str, str]:
     if sys.platform != "darwin" or not Path("/usr/bin/security").is_file():
         return {}
     now = time.monotonic()
@@ -179,6 +196,8 @@ def _keychain_credentials() -> dict[str, str]:
         loaded_at = float(_KEYCHAIN_CACHE.get("loaded_at") or 0.0)
         if loaded_at > 0 and now - loaded_at < 30:
             return dict(_KEYCHAIN_CACHE.get("payload") or {})
+    if not allow_refresh:
+        return {}
     service = (os.getenv("CLEANHOUSE_VVAULT_KEYCHAIN_SERVICE") or KEYCHAIN_SERVICE).strip()
     account = (os.getenv("CLEANHOUSE_VVAULT_KEYCHAIN_ACCOUNT") or KEYCHAIN_ACCOUNT).strip()
     try:
@@ -209,8 +228,8 @@ def _keychain_credentials() -> dict[str, str]:
     return dict(credentials)
 
 
-def _config() -> tuple[str, str]:
-    keychain = _keychain_credentials()
+def _config(*, allow_keychain_read: bool = True) -> tuple[str, str]:
+    keychain = _keychain_credentials(allow_refresh=allow_keychain_read)
     explicit_url = (
         os.getenv("CLEANHOUSE_VVAULT_FILES_EVIDENCE_URL")
         or os.getenv("CLEANHOUSE_VVAULT_PICKUP_URL")
@@ -268,8 +287,8 @@ def authenticated_headers(token_override: str | None = None) -> dict[str, str]:
     return headers
 
 
-def _owner_identity() -> dict[str, str]:
-    keychain = _keychain_credentials()
+def _owner_identity(*, allow_keychain_read: bool = True) -> dict[str, str]:
+    keychain = _keychain_credentials(allow_refresh=allow_keychain_read)
     email = (
         os.getenv("CLEANHOUSE_VVAULT_USER_EMAIL")
         or os.getenv("VVAULT_USER_EMAIL")
@@ -283,10 +302,12 @@ def _owner_identity() -> dict[str, str]:
     return {"email": email, "user_id": user_id, "instance_id": instance_id}
 
 
-def _credential_type() -> str:
+def _credential_type(*, allow_keychain_read: bool = True) -> str:
     if os.getenv("CLEANHOUSE_VVAULT_SERVICE_TOKEN") or os.getenv("VVAULT_SERVICE_TOKEN"):
         return "service_token"
-    return str(_keychain_credentials().get("auth_type") or "service_token").strip().lower()
+    return str(
+        _keychain_credentials(allow_refresh=allow_keychain_read).get("auth_type") or "service_token"
+    ).strip().lower()
 
 
 def _safe_remote_url(url: str) -> bool:
@@ -322,7 +343,13 @@ def _open_remote(request: urllib.request.Request):
     return opener.open(request, timeout=REMOTE_TIMEOUT_SECONDS)
 
 
-def enqueue(evidence_id: str, payload: dict[str, Any], *, surface: str = "files") -> dict[str, Any]:
+def enqueue(
+    evidence_id: str,
+    payload: dict[str, Any],
+    *,
+    surface: str = "files",
+    preserve_local_cache: bool = True,
+) -> dict[str, Any]:
     """Idempotently append evidence to the shared durable outbox."""
     evidence_id = str(evidence_id or "").strip()
     if not evidence_id:
@@ -331,15 +358,27 @@ def enqueue(evidence_id: str, payload: dict[str, Any], *, surface: str = "files"
     init_db()
     created_at = str(payload.get("timestamp") or payload.get("created_at") or _now())
     canonical_payload = _canonical_json(payload)
-    local = vvault_preservation.preserve_json(
-        relative_dir=f"evidence/{scoped_surface}",
-        artifact_id=evidence_id,
-        artifact_type=f"{scoped_surface}_evidence",
-        data=payload,
-        source=f"cleanhouse-{scoped_surface}",
-        timestamp=created_at,
-        evidence_refs=list(payload.get("evidence_refs") or []),
-    )
+    if preserve_local_cache:
+        local = vvault_preservation.preserve_json(
+            relative_dir=f"evidence/{scoped_surface}",
+            artifact_id=evidence_id,
+            artifact_type=f"{scoped_surface}_evidence",
+            data=payload,
+            source=f"cleanhouse-{scoped_surface}",
+            timestamp=created_at,
+            evidence_refs=list(payload.get("evidence_refs") or []),
+        )
+    else:
+        # High-rate Network evidence is already committed to the local event
+        # spine before it reaches this durable SQLite outbox. Rewriting the
+        # artifact, manifest, and secondary JSON indexes for every packet can
+        # make capture fall permanently behind. The outbox remains the local
+        # durable replay boundary and OVVAULTS remains canonical preservation.
+        local = {
+            "status": "outbox_only",
+            "state": "durable_outbox",
+            "schema": SCHEMA,
+        }
     inserted = False
     with _LOCK, _managed_connection() as conn:
         cursor = conn.execute(
@@ -360,7 +399,10 @@ def enqueue(evidence_id: str, payload: dict[str, Any], *, surface: str = "files"
                 != _canonical_json(_replay_equivalent_payload(payload))
             ):
                 raise ValueError(f"OVVAULTS evidence ID collision: {evidence_id}")
-    start_service(surface=scoped_surface)
+    with _LOCK:
+        worker_alive = _THREAD is not None and _THREAD.is_alive()
+    if not worker_alive:
+        start_service(surface=scoped_surface)
     return {
         "status": "queued" if inserted else "existing",
         "evidence_id": evidence_id,
@@ -380,7 +422,10 @@ def _pending(*, surface: str | None = None, limit: int = MAX_BATCH_SIZE, due_onl
         clauses.append("(next_attempt_at = '' OR next_attempt_at <= ?)")
         params.append(_now())
     params.append(max(1, min(int(limit), 200)))
-    with _LOCK, _managed_connection() as conn:
+    # WAL readers must not hold the process-state lock.  Capture callbacks use
+    # that lock for their short outbox writes, so serializing a backlog scan
+    # behind it can stop stdout consumption and eventually stall tshark.
+    with _managed_connection() as conn:
         rows = conn.execute(
             "SELECT evidence_id, surface, created_at, payload_json, attempts FROM files_outbox WHERE "
             + " AND ".join(clauses)
@@ -570,14 +615,16 @@ def _age_seconds(value: str) -> float:
         return 0.0
 
 
-def status(surface: str | None = None) -> dict[str, Any]:
+def status(surface: str | None = None, *, allow_keychain_read: bool = True) -> dict[str, Any]:
     """Return aggregate or surface-scoped canonical preservation readiness."""
     init_db()
     scoped_surface = _surface(surface) if surface is not None else None
     where = "WHERE synced_at IS NULL" + (" AND surface = ?" if scoped_surface else "")
     params: tuple[Any, ...] = (scoped_surface,) if scoped_surface else ()
     receipt_where = "WHERE surface = ?" if scoped_surface else ""
-    with _LOCK, _managed_connection() as conn:
+    # Status is a read-only projection.  Let SQLite's WAL snapshot isolate it
+    # instead of blocking high-rate evidence writes on the process-state lock.
+    with _managed_connection() as conn:
         row = conn.execute(
             "SELECT COUNT(*) AS pending, MIN(created_at) AS oldest, MAX(attempts) AS max_attempts "
             "FROM files_outbox " + where,
@@ -592,9 +639,9 @@ def status(surface: str | None = None) -> dict[str, Any]:
             "SELECT * FROM evidence_receipts " + receipt_where + " ORDER BY received_at DESC LIMIT 1",
             params,
         ).fetchone()
-    url, token = _config()
-    identity = _owner_identity()
-    keychain = _keychain_credentials()
+    url, token = _config(allow_keychain_read=allow_keychain_read)
+    identity = _owner_identity(allow_keychain_read=allow_keychain_read)
+    keychain = _keychain_credentials(allow_refresh=allow_keychain_read)
     configured = bool(
         url
         and token
@@ -632,7 +679,7 @@ def status(surface: str | None = None) -> dict[str, Any]:
         "credential_source": "environment" if (
             os.getenv("CLEANHOUSE_VVAULT_SERVICE_TOKEN") or os.getenv("VVAULT_SERVICE_TOKEN")
         ) else ("keychain" if keychain.get("token") else "unavailable"),
-        "credential_type": _credential_type() if configured else "unavailable",
+        "credential_type": _credential_type(allow_keychain_read=allow_keychain_read) if configured else "unavailable",
         "owner_identity_configured": bool(identity["email"]), "instance_id": identity["instance_id"],
         "pending": pending, "backlog_depth": pending, "oldest_pending_at": oldest_pending_at,
         "oldest_pending_age_seconds": oldest_age,
@@ -659,6 +706,12 @@ def _worker(surface: str | None = None) -> None:
 
 
 def start_service(*, surface: str | None = None) -> dict[str, Any]:
+    """Start the single shared outbox worker and report the requested surface.
+
+    The worker must remain unscoped so Files starting first cannot strand
+    Network rows (or vice versa).  ``flush_once`` still preserves one surface
+    per authenticated batch and stores surface-specific receipts.
+    """
     global _THREAD
     scoped_surface = _surface(surface) if surface is not None else None
     with _LOCK:
@@ -666,12 +719,8 @@ def start_service(*, surface: str | None = None) -> dict[str, Any]:
             _STOP.clear()
             _THREAD = threading.Thread(
                 target=_worker,
-                args=(scoped_surface,),
-                name=(
-                    f"cleanhouse-ovvaults-{scoped_surface}-evidence-sync"
-                    if scoped_surface
-                    else "cleanhouse-ovvaults-evidence-sync"
-                ),
+                args=(None,),
+                name="cleanhouse-ovvaults-evidence-sync",
                 daemon=True,
             )
             _THREAD.start()

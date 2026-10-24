@@ -33,6 +33,47 @@ import threading
 import signal
 
 # Known surveillance/telemetry endpoints
+
+def _split_network_endpoint(endpoint: str) -> Tuple[str, int]:
+    endpoint = str(endpoint or "").strip()
+    if not endpoint:
+        return "unknown", 0
+    if endpoint.startswith("[") and "]:" in endpoint:
+        host, port = endpoint.rsplit("]:", 1)
+        return host + "]", int(port) if port.isdigit() else 0
+    if ":" in endpoint:
+        host, port = endpoint.rsplit(":", 1)
+        return host, int(port) if port.isdigit() else 0
+    return endpoint, 0
+
+
+def _parse_lsof_network_address(address: str) -> Dict[str, Any]:
+    address = str(address or "unknown").strip()
+    if "->" not in address:
+        host, port = _split_network_endpoint(address)
+        return {
+            "host": host,
+            "port": port,
+            "local_address": None,
+            "local_host": None,
+            "local_port": None,
+            "remote_address": address,
+            "remote_host": host,
+            "remote_port": port,
+        }
+    local_address, remote_address = address.split("->", 1)
+    local_host, local_port = _split_network_endpoint(local_address)
+    remote_host, remote_port = _split_network_endpoint(remote_address)
+    return {
+        "host": remote_host,
+        "port": remote_port,
+        "local_address": local_address,
+        "local_host": local_host,
+        "local_port": local_port,
+        "remote_address": remote_address,
+        "remote_host": remote_host,
+        "remote_port": remote_port,
+    }
 SURVEILLANCE_ENDPOINTS = {
     'government': [
         'nsa.gov', 'cia.gov', 'fbi.gov', 'dhs.gov',
@@ -174,9 +215,30 @@ class DataFlowTracer:
         self.dns_cache = {}  # Cache DNS lookups
         self.process_cache = {}  # Cache process info
         self._last_network_snapshot: Optional[Dict[str, Any]] = None
+        self._alert_log_cache: Dict[str, float] = {}
+
+    def _alert_logging_enabled(self) -> bool:
+        return os.getenv('CLEANHOUSE_DATA_FLOW_LOG_ALERTS', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+    def _alert_log_interval_seconds(self) -> float:
+        raw = os.getenv('CLEANHOUSE_DATA_FLOW_ALERT_LOG_INTERVAL_SECONDS', '60').strip()
+        try:
+            interval = float(raw)
+        except ValueError:
+            return 60.0
+        return max(0.0, interval)
 
     def _log(self, message: str, level: str = 'INFO'):
         """Log a message."""
+        if level == 'ALERT':
+            if not self._alert_logging_enabled():
+                return
+            now = time.monotonic()
+            interval = self._alert_log_interval_seconds()
+            last = self._alert_log_cache.get(message, 0.0)
+            if interval and now - last < interval:
+                return
+            self._alert_log_cache[message] = now
         timestamp = datetime.now().strftime('%H:%M:%S')
         print(f"[{timestamp}] [{level}] {message}")
 
@@ -289,11 +351,11 @@ class DataFlowTracer:
                         pid = parts[1]
                         conn_type = parts[4] if len(parts) > 4 else 'unknown'
                         address = parts[8] if len(parts) > 8 else 'unknown'
+                        parsed_address = _parse_lsof_network_address(address)
+                        host = parsed_address['host']
+                        port = parsed_address['port']
 
-                        # Parse address (format: host:port)
-                        if ':' in address:
-                            host, port = address.rsplit(':', 1)
-
+                        if host != 'unknown':
                             # Resolve IP to domain
                             domain = None
                             if not host.startswith('127.') and not host.startswith('::'):
@@ -309,9 +371,15 @@ class DataFlowTracer:
                                 'process_info': proc_info,
                                 'connection_type': conn_type,
                                 'host': host,
-                                'port': int(port) if port.isdigit() else 0,
+                                'port': port,
                                 'domain': domain,
-                                'address': address
+                                'address': address,
+                                'local_address': parsed_address['local_address'],
+                                'local_host': parsed_address['local_host'],
+                                'local_port': parsed_address['local_port'],
+                                'remote_address': parsed_address['remote_address'],
+                                'remote_host': parsed_address['remote_host'],
+                                'remote_port': parsed_address['remote_port'],
                             }
 
                             # Check if suspicious

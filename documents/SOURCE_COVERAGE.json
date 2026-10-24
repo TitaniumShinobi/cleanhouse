@@ -20,33 +20,33 @@
     {
       "source_path": "docs/auth/AUTHENTICATION_QUICK_REFERENCE.md",
       "mirror_path": "documents/95_source-mirror/docs/auth/AUTHENTICATION_QUICK_REFERENCE.md",
-      "source_sha256": "5c651ae80bb780f5494cd7cfd538bb071fcc946a6bad5998c2ff809ab9c319d9",
+      "source_sha256": "159ee98cae3fc765f2ab63285bbed22cbdf171fb0763ea5c3280f40ae63fc1aa",
       "mirror_exists": true,
-      "mirror_sha256": "5c651ae80bb780f5494cd7cfd538bb071fcc946a6bad5998c2ff809ab9c319d9",
+      "mirror_sha256": "159ee98cae3fc765f2ab63285bbed22cbdf171fb0763ea5c3280f40ae63fc1aa",
       "sha_match": true
     },
     {
       "source_path": "docs/auth/AUTHENTICATION_SETUP_GUIDE.md",
       "mirror_path": "documents/95_source-mirror/docs/auth/AUTHENTICATION_SETUP_GUIDE.md",
-      "source_sha256": "4565620d55b3d9e7dfbad4bbb6ab97860035c4f12e73433d0f902b58349b0a0a",
+      "source_sha256": "d585e0dd948656ccf1d1875fb98953b093d3a5ffa5e4f88d53a29e91269d307d",
       "mirror_exists": true,
-      "mirror_sha256": "4565620d55b3d9e7dfbad4bbb6ab97860035c4f12e73433d0f902b58349b0a0a",
+      "mirror_sha256": "d585e0dd948656ccf1d1875fb98953b093d3a5ffa5e4f88d53a29e91269d307d",
       "sha_match": true
     },
     {
       "source_path": "docs/auth/AUTHENTICATION_SYSTEM.md",
       "mirror_path": "documents/95_source-mirror/docs/auth/AUTHENTICATION_SYSTEM.md",
-      "source_sha256": "f9663508c0951c487a2d7d07c5203deb7aa88520a3c4771b051a2b75e318a510",
+      "source_sha256": "c39840d3d23eb51198904238dda4b4124f9a0e433580d66663381ecaa153e448",
       "mirror_exists": true,
-      "mirror_sha256": "f9663508c0951c487a2d7d07c5203deb7aa88520a3c4771b051a2b75e318a510",
+      "mirror_sha256": "c39840d3d23eb51198904238dda4b4124f9a0e433580d66663381ecaa153e448",
       "sha_match": true
     },
     {
       "source_path": "docs/auth/AUTH_SETUP_PROMPT.md",
       "mirror_path": "documents/95_source-mirror/docs/auth/AUTH_SETUP_PROMPT.md",
-      "source_sha256": "f66d1c9824cc009ac0aa73212396ca3f91e61a026a9c21fd70415e05d9be60d4",
+      "source_sha256": "8b10f071337f4c1ba89d025cff413252ece969b1acde1ee5d77876efa46c1976",
       "mirror_exists": true,
-      "mirror_sha256": "f66d1c9824cc009ac0aa73212396ca3f91e61a026a9c21fd70415e05d9be60d4",
+      "mirror_sha256": "8b10f071337f4c1ba89d025cff413252ece969b1acde1ee5d77876efa46c1976",
       "sha_match": true
     },
     {
@@ -212,9 +212,9 @@
     {
       "source_path": "docs/evidence/CLEANHOUSE_NOTIFICATION_TRUTH_INVENTORY.md",
       "mirror_path": "documents/95_source-mirror/docs/evidence/CLEANHOUSE_NOTIFICATION_TRUTH_INVENTORY.md",
-      "source_sha256": "5f3495ede33b6ac9b208aebd0d3de5cb6b1e69adc8f8e7294eb5481817f9b083",
+      "source_sha256": "3ee048a52ba9208efa34cab51be018e4eeb7054cd041bb139bb598d70b6be2b2",
       "mirror_exists": true,
-      "mirror_sha256": "5f3495ede33b6ac9b208aebd0d3de5cb6b1e69adc8f8e7294eb5481817f9b083",
+      "mirror_sha256": "3ee048a52ba9208efa34cab51be018e4eeb7054cd041bb139bb598d70b6be2b2",
       "sha_match": true
     },
     {
@@ -724,9 +724,9 @@
     {
       "source_path": "docs/plans/CLEANHOUSE_PRODUCT_BOARD.md",
       "mirror_path": "documents/95_source-mirror/docs/plans/CLEANHOUSE_PRODUCT_BOARD.md",
-      "source_sha256": "fb9bf4c720b8953aef71d5780b58c0a2e940b8fce45dbf8b06c8db87e625004c",
+      "source_sha256": "6525c4f1217c68375dd21266650dff74d54e3290289355cd5f8e6e4c75c32be4",
       "mirror_exists": true,
-      "mirror_sha256": "fb9bf4c720b8953aef71d5780b58c0a2e940b8fce45dbf8b06c8db87e625004c",
+      "mirror_sha256": "6525c4f1217c68375dd21266650dff74d54e3290289355cd5f8e6e4c75c32be4",
       "sha_match": true
     },
     {
@@ -884,17 +884,17 @@
     {
       "source_path": "README.md",
       "mirror_path": "documents/95_source-mirror/root/README.md",
-      "source_sha256": "b9c0f405eecd3c9acb8ae0d8f55ae01a2212c55fef4ddf315bdd1d982d9ea221",
+      "source_sha256": "dc597dd71f1e1be58170a3f2d3b3455413204c9019ce4a5d975b79cb52a32a23",
       "mirror_exists": true,
-      "mirror_sha256": "b9c0f405eecd3c9acb8ae0d8f55ae01a2212c55fef4ddf315bdd1d982d9ea221",
+      "mirror_sha256": "dc597dd71f1e1be58170a3f2d3b3455413204c9019ce4a5d975b79cb52a32a23",
       "sha_match": true
     },
     {
       "source_path": "QUICK_START.md",
       "mirror_path": "documents/95_source-mirror/root/QUICK_START.md",
-      "source_sha256": "7dfbb266778b174ef5680cac090ec6ff86bed259aa7244e1cac3b7e8ed1da847",
+      "source_sha256": "891b64e2d94fc67967cae5d544a63ebca6aad2d34641469a8743fafdc70afb03",
       "mirror_exists": true,
-      "mirror_sha256": "7dfbb266778b174ef5680cac090ec6ff86bed259aa7244e1cac3b7e8ed1da847",
+      "mirror_sha256": "891b64e2d94fc67967cae5d544a63ebca6aad2d34641469a8743fafdc70afb03",
       "sha_match": true
     },
     {
@@ -956,9 +956,9 @@
     {
       "source_path": "scripts/cleanhouse-up.sh",
       "mirror_path": "documents/95_source-mirror/scripts/cleanhouse-up.sh",
-      "source_sha256": "c61c87ca1ffe755d247e63130ab979500f5a5bc7f96b0235322a08c2cb1e62d8",
+      "source_sha256": "8bc9718dbeb2622b34497684e6199cbb37d15662ceed02919782f39a8bb6ba5f",
       "mirror_exists": true,
-      "mirror_sha256": "c61c87ca1ffe755d247e63130ab979500f5a5bc7f96b0235322a08c2cb1e62d8",
+      "mirror_sha256": "8bc9718dbeb2622b34497684e6199cbb37d15662ceed02919782f39a8bb6ba5f",
       "sha_match": true
     },
     {
@@ -1012,9 +1012,9 @@
     {
       "source_path": "scripts/generate_notification_truth_inventory.py",
       "mirror_path": "documents/95_source-mirror/scripts/generate_notification_truth_inventory.py",
-      "source_sha256": "5ebf367d8d123006e439093d2b813c4a7a4759fa1393f71cd81a47b6061f3712",
+      "source_sha256": "6c722982990a3251f0ea3fe9b299969d774f9e3504870875927f23dbb88b8d88",
       "mirror_exists": true,
-      "mirror_sha256": "5ebf367d8d123006e439093d2b813c4a7a4759fa1393f71cd81a47b6061f3712",
+      "mirror_sha256": "6c722982990a3251f0ea3fe9b299969d774f9e3504870875927f23dbb88b8d88",
       "sha_match": true
     },
     {
@@ -1052,9 +1052,9 @@
     {
       "source_path": "scripts/runtime_stabilization_soak.py",
       "mirror_path": "documents/95_source-mirror/scripts/runtime_stabilization_soak.py",
-      "source_sha256": "6b45b08f0e5e57a1e1aa0e880f6a317f970730c76b2822daac9ddf9cef13c457",
+      "source_sha256": "999bc22d9b94a1a59b6c6fa33905fe508d0ff0b5d4a8443b10a99024984cc85e",
       "mirror_exists": true,
-      "mirror_sha256": "6b45b08f0e5e57a1e1aa0e880f6a317f970730c76b2822daac9ddf9cef13c457",
+      "mirror_sha256": "999bc22d9b94a1a59b6c6fa33905fe508d0ff0b5d4a8443b10a99024984cc85e",
       "sha_match": true
     },
     {
@@ -1076,9 +1076,9 @@
     {
       "source_path": "scripts/verify_bundle.py",
       "mirror_path": "documents/95_source-mirror/scripts/verify_bundle.py",
-      "source_sha256": "63ae0ffcc963c50ba8b52dfdb486198a826a4583869ff08e90c189e16d2a851b",
+      "source_sha256": "c30610fa7813b523777a80c9a3c25bc28d5f5013dc3167f064fef1dd4c3c14e0",
       "mirror_exists": true,
-      "mirror_sha256": "63ae0ffcc963c50ba8b52dfdb486198a826a4583869ff08e90c189e16d2a851b",
+      "mirror_sha256": "c30610fa7813b523777a80c9a3c25bc28d5f5013dc3167f064fef1dd4c3c14e0",
       "sha_match": true
     }
   ]

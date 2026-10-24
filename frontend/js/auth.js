@@ -389,11 +389,38 @@
 	                    showError('Google sign-in timed out. Please try again.');
 	                }
 
+	                function safeLocalReturn(value) {
+	                    if (typeof value !== 'string' || !value || new TextEncoder().encode(value).length > 2048) return '';
+	                    let decoded = value;
+	                    for (let attempt = 0; attempt < 4; attempt += 1) {
+	                        if (!decoded.startsWith('/') || decoded.startsWith('//') || decoded.includes('\\') || /[\x00-\x1f\x7f]/.test(decoded)) return '';
+	                        let next;
+	                        try { next = decodeURIComponent(decoded); } catch (_) { return ''; }
+	                        if (next === decoded) break;
+	                        decoded = next;
+	                        if (attempt === 3) return '';
+	                    }
+	                    let parsed;
+	                    try { parsed = new URL(decoded, window.location.origin); } catch (_) { return ''; }
+	                    if (parsed.origin !== window.location.origin) return '';
+	                    const segments = [];
+	                    for (const segment of parsed.pathname.split('/')) {
+	                        if (!segment || segment === '.') continue;
+	                        if (segment === '..') segments.pop(); else segments.push(segment);
+	                    }
+	                    const normalized = '/' + segments.join('/');
+	                    const loopTarget = normalized.replace(/\/+$/, '') || '/';
+	                    if (loopTarget === '/login' || loopTarget === '/signup') return '';
+	                    return parsed.pathname + parsed.search + parsed.hash;
+	                }
+
 	                function completeAuth(result) {
 	                    if (window.authState && result.user) window.authState.setUser(result.user, null);
 	                    showSuccess(result.message || 'Signed in.');
 	                    setTimeout(() => {
-	                        window.location.href = dashboardRedirectWithLoginReport(result);
+	                        const target = safeLocalReturn(result.return_to)
+	                            || dashboardRedirectWithLoginReport(result);
+	                        window.location.href = target;
 	                    }, 350);
 	                }
 

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>CleanHouse App Security Center</title>
 <link rel="icon" href="/assets/fourstars.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/css/investigations.css?v=30">
+<link rel="stylesheet" href="/css/investigations.css?v=31">
 <link rel="stylesheet" href="/css/settings.css?v=2">
 </head>
 <body>
@@ -451,6 +451,29 @@
     <button id="action-sidebar-toggle" class="action-sidebar-toggle" type="button" title="More actions" aria-label="Open control center" aria-controls="action-sidebar" aria-expanded="false">ctrl</button>
 </div>
 
+<div id="policy-consent-modal" class="policy-consent-overlay" hidden>
+    <section class="policy-consent-dialog" role="dialog" aria-modal="true" aria-labelledby="policy-consent-title" aria-describedby="policy-consent-description">
+        <button class="policy-consent-close" type="button" data-policy-action="close" aria-label="Review policies later">&#10005;</button>
+        <span class="policy-consent-kicker">CleanHouse policies</span>
+        <h2 id="policy-consent-title">Our terms have been updated</h2>
+        <p id="policy-consent-description">Please review the current policies before continuing to protected CleanHouse data.</p>
+        <nav class="policy-consent-links" aria-label="Current CleanHouse policies">
+            <a href="/legal/terms" target="_blank" rel="noopener">Terms of Service</a>
+            <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Notice</a>
+            <a href="/legal/eeccd" target="_blank" rel="noopener">EECCD disclosure</a>
+        </nav>
+        <label class="policy-consent-check">
+            <input id="policy-consent-checkbox" type="checkbox">
+            <span>I have reviewed and accept the current policies.</span>
+        </label>
+        <div id="policy-consent-result" class="policy-consent-result" role="status" aria-live="polite"></div>
+        <div class="policy-consent-actions">
+            <button type="button" class="btn-secondary" data-policy-action="close">Review later</button>
+            <button id="policy-consent-accept" type="button" class="btn-primary" data-policy-action="accept" disabled>Accept and continue</button>
+        </div>
+    </section>
+</div>
+
 <div id="settings-modal" class="modal-overlay settings-overlay" hidden>
     <div class="modal-card modal-card-wide settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-describedby="settings-description">
         <div class="modal-header">
@@ -475,6 +498,6 @@
 <script src="/js/session-controls.js?v=1"></script>
 <script src="/js/api-client.js?v=5"></script>
 <script src="/js/investigations.js?v=32"></script>
-<script src="/js/settings.js?v=2"></script>
+<script src="/js/settings.js?v=5"></script>
 </body>
 </html>

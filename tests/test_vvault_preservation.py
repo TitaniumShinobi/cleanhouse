@@ -3,7 +3,9 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -324,6 +326,38 @@ class FilesVVaultSyncTests(unittest.TestCase):
             vvault_sync.KEYCHAIN_READ_TIMEOUT_SECONDS,
         )
 
+    def test_readiness_status_can_use_cached_credentials_without_keychain_io(self):
+        for key in (
+            "CLEANHOUSE_VVAULT_SERVICE_TOKEN",
+            "VVAULT_SERVICE_TOKEN",
+            "CLEANHOUSE_VVAULT_USER_EMAIL",
+            "VVAULT_USER_EMAIL",
+        ):
+            os.environ.pop(key, None)
+        vvault_sync._KEYCHAIN_CACHE.update({"loaded_at": 0.0, "payload": {}})
+
+        with patch.object(
+            vvault_sync.subprocess,
+            "run",
+            side_effect=AssertionError("readiness metadata must not prompt Keychain"),
+        ):
+            state = vvault_sync.status("network", allow_keychain_read=False)
+
+        self.assertEqual(state["state"], "unavailable")
+        self.assertEqual(state["credential_source"], "unavailable")
+
+    def test_outbox_schema_initialization_is_cached_by_database_identity(self):
+        path_key = str(vvault_sync._db_path())
+        vvault_sync._DB_INIT_IDENTITIES.pop(path_key, None)
+
+        with patch.object(vvault_sync, "_connect", wraps=vvault_sync._connect) as connect:
+            vvault_sync.init_db()
+            first_call_count = connect.call_count
+            vvault_sync.init_db()
+
+        self.assertGreater(first_call_count, 0)
+        self.assertEqual(connect.call_count, first_call_count)
+
     def test_authenticated_batch_is_idempotent_and_clears_backlog(self):
         with patch.object(vvault_sync, "start_service", return_value={"state": "test"}), patch.object(
             vvault_sync.vvault_preservation, "preserve_json", return_value={"status": "ok"}
@@ -361,6 +395,116 @@ class FilesVVaultSyncTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "evidence ID collision"):
                 vvault_sync.enqueue("network:event:collision", {"value": 2}, surface="network")
 
+    def test_high_rate_network_enqueue_uses_durable_outbox_without_per_packet_json_cache(self):
+        with patch.object(vvault_sync, "start_service", return_value={"state": "test"}), patch.object(
+            vvault_sync.vvault_preservation, "preserve_json"
+        ) as preserve_json:
+            result = vvault_sync.enqueue(
+                "network:event:outbox-only",
+                {"timestamp": "2026-10-15T00:00:00Z", "value": 1},
+                surface="network",
+                preserve_local_cache=False,
+            )
+
+        preserve_json.assert_not_called()
+        self.assertEqual(result["local_cache"]["state"], "durable_outbox")
+        self.assertEqual(vvault_sync.status("network")["backlog_depth"], 1)
+
+    def test_enqueue_does_not_recompute_full_status_when_worker_is_already_alive(self):
+        worker = unittest.mock.Mock()
+        worker.is_alive.return_value = True
+        with patch.object(vvault_sync, "_THREAD", worker), patch.object(
+            vvault_sync, "start_service"
+        ) as start_service:
+            vvault_sync.enqueue(
+                "network:event:worker-already-live",
+                {"timestamp": "2026-10-15T00:00:00Z", "value": 1},
+                surface="network",
+                preserve_local_cache=False,
+            )
+
+        start_service.assert_not_called()
+
+    def test_pending_backlog_read_does_not_hold_process_state_lock(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class SlowRead:
+            def execute(self, *_args, **_kwargs):
+                entered.set()
+                release.wait(1)
+                return self
+
+            def fetchall(self):
+                return []
+
+        @contextmanager
+        def slow_connection():
+            yield SlowRead()
+
+        with patch.object(vvault_sync, "init_db"), patch.object(
+            vvault_sync, "_managed_connection", slow_connection
+        ):
+            worker = threading.Thread(target=vvault_sync._pending, daemon=True)
+            worker.start()
+            self.assertTrue(entered.wait(0.5))
+            acquired = vvault_sync._LOCK.acquire(timeout=0.25)
+            if acquired:
+                vvault_sync._LOCK.release()
+            release.set()
+            worker.join(1)
+
+        self.assertTrue(acquired)
+        self.assertFalse(worker.is_alive())
+
+    def test_status_backlog_read_does_not_hold_process_state_lock(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class SlowRead:
+            def execute(self, query, *_args, **_kwargs):
+                entered.set()
+                release.wait(1)
+                if "FROM evidence_receipts" in query:
+                    self.row = None
+                elif "last_error" in query and "ORDER BY" in query:
+                    self.row = None
+                else:
+                    self.row = {"pending": 0, "oldest": None, "max_attempts": 0}
+                return self
+
+            def fetchone(self):
+                return self.row
+
+        @contextmanager
+        def slow_connection():
+            yield SlowRead()
+
+        with patch.object(vvault_sync, "init_db"), patch.object(
+            vvault_sync, "_managed_connection", slow_connection
+        ), patch.object(vvault_sync, "_config", return_value=("", "")), patch.object(
+            vvault_sync, "_owner_identity", return_value={"email": "", "user_id": "", "instance_id": "zen-001"}
+        ), patch.object(vvault_sync, "_keychain_credentials", return_value={}), patch.object(
+            vvault_sync.vvault_preservation, "preservation_available", return_value=True
+        ):
+            result = {}
+
+            def read_status():
+                result.update(vvault_sync.status("network"))
+
+            worker = threading.Thread(target=read_status, daemon=True)
+            worker.start()
+            self.assertTrue(entered.wait(0.5))
+            acquired = vvault_sync._LOCK.acquire(timeout=0.25)
+            if acquired:
+                vvault_sync._LOCK.release()
+            release.set()
+            worker.join(1)
+
+        self.assertTrue(acquired)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(result["surface"], "network")
+
     def test_transport_failure_keeps_durable_backlog(self):
         with patch.object(vvault_sync, "start_service", return_value={"state": "test"}), patch.object(
             vvault_sync.vvault_preservation, "preserve_json", return_value={"status": "ok"}
@@ -384,6 +528,21 @@ class FilesVVaultSyncTests(unittest.TestCase):
             vvault_sync._worker("files")
 
         flush.assert_called_once_with(surface="files")
+
+    def test_files_startup_uses_one_unscoped_worker_for_both_surfaces(self):
+        worker = unittest.mock.Mock()
+        worker.is_alive.return_value = True
+        with patch.object(vvault_sync, "_THREAD", None), patch.object(
+            vvault_sync.threading, "Thread", return_value=worker
+        ) as thread_factory, patch.object(
+            vvault_sync, "status", return_value={"state": "warming", "surface": "files"}
+        ):
+            result = vvault_sync.start_service(surface="files")
+
+        self.assertEqual(result["surface"], "files")
+        self.assertEqual(thread_factory.call_args.kwargs["args"], (None,))
+        self.assertEqual(thread_factory.call_args.kwargs["name"], "cleanhouse-ovvaults-evidence-sync")
+        worker.start.assert_called_once_with()
 
     def test_receipts_and_readiness_are_isolated_by_surface(self):
         timestamp = vvault_sync._now()

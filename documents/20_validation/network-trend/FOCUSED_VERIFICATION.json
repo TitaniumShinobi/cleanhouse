@@ -1,0 +1,41 @@
+{
+  "notes": [
+    "A first py_compile attempt encountered the known macOS/iCloud cache write restriction; the identical scoped compile passed with PYTHONPYCACHEPREFIX in /private/tmp.",
+    "No browser acceptance was attempted in this artifact-only corrective pass."
+  ],
+  "schema": "cleanhouse.network.trend.focused-verification.v1",
+  "static_checks": {
+    "auth_browser_acceptance": "not_run_artifact_only_pass",
+    "javascript_syntax": "pass",
+    "product_surface_baseline": "pass_11_of_11",
+    "python_compile": "pass_with_private_tmp_pycache",
+    "receipt_replay": "pass"
+  },
+  "status": "pass",
+  "tests": {
+    "node_resilience": {
+      "command": "node --test tests/network_resilience_node.test.mjs",
+      "count": 19,
+      "failed": 0,
+      "passed": 19
+    },
+    "node_table_ctrl": {
+      "command": "node --test tests/network_table_ctrl_resilience_node.test.mjs",
+      "count": 27,
+      "failed": 0,
+      "passed": 27
+    },
+    "python": {
+      "command": "cleanhouse_env/bin/python3 -m unittest -v tests.test_network_trend_interpretation tests.test_network_header_static tests.test_network_capture_truth",
+      "count": 51,
+      "failed": 0,
+      "passed": 51
+    },
+    "total": {
+      "count": 97,
+      "failed": 0,
+      "passed": 97
+    }
+  },
+  "verified_at": "2026-10-16T13:07:47.632711Z"
+}

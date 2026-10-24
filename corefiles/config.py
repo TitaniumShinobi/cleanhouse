@@ -23,8 +23,12 @@ SCAN_BATCH_SIZE = 100  # number of files to scan in one batch
 MAX_RETRIES = 3  # maximum number of retries for failed scans
 RETRY_DELAY = 5  # seconds to wait between retries
 
-# Centralized log directory - cross-platform
-LOG_DIR = Path.home() / "Documents" / "CleanHouse" / "Logs"
+# Centralized data directory.  The LaunchAgent uses a private application-data
+# root because macOS prevents background agents from traversing Documents.
+CLEANHOUSE_DATA_ROOT = Path(
+    os.getenv("CLEANHOUSE_DATA_ROOT", str(Path.home() / "Documents" / "CleanHouse"))
+).expanduser()
+LOG_DIR = CLEANHOUSE_DATA_ROOT / "Logs"
 
 # Ensure the log directory exists
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -379,30 +383,46 @@ SCHEMA_VERSIONS: Dict[str, int] = {
 }
 
 # Local persistence directory for versioned event/timeline/receipt artifacts
-DATA_DIR: Path = Path.home() / "Documents" / "CleanHouse" / "Data"
+DATA_DIR: Path = CLEANHOUSE_DATA_ROOT / "Data"
 
 
 def vvault_users_root() -> Path:
-    """Return the operator-configured root for user-scoped VVAULT files."""
+    """Root for user-scoped VVAULT files."""
     return Path(os.getenv("CLEANHOUSE_VVAULT_ROOT", "/vvault_files/users")).expanduser()
 
 
 def vvault_user_id() -> str:
-    """Return the canonical VVAULT user id; empty disables local mirroring."""
+    """Configured VVAULT user id. Empty means preservation is disabled."""
     return os.getenv("CLEANHOUSE_VVAULT_USER_ID", "").strip()
 
 
 def vvault_user_shard() -> str:
-    """Return the configured VVAULT shard without inferring an owner."""
     return os.getenv("CLEANHOUSE_VVAULT_SHARD", "shard_0000").strip() or "shard_0000"
 
 
 def cleanhouse_vvault_root() -> Optional[Path]:
-    """Resolve CleanHouse's canonical user-scoped preservation directory."""
     user_id = vvault_user_id()
     if not user_id:
         return None
     return vvault_users_root() / vvault_user_shard() / user_id / "cleanhouse"
+
+
+def wazuh_indexer_url() -> str:
+    """Authenticated Wazuh indexer base URL; empty means not configured."""
+    return os.getenv("CLEANHOUSE_WAZUH_INDEXER_URL", "").strip().rstrip("/")
+
+
+def wazuh_inventory_url() -> str:
+    """Wazuh manager FIM inventory endpoint for the enrolled agent."""
+    return os.getenv("CLEANHOUSE_WAZUH_INVENTORY_URL", "").strip()
+
+
+def vvault_files_evidence_url() -> str:
+    return (
+        os.getenv("CLEANHOUSE_VVAULT_FILES_EVIDENCE_URL")
+        or os.getenv("CLEANHOUSE_VVAULT_PICKUP_URL")
+        or ""
+    ).strip()
 
 # Artifact subdirectories created lazily on first write
 ARTIFACT_SUBDIRS: Dict[str, str] = {

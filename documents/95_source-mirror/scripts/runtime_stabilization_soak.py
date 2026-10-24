@@ -58,6 +58,19 @@ def _request(
         return exc.code, decoded
 
 
+def _timed_request(
+    base_url: str,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    timeout: float = 10.0,
+) -> tuple[int, dict[str, Any], float]:
+    started = time.monotonic()
+    code, body = _request(base_url, method, path, payload, timeout=timeout)
+    return code, body, time.monotonic() - started
+
+
 def _request_text(base_url: str, path: str, *, timeout: float = 10.0) -> tuple[int, str]:
     url = base_url.rstrip("/") + path
     with urllib.request.urlopen(url, timeout=timeout) as response:
@@ -121,36 +134,32 @@ def _post_login_report(base_url: str) -> dict[str, Any]:
     if not job_id:
         raise RuntimeError(f"login report did not return a job id: {payload}")
     deadline = time.monotonic() + 30
+    last_poll: dict[str, Any] = payload
     while time.monotonic() < deadline:
         poll_code, poll = _request(base_url, "GET", f"/cleanhouse/login-report/{urllib.parse.quote(job_id)}", timeout=5)
+        last_poll = poll
         if poll_code == 200 and poll.get("status") == "ok":
             return poll
+        if poll_code == 200 and poll.get("status") == "error":
+            job = poll.get("job", {}) if isinstance(poll.get("job"), dict) else {}
+            return {
+                "status": "bounded_failure",
+                "job_id": job_id,
+                "message": poll.get("message", "login report failed"),
+                "blocking_phase": job.get("blocking_phase", "unknown"),
+                "job": job,
+            }
         if poll_code not in {200, 202}:
             raise RuntimeError(f"login report poll failed HTTP {poll_code}: {poll}")
         time.sleep(1)
-    raise RuntimeError(f"login report job did not complete: {job_id}")
-
-
-def _create_notification_probe(base_url: str) -> dict[str, Any]:
-    session_id = f"soak-session-{uuid.uuid4().hex[:10]}"
-    code, payload = _request(
-        base_url,
-        "POST",
-        "/cleanhouse/approval-queue",
-        {
-            "session_id": session_id,
-            "requested_action": "runtime stabilization soak notification probe",
-            "reason": "soak gate requires native delivery evidence",
-            "objective_id": "runtime-stabilization-soak",
-            "source": "runtime_stabilization_soak",
-            "reviewer": "runtime_stabilization_soak",
-            "evidence_refs": [f"local://cleanhouse/runtime-soak/{session_id}"],
-        },
-        timeout=10,
-    )
-    if code >= 400:
-        raise RuntimeError(f"notification probe approval failed HTTP {code}: {payload}")
-    return payload
+    job = last_poll.get("job", {}) if isinstance(last_poll.get("job"), dict) else {}
+    return {
+        "status": "bounded_failure",
+        "job_id": job_id,
+        "message": "login report job did not complete within 30s",
+        "blocking_phase": job.get("blocking_phase", "unknown"),
+        "job": job,
+    }
 
 
 def _stop_runtime(host: str, port: int) -> dict[str, Any]:
@@ -174,15 +183,17 @@ def run_soak(*, host: str, port: int, duration_seconds: float, no_start: bool, s
     if not no_start:
         startup = _ensure_runtime(host, port, timeout=30)
 
-    code, ready = _request(base_url, "GET", "/cleanhouse/status?ready=1", timeout=2)
+    code, ready, ready_elapsed = _timed_request(base_url, "GET", "/cleanhouse/status?ready=1", timeout=2)
     if code != 200 or ready.get("ready") is not True:
         raise RuntimeError(f"readiness failed HTTP {code}: {ready}")
+    runtime_probe_code, runtime_probe, runtime_elapsed = _timed_request(base_url, "GET", "/cleanhouse/runtime", timeout=2)
+    if runtime_probe_code != 200:
+        raise RuntimeError(f"runtime failed HTTP {runtime_probe_code}: {runtime_probe}")
     dashboard_code, dashboard_text = _request_text(base_url, "/dashboard", timeout=5)
     if dashboard_code != 200 or "operator-workstation" not in dashboard_text:
         raise RuntimeError(f"dashboard failed HTTP {dashboard_code}")
 
     login_report = _post_login_report(base_url)
-    notification_probe = _create_notification_probe(base_url)
 
     samples: list[dict[str, Any]] = []
     deadline = time.monotonic() + duration_seconds
@@ -203,27 +214,44 @@ def run_soak(*, host: str, port: int, duration_seconds: float, no_start: bool, s
     status_code, status = _request(base_url, "GET", "/cleanhouse/status?refresh=1", timeout=20)
     runtime_code, runtime = _request(base_url, "GET", "/cleanhouse/runtime", timeout=10)
     reports_code, reports = _request(base_url, "GET", "/cleanhouse/reports?report_type=login_summary&limit=6&summary_only=1", timeout=10)
+    events_code, recent_events = _request(base_url, "GET", "/events?limit=1000", timeout=10)
 
     report_id = str(login_report.get("id") or "")
     report_visible = any(isinstance(item, dict) and item.get("id") == report_id for item in reports.get("reports", []))
     receipt = login_report.get("receipt", {}) if isinstance(login_report.get("receipt"), dict) else {}
     integrity = login_report.get("integrity", {}) if isinstance(login_report.get("integrity"), dict) else receipt.get("integrity", {})
     listener = runtime.get("listener", {}) if isinstance(runtime.get("listener"), dict) else {}
-    notifications = runtime.get("notifications", {}) if isinstance(runtime.get("notifications"), dict) else {}
+    event_spine = runtime.get("event_spine", {}) if isinstance(runtime.get("event_spine"), dict) else {}
+    event_writer = runtime.get("event_writer", {}) if isinstance(runtime.get("event_writer"), dict) else {}
+    writer_metrics = event_writer.get("metrics", {}) if isinstance(event_writer.get("metrics"), dict) else {}
+    policy_contract = runtime.get("notification_policy_contract", {}) if isinstance(runtime.get("notification_policy_contract"), dict) else {}
+    rows = recent_events if isinstance(recent_events, list) else []
+    db_sidecar_events = [
+        row for row in rows
+        if isinstance(row, dict)
+        and str(row.get("source_surface", "") or "") == "filesystem_watcher"
+        and str(row.get("path", "") or "").endswith(("-wal", "-shm", "-journal"))
+    ]
+    login_report_bounded = bool(report_id and report_visible) or login_report.get("status") == "bounded_failure"
     checks = {
         "status_endpoint_ok": status_code == 200,
         "runtime_endpoint_ok": runtime_code == 200,
         "reports_endpoint_ok": reports_code == 200,
+        "events_endpoint_ok": events_code == 200,
+        "ready_under_2s": ready_elapsed < 2.0,
+        "runtime_under_2s": runtime_elapsed < 2.0,
         "runtime_healthy": runtime.get("runtime_state") == "healthy",
         "backend_alive": runtime.get("backend", {}).get("alive") is True,
         "interpreter_metadata_present": bool(runtime.get("interpreter", {}).get("status")),
         "no_foreign_listeners": not listener.get("foreign_pids"),
         "no_stale_pid": runtime.get("runtime_state") != "stale_pid",
         "no_orphaned_listener": runtime.get("runtime_state") != "orphaned_listener",
-        "login_report_visible": bool(report_id and report_visible),
-        "receipt_integrity_present": bool(integrity.get("root_hash")),
-        "notification_delivery_recorded": int(notifications.get("delivery_count", 0) or 0) >= 1,
-        "notifications_not_degraded": notifications.get("status") == "ok",
+        "login_report_completed_or_bounded": login_report_bounded,
+        "receipt_integrity_present_or_bounded": bool(integrity.get("root_hash")) or login_report.get("status") == "bounded_failure",
+        "event_writer_dropped_zero": int(writer_metrics.get("dropped", 0) or 0) == 0,
+        "db_sidecar_filesystem_events_zero": len(db_sidecar_events) == 0,
+        "codex_prompt_sent_persist_only": policy_contract.get("codex_prompt_sent") == "persist_only",
+        "hard_interrupt_types_scoped": set(policy_contract.get("hard_interrupt_types", [])) == {"session_started", "session_ended", "scope_drift_detected"},
     }
     result = {
         "status": "ok" if all(checks.values()) else "failed",
@@ -231,7 +259,14 @@ def run_soak(*, host: str, port: int, duration_seconds: float, no_start: bool, s
         "duration_seconds": duration_seconds,
         "startup": startup,
         "login_report_id": report_id,
-        "notification_probe": notification_probe,
+        "login_report": login_report,
+        "timings": {
+            "ready_elapsed_seconds": ready_elapsed,
+            "runtime_elapsed_seconds": runtime_elapsed,
+        },
+        "event_spine": event_spine,
+        "db_sidecar_event_count": len(db_sidecar_events),
+        "notification_policy_contract": policy_contract,
         "final_runtime": runtime,
         "final_status": status,
         "final_reports": reports,

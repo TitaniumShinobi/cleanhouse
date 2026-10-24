@@ -1,0 +1,26 @@
+{
+  "delta_count": 7,
+  "excluded_count": 3,
+  "excluded_paths_absent": true,
+  "included_count": 11,
+  "manifest_schema": "cleanhouse.network.trend.reproducibility.v1",
+  "patch_sha256": "64859fbb9c6289b04f7436a1556a93d3261182aba9a3b7ed1bf03d37e10e6f39",
+  "replayed_sha256": {
+    "backend/api/cleanhouse.py": "d00332b5128ce3718b3e1afc3aef62d0d566867e024d1519226e1dc609f8b3ce",
+    "documents/00_start-here/INDEX.md": "ac23f81274aceaa195c926cbe571d37236ba43a917a2a097eb0c85a466bf366d",
+    "documents/00_start-here/network-trend-implementation.md": "769e587c2d0c492c3e629cd4e613b2d852bec2ba7b46546dae8d0dfa5190674e",
+    "frontend/css/investigations.css": "28e0adde544088685c6aef96153efbb9c7039d501cce6c12e74544101cb69e5f",
+    "frontend/investigations.html": "9cfb2418ace05494fbbafb06003fc293d0ce2ab420e0a42a13701d18c0ad45f3",
+    "frontend/js/investigations.js": "7c69dd6c0ed2b4c080d009a040d8137aba034c7cf46c5d94e374344badee471a",
+    "tests/network_resilience_node.test.mjs": "b83e14bf08342c28bba95edf07195d647610449a36ceb4564caced1478698622",
+    "tests/test_cleanhouse_monitoring_api.py": "b3140b76d57977f880eb3d67e176d71c17361ce80dcc68b39557bee8a47947e2",
+    "tests/test_network_header_static.py": "5ae4ed1eb7d73dea78575b1a81c113a741401a82d9d283a40b126ac1e488c123",
+    "tests/test_network_trend_interpretation.py": "eba76e8b25180a347afff63ed913f8f48ecbc6a15f07c77627bb29a3ef3a33f9",
+    "tests/test_vvault_preservation.py": "dff973481a0eb9ca3b83e302d2edc368acff7fad1c4d213f78424bcc645dde72"
+  },
+  "repository_head": "068b72f6c3024c22179b5c806805946bad4f5958",
+  "schema": "cleanhouse.network.trend.replay-result.v1",
+  "status": "pass",
+  "temporary_tree_removed": true,
+  "verified_at": "2026-10-16T13:07:47.685324Z"
+}

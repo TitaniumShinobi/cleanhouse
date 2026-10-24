@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import base64
+import heapq
 import hashlib
 import hmac
 import json
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 from urllib.parse import urlencode
 from backend import events as cleanhouse_events
+from backend import vvault_preservation
 from backend.active_context import (
     ActiveContextCollector,
     TRUTH_DEGRADED,
@@ -222,6 +224,15 @@ ADAPTER_ARTIFACT_SUBDIRS = {
 LOGIN_REPORT_QUEUE_SIZE = 2
 LOGIN_REPORT_WAIT_SECONDS = 2.0
 LOGIN_REPORT_JOB_TIMEOUT_SECONDS = 30.0
+LOGIN_REPORT_MAX_EVENTS = 200
+LOGIN_REPORT_MAX_ARTIFACTS = 50
+LOGIN_REPORT_MAX_EMBEDDED_RECORDS = 25
+LOGIN_REPORT_MAX_EVIDENCE_LINKS = 100
+LOGIN_REPORT_LABEL_MAX_CHARS = 160
+LOW_PROCESSING_HISTORY_LIMIT = 10
+LOW_PROCESSING_HISTORY_MAX_LIMIT = 50
+LOW_PROCESSING_RECEIPT_LIMIT = 5
+LOW_PROCESSING_APPROVAL_LIMIT = 5
 RUNTIME_GLOBAL_SESSION_ID = "runtime-global"
 RUNTIME_PRESENCE_ARTIFACT_ID = "runtime_presence:global"
 ACTIVE_CONTEXT_LATEST_ARTIFACT_ID = "active_context:latest"
@@ -1595,7 +1606,15 @@ class PersistenceBackend:
                 encoding="utf-8",
             )
             tmp_path.rename(final_path)
-            return {"status": "ok", "path": str(final_path), "schema_version": version}
+            result = {"status": "ok", "path": str(final_path), "schema_version": version}
+            if artifact_type in {"report", "receipt"}:
+                result["vvault_preservation"] = vvault_preservation.preserve_local_artifact(
+                    artifact_type,
+                    artifact_id,
+                    payload,
+                    local_ref=str(final_path),
+                )
+            return result
         except OSError as exc:
             return {"status": "error", "message": f"Write failed: {exc}"}
 
@@ -1634,7 +1653,7 @@ class PersistenceBackend:
             return None
 
     @staticmethod
-    def list_artifacts(artifact_type: str) -> list[Dict[str, Any]]:
+    def list_artifacts(artifact_type: str, limit: Optional[int] = None) -> list[Dict[str, Any]]:
         subdir = _artifact_subdir(artifact_type)
         if subdir is None:
             return []
@@ -1642,14 +1661,42 @@ class PersistenceBackend:
         if not base.is_dir():
             return []
         results: list[Dict[str, Any]] = []
-        for vdir in sorted(base.iterdir()):
-            if not vdir.is_dir() or not vdir.name.startswith("v"):
-                continue
-            for f in sorted(vdir.iterdir()):
-                if f.suffix == ".json":
-                    entry = PersistenceBackend._load_file(f, artifact_type)
-                    if entry is not None:
-                        results.append(entry)
+        def _mtime(path: Path) -> float:
+            try:
+                return path.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        if limit is not None:
+            max_files = max(0, int(limit))
+            if max_files == 0:
+                return []
+            latest: list[tuple[float, str, Path]] = []
+            for vdir in sorted(base.iterdir()):
+                if not vdir.is_dir() or not vdir.name.startswith("v"):
+                    continue
+                for f in sorted(vdir.iterdir()):
+                    if f.suffix != ".json":
+                        continue
+                    item = (_mtime(f), str(f), f)
+                    if len(latest) < max_files:
+                        heapq.heappush(latest, item)
+                    elif item > latest[0]:
+                        heapq.heapreplace(latest, item)
+            files = [item[2] for item in sorted(latest, reverse=True)]
+        else:
+            files: list[Path] = []
+            for vdir in sorted(base.iterdir()):
+                if not vdir.is_dir() or not vdir.name.startswith("v"):
+                    continue
+                for f in sorted(vdir.iterdir()):
+                    if f.suffix == ".json":
+                        files.append(f)
+            files.sort(key=_mtime, reverse=True)
+        for f in files:
+            entry = PersistenceBackend._load_file(f, artifact_type)
+            if entry is not None:
+                results.append(entry)
         return results
 
     @staticmethod
@@ -4492,11 +4539,11 @@ class CleanHouseMonitoringAdapter:
             source=str(intent.get("source", "ui")),
         )
 
-    def _intent_records(self) -> list[IntentRecord]:
+    def _intent_records(self, limit: Optional[int] = None) -> list[IntentRecord]:
         with self._lock:
             records = {record.id: record for record in self._intents}
         if self.persistence_enabled:
-            for artifact in PersistenceBackend.list_artifacts("intent"):
+            for artifact in PersistenceBackend.list_artifacts("intent", limit=limit):
                 payload = artifact.get("data", {})
                 intent = payload.get("intent", payload) if isinstance(payload, dict) else None
                 if not isinstance(intent, dict):
@@ -4504,7 +4551,13 @@ class CleanHouseMonitoringAdapter:
                 record = self._intent_record_from_dict(intent)
                 if record.id:
                     records.setdefault(record.id, record)
-        return sorted(records.values(), key=lambda record: record.timestamp)
+        sorted_records = sorted(records.values(), key=lambda record: record.timestamp)
+        if limit is not None:
+            max_records = max(0, int(limit))
+            if max_records == 0:
+                return []
+            return sorted_records[-max_records:]
+        return sorted_records
 
     def _intent_record_by_id(self, record_id: str) -> Optional[IntentRecord]:
         stable_record_id = str(record_id or "").strip()
@@ -4603,8 +4656,10 @@ class CleanHouseMonitoringAdapter:
         self._persist_intent_record(record)
         return {"status": "ok", "id": record.id}
 
-    def get_intents(self) -> Dict[str, Any]:
-        records = [r.to_dict() for r in reversed(self._intent_records())]
+    def get_intents(self, limit: Optional[int] = None) -> Dict[str, Any]:
+        records = [r.to_dict() for r in reversed(self._intent_records(limit=limit))]
+        if limit is not None:
+            records = records[:max(0, int(limit))]
         return {"intents": records, "count": len(records)}
 
     def submit_prompt(
@@ -8783,12 +8838,13 @@ class CleanHouseMonitoringAdapter:
         self,
         session_id: Optional[str] = None,
         status: Optional[str] = None,
+        max_records: Optional[int] = None,
     ) -> Dict[str, Any]:
         with self._lock:
             records = [self._approval_dict_with_mediation_proof(r.to_dict()) for r in self._approval_queue.values()]
         seen = {r["id"] for r in records}
         if self.persistence_enabled:
-            for artifact in PersistenceBackend.list_artifacts("approval"):
+            for artifact in PersistenceBackend.list_artifacts("approval", limit=max_records):
                 payload = artifact.get("data", {})
                 approval = payload.get("approval", payload)
                 if not isinstance(approval, dict):
@@ -8802,6 +8858,8 @@ class CleanHouseMonitoringAdapter:
             records = [r for r in records if r.get("session_id") == session_id]
         if status:
             records = [r for r in records if r.get("status") == status]
+        if max_records is not None:
+            records = records[:max(0, int(max_records))]
         return {
             "approval_queue": records,
             "count": len(records),
@@ -13553,12 +13611,12 @@ class CleanHouseMonitoringAdapter:
         )
         return result
 
-    def get_receipts(self, session_id: Optional[str] = None) -> Dict[str, Any]:
+    def get_receipts(self, session_id: Optional[str] = None, max_records: Optional[int] = None) -> Dict[str, Any]:
         with self._lock:
             records = [r.to_dict() for r in self._receipts.values()]
         seen = {r["id"] for r in records}
         if self.persistence_enabled:
-            for artifact in PersistenceBackend.list_artifacts("receipt"):
+            for artifact in PersistenceBackend.list_artifacts("receipt", limit=max_records):
                 payload = artifact.get("data", {})
                 if not isinstance(payload, dict):
                     continue
@@ -13569,6 +13627,8 @@ class CleanHouseMonitoringAdapter:
         records.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
         if session_id:
             records = [r for r in records if r.get("session_id") == session_id]
+        if max_records is not None:
+            records = records[:max(0, int(max_records))]
         return {
             "receipts": records,
             "count": len(records),
@@ -14457,18 +14517,21 @@ class CleanHouseMonitoringAdapter:
                     add(str(ref), "approval_history", str(entry.get("status", "")))
         return rows
 
-    def _report_dicts(self) -> list[Dict[str, Any]]:
+    def _report_dicts(self, max_records: Optional[int] = None) -> list[Dict[str, Any]]:
         with self._lock:
             records = {report.id: report.to_dict() for report in self._reports.values()}
         if self.persistence_enabled:
-            for artifact in PersistenceBackend.list_artifacts("report"):
+            for artifact in PersistenceBackend.list_artifacts("report", limit=max_records):
                 payload = artifact.get("data", {})
                 if not isinstance(payload, dict):
                     continue
                 report_id = str(payload.get("id", ""))
                 if report_id:
                     records.setdefault(report_id, payload)
-        return sorted(records.values(), key=lambda r: r.get("timestamp", ""), reverse=True)
+        sorted_records = sorted(records.values(), key=lambda r: r.get("timestamp", ""), reverse=True)
+        if max_records is not None:
+            return sorted_records[:max(0, int(max_records))]
+        return sorted_records
 
     def get_report(self, report_id: str) -> Dict[str, Any]:
         stable_report_id = str(report_id or "").strip()
@@ -14495,17 +14558,19 @@ class CleanHouseMonitoringAdapter:
         previous_login_at: Optional[str],
         current_login_at: str,
         max_events: int = 500,
-    ) -> tuple[list[Dict[str, Any]], Optional[str]]:
+    ) -> tuple[list[Dict[str, Any]], Optional[str], bool]:
         try:
-            events = cleanhouse_events.list_events(limit=max_events)
+            events = cleanhouse_events.list_events(limit=max_events + 1)
         except Exception as exc:
-            return [], str(exc) or exc.__class__.__name__
+            return [], str(exc) or exc.__class__.__name__, False
+        truncated = len(events) > max_events
+        events = events[:max_events]
         windowed = [
             event for event in events
             if _timestamp_in_window(event.get("timestamp"), previous_login_at, current_login_at)
         ]
         windowed.sort(key=lambda event: event.get("timestamp", ""))
-        return windowed, None
+        return windowed, None, truncated
 
     @staticmethod
     def _event_evidence_refs(event: Dict[str, Any]) -> list[str]:
@@ -14525,17 +14590,61 @@ class CleanHouseMonitoringAdapter:
             refs.append(str(raw_ref))
         return refs
 
-    def _windowed_artifacts(self, artifact_type: str, previous_login_at: Optional[str], current_login_at: str) -> list[Dict[str, Any]]:
+    @staticmethod
+    def _compact_login_event(event: Dict[str, Any]) -> Dict[str, Any]:
+        event_id = event.get("id")
+        compact = {
+            "id": event_id,
+            "timestamp": event.get("timestamp"),
+            "session_id": event.get("session_id"),
+            "event_type": event.get("event_type"),
+            "source_surface": event.get("source_surface"),
+            "collector_status": event.get("collector_status"),
+            "path": event.get("path"),
+            "summary": str(event.get("summary", ""))[:LOGIN_REPORT_LABEL_MAX_CHARS],
+        }
+        return {key: value for key, value in compact.items() if value not in (None, "", [])}
+
+    @staticmethod
+    def _compact_login_artifact(record: Dict[str, Any], artifact_type: str) -> Dict[str, Any]:
+        compact = {
+            "id": record.get("id"),
+            "timestamp": record.get("timestamp"),
+            "session_id": record.get("session_id"),
+            "type": artifact_type,
+            "report_type": record.get("report_type"),
+            "summary": record.get("summary"),
+            "target": record.get("target"),
+        }
+        summary = compact.get("summary")
+        if isinstance(summary, dict):
+            compact["summary"] = {
+                key: summary.get(key)
+                for key in ("verdict", "text", "event_count", "receipt_count", "report_count")
+                if summary.get(key) is not None
+            }
+        elif isinstance(summary, str):
+            compact["summary"] = summary[:LOGIN_REPORT_LABEL_MAX_CHARS]
+        return {key: value for key, value in compact.items() if value not in (None, "", [], {})}
+
+    def _windowed_artifacts(
+        self,
+        artifact_type: str,
+        previous_login_at: Optional[str],
+        current_login_at: str,
+        max_records: int = LOGIN_REPORT_MAX_ARTIFACTS,
+    ) -> list[Dict[str, Any]]:
         if artifact_type == "receipt":
-            records = self.get_receipts().get("receipts", [])
+            records = self.get_receipts(max_records=max_records).get("receipts", [])
         elif artifact_type == "report":
-            records = self._report_dicts()
+            records = self._report_dicts(max_records=max_records)
         else:
             records = []
-        return [
+        windowed = [
             record for record in records
             if _timestamp_in_window(record.get("timestamp"), previous_login_at, current_login_at)
         ]
+        return windowed[:max_records]
 
     def submit_login_report(
         self,
@@ -14578,13 +14687,24 @@ class CleanHouseMonitoringAdapter:
 
         now = current_login_at or _now_iso()
         report_session_id = f"login:{_fingerprint(user_id or email)}"
-        events, event_error = self._login_report_event_window(
+        events, event_error, event_truncated = self._login_report_event_window(
             previous_login_at=previous_login_at,
             current_login_at=now,
+            max_events=LOGIN_REPORT_MAX_EVENTS,
         )
-        receipts = self._windowed_artifacts("receipt", previous_login_at, now)
+        receipts = self._windowed_artifacts(
+            "receipt",
+            previous_login_at,
+            now,
+            max_records=LOGIN_REPORT_MAX_ARTIFACTS,
+        )
         reports = [
-            report for report in self._windowed_artifacts("report", previous_login_at, now)
+            report for report in self._windowed_artifacts(
+                "report",
+                previous_login_at,
+                now,
+                max_records=LOGIN_REPORT_MAX_ARTIFACTS,
+            )
             if report.get("report_type") != "login_summary"
         ]
         latest_session_id = self._latest_workstation_session_id()
@@ -14600,18 +14720,30 @@ class CleanHouseMonitoringAdapter:
             if not refs:
                 continue
             evidence_refs.extend(refs)
+            if len(evidence_index) >= LOGIN_REPORT_MAX_EVIDENCE_LINKS:
+                continue
             evidence_index.append({
                 "ref": refs[0],
                 "source": str(event.get("event_type", "event")),
-                "label": str(event.get("summary", ""))[:160],
+                "label": str(event.get("summary", ""))[:LOGIN_REPORT_LABEL_MAX_CHARS],
             })
         for receipt in receipts:
             receipt_id = str(receipt.get("id", ""))
             if receipt_id:
                 ref = f"local://cleanhouse/receipt/{receipt_id}"
                 evidence_refs.append(ref)
-                evidence_index.append({"ref": ref, "source": "receipt", "label": receipt_id})
-        evidence_links = tuple(dict.fromkeys(self._local_evidence_refs(evidence_refs)))
+                if len(evidence_index) < LOGIN_REPORT_MAX_EVIDENCE_LINKS:
+                    evidence_index.append({"ref": ref, "source": "receipt", "label": receipt_id})
+        evidence_links = tuple(dict.fromkeys(self._local_evidence_refs(evidence_refs)))[:LOGIN_REPORT_MAX_EVIDENCE_LINKS]
+        compact_events = [self._compact_login_event(event) for event in events[:LOGIN_REPORT_MAX_EMBEDDED_RECORDS]]
+        compact_receipts = [
+            self._compact_login_artifact(receipt, "receipt")
+            for receipt in receipts[:LOGIN_REPORT_MAX_EMBEDDED_RECORDS]
+        ]
+        compact_reports = [
+            self._compact_login_artifact(report, "report")
+            for report in reports[:LOGIN_REPORT_MAX_EMBEDDED_RECORDS]
+        ]
 
         gaps: list[Dict[str, Any]] = []
         if not previous_login_at:
@@ -14626,6 +14758,23 @@ class CleanHouseMonitoringAdapter:
                 "label": "event_window_unavailable",
                 "description": event_error,
             })
+        if event_truncated:
+            gaps.append({
+                "source": "events",
+                "label": "event_window_truncated",
+                "description": f"Login report read at most {LOGIN_REPORT_MAX_EVENTS} recent event records.",
+            })
+        for source, records, embedded_count in (
+            ("events", events, len(compact_events)),
+            ("receipts", receipts, len(compact_receipts)),
+            ("reports", reports, len(compact_reports)),
+        ):
+            if len(records) > embedded_count:
+                gaps.append({
+                    "source": source,
+                    "label": f"{source}_embedded_sample_truncated",
+                    "description": f"Embedded {embedded_count} of {len(records)} {source}; full evidence is available by reference.",
+                })
 
         summary_text = (
             f"Since previous login: {len(events)} runtime event(s), "
@@ -14652,9 +14801,9 @@ class CleanHouseMonitoringAdapter:
                 "event_type_counts": event_type_counts,
                 "session_counts": session_counts,
             },
-            "events": events,
-            "receipts": receipts,
-            "reports": reports,
+            "events": compact_events,
+            "receipts": compact_receipts,
+            "reports": compact_reports,
             "gaps": gaps,
             "evidence_index": evidence_index,
             "latest_session": latest_session,
@@ -14668,9 +14817,9 @@ class CleanHouseMonitoringAdapter:
             "timestamp": now,
             "metadata": receipt_core["metadata"],
             "summary": receipt_core["summary"],
-            "events": events,
-            "receipts": receipts,
-            "reports": reports,
+            "events": compact_events,
+            "receipts": compact_receipts,
+            "reports": compact_reports,
             "alerts": [],
             "gaps": gaps,
             "evidence_index": evidence_index,
@@ -14758,6 +14907,21 @@ class CleanHouseMonitoringAdapter:
             ref.get("ref", "") for ref in receipt_result.get("evidence_index", [])
         )
         now = _now_iso()
+        concern_letter = self._build_concern_letter(
+            session_id=session_id,
+            report_type=report_type,
+            contact=contact,
+            target=target,
+            context=context,
+            receipt=receipt_result,
+            evidence_links=evidence_links,
+            generated_at=now,
+        )
+        metadata = {
+            "template": "letter_of_concern_v1",
+            "synthesis_role": "evidence_concern_draft",
+            "evidence_boundary": "observed/inferred/unknown values come from the attached receipt",
+        }
         report = SessionReport(
             id=f"report:{_fingerprint(session_id, report_type, contact, target, now)}",
             session_id=session_id,
@@ -14768,6 +14932,8 @@ class CleanHouseMonitoringAdapter:
             context=context,
             receipt=receipt_result,
             evidence_links=evidence_links,
+            concern_letter=concern_letter,
+            metadata=metadata,
         )
 
         with self._lock:
@@ -14784,6 +14950,8 @@ class CleanHouseMonitoringAdapter:
             "context": context,
             "receipt": receipt_result,
             "evidence_links": list(evidence_links),
+            "concern_letter": concern_letter,
+            "metadata": metadata,
             "integrity": receipt_result.get("integrity", {}),
         }
         if self.persistence_enabled:
@@ -14791,6 +14959,167 @@ class CleanHouseMonitoringAdapter:
             if pr["status"] != "ok":
                 result["persistence_warning"] = pr["message"]
         return result
+
+    def create_action_report(self, *,
+                            action_id: str,
+                            action_origin: str,
+                            trace_id: str = "",
+                            action_subject: dict[str, Any] | None = None,
+                            action_context: dict[str, Any] | None = None,
+                            selected_evidence_receipt: dict[str, Any] | None = None,
+                            evidence_links: Sequence[str] | None = None,
+                            insight_payload: dict[str, Any] | None = None,
+                            scan_payload: dict[str, Any] | None = None,
+                            report_intent: str = "") -> dict[str, Any]:
+        normalized_action = str(action_id or "").strip()
+        normalized_origin = str(action_origin or "").strip().lower()
+        if normalized_action == "":
+            return {"status": "not_created", "reason": "action identifier missing"}
+        if normalized_origin not in {"ctrl", "scan"}:
+            return {"status": "not_created", "reason": "action origin is not reportable"}
+        report_type = "ctrl_action" if normalized_origin == "ctrl" else "scan_action"
+        normalized_trace_id = str(trace_id or "").strip()
+
+        subject_name = str((action_subject or {}).get("name", "")).strip()
+        subject_type = str((action_subject or {}).get("type", "")).strip()
+        if not subject_name:
+            return {"status": "not_created", "reason": "action subject name is missing"}
+
+        normalized_links = []
+        if isinstance(evidence_links, (list, tuple)):
+            for value in evidence_links:
+                if not isinstance(value, str):
+                    continue
+                link = value.strip()
+                if not link:
+                    continue
+                if link not in normalized_links:
+                    normalized_links.append(link)
+        if not normalized_links:
+            receipt_refs = []
+            if isinstance(selected_evidence_receipt, dict):
+                raw_receipt_refs = selected_evidence_receipt.get("evidence_refs") or selected_evidence_receipt.get("refs")
+                if isinstance(raw_receipt_refs, (list, tuple)):
+                    for value in raw_receipt_refs:
+                        if not isinstance(value, str):
+                            continue
+                        ref = value.strip()
+                        if ref and ref not in receipt_refs:
+                            receipt_refs.append(ref)
+            normalized_links.extend(receipt_refs)
+
+        if not normalized_links:
+            return {"status": "not_created", "reason": "evidence links unavailable for report"}
+
+        timestamp = _now_iso()
+        if normalized_trace_id:
+            report_session = f"{normalized_origin}:{normalized_trace_id}"
+            report_id = f"report:{_fingerprint(normalized_origin, normalized_action, normalized_trace_id)}"
+            receipt_id = f"receipt:{_fingerprint(normalized_origin, normalized_action, normalized_trace_id, 'receipt')}"
+        else:
+            report_session = f"{normalized_origin}:action"
+            report_id = f"report:{_fingerprint(normalized_origin, normalized_action, timestamp)}"
+            receipt_id = f"receipt:{_fingerprint(normalized_origin, normalized_action, timestamp, 'receipt')}"
+
+        insight_trace = ""
+        insight_text = ""
+        if isinstance(insight_payload, dict):
+            insight_trace = str(insight_payload.get("trace_id", "")).strip()
+            if not insight_trace:
+                insight_trace = str(insight_payload.get("trace", "")).strip()
+            raw_text = insight_payload.get("insight") or insight_payload.get("text") or insight_payload.get("message") or insight_payload.get("detail") or insight_payload.get("summary")
+            if isinstance(raw_text, str):
+                insight_text = raw_text.strip()
+
+        snapshot_id = ""
+        if isinstance(scan_payload, dict):
+            snapshot_id = str(scan_payload.get("snapshot_id") or scan_payload.get("snapshot") or scan_payload.get("id") or "").strip()
+
+        def _sanitize_mapping(value: Any) -> dict[str, Any]:
+            if not isinstance(value, dict):
+                return {}
+            return copy.deepcopy(value)
+
+        metadata = {
+            "action_origin": normalized_origin,
+            "report_intent": str(report_intent).strip() or ("allow_action" if normalized_action else ""),
+            "action_subject": {
+                "name": subject_name,
+                "type": subject_type or "event",
+            },
+            "action_context": _sanitize_mapping(action_context),
+            "selected_evidence_receipt": _sanitize_mapping(selected_evidence_receipt),
+            "evidence_links": normalized_links,
+            "insight": {
+                "trace_id": insight_trace,
+                "text": insight_text,
+            } if insight_trace or insight_text else {},
+            "scan": {
+                "snapshot_id": snapshot_id,
+            } if snapshot_id else {},
+        }
+        summary = (
+            f"{normalized_origin} action '{normalized_action}' for "
+            f"{subject_name} ({subject_type or 'event'}) with {len(normalized_links)} evidence link(s)."
+        )
+        report = {
+            "id": report_id,
+            "session_id": report_session,
+            "timestamp": timestamp,
+            "report_type": report_type,
+            "contact": "",
+            "target": subject_name,
+            "context": summary,
+            "receipt": {
+                "id": receipt_id,
+                "session_id": report_session,
+                "trace_id": normalized_trace_id,
+                "timestamp": timestamp,
+                "summary": {
+                    "action_id": normalized_action,
+                    "action_origin": normalized_origin,
+                    "text": summary,
+                },
+                "metadata": metadata,
+                "gaps": [],
+                "integrity": {
+                    "receipt_hash": _fingerprint(report_id, report_session, timestamp),
+                },
+            },
+            "evidence_links": normalized_links,
+            "concern_letter": {},
+            "metadata": {
+                "report_version": 1,
+                "created_by": "cleanhouse_monitoring_adapter",
+                "action_id": normalized_action,
+                "origin": normalized_origin,
+                "subject_name": subject_name,
+                "subject_type": subject_type or "event",
+            },
+        }
+        if self.persistence_enabled:
+            pr = PersistenceBackend.persist("report", report_id, {"status": "ok", **report})
+            if pr.get("status") != "ok":
+                return {"status": "not_created", "reason": pr.get("message", "unable to persist action report")}
+        with self._lock:
+            self._reports[report_id] = SessionReport(
+                id=report_id,
+                session_id=report["session_id"],
+                timestamp=report["timestamp"],
+                report_type=report_type,
+                contact=report["contact"],
+                target=report["target"],
+                context=report["context"],
+                receipt=report["receipt"],
+                evidence_links=tuple(report["evidence_links"]),
+                concern_letter=report["concern_letter"],
+                metadata=report["metadata"],
+            )
+        return {
+            "status": "ok",
+            **report,
+            "integrity": report["receipt"].get("integrity", {}),
+        }
 
     def build_zaelith_report(
         self,
@@ -14880,6 +15209,100 @@ class CleanHouseMonitoringAdapter:
         return result
 
     @staticmethod
+    def _report_topic(report_type: str) -> str:
+        topic = " ".join(str(report_type or "incident").replace("-", "_").split("_"))
+        return topic[:1].upper() + topic[1:] if topic else "Incident"
+
+    @staticmethod
+    def _report_list_item(value: Any, fallback: str = "") -> str:
+        text = " ".join(str(value or "").split())
+        return text if text else fallback
+
+    def _build_concern_letter(
+        self,
+        *,
+        session_id: str,
+        report_type: str,
+        contact: str,
+        target: str,
+        context: str,
+        receipt: Dict[str, Any],
+        evidence_links: Sequence[str],
+        generated_at: str,
+    ) -> Dict[str, Any]:
+        topic = self._report_topic(report_type)
+        recipient = self._report_list_item(contact, "Management Team")
+        target_name = self._report_list_item(target, "the referenced system or service")
+        summary = receipt.get("summary", {}) if isinstance(receipt.get("summary"), dict) else {}
+        metadata = receipt.get("metadata", {}) if isinstance(receipt.get("metadata"), dict) else {}
+        verdict = self._report_list_item(summary.get("verdict"), "unknown")
+        event_count = int(metadata.get("event_count") or 0)
+        alert_count = int(metadata.get("alert_count") or 0)
+        gap_count = int(metadata.get("gap_count") or 0)
+        summary_text = self._report_list_item(
+            summary.get("text"),
+            f"CleanHouse generated a {topic.lower()} report for session {session_id}.",
+        )
+        facts = [
+            summary_text,
+            f"Session ID: {session_id}.",
+            f"Target: {target_name}.",
+            f"Receipt verdict: {verdict}.",
+            f"Evidence references attached: {len(evidence_links)}.",
+        ]
+        if context:
+            facts.insert(1, f"Operator context: {self._report_list_item(context)}")
+
+        impact = (
+            f"The record includes {event_count} event(s), {alert_count} alert(s), "
+            f"and {gap_count} unresolved gap(s). Review is requested so the concern "
+            "can be resolved from replayable evidence instead of unsupported narrative."
+        )
+        requested_actions = [
+            "Review the attached CleanHouse receipt and evidence references.",
+            "Confirm whether corrective action, documentation, or a policy update is required.",
+            "Provide the owner, status, and next review point for this concern.",
+        ]
+        subject = f"Letter of Concern Regarding {topic}"
+        body_lines = [
+            f"Subject: {subject}",
+            "",
+            f"Dear {recipient},",
+            "",
+            f"The purpose of this letter is to formally express concern regarding {topic.lower()} for {target_name}.",
+            "",
+            "Background and context:",
+        ]
+        body_lines.extend(f"- {fact}" for fact in facts)
+        body_lines.extend([
+            "",
+            f"Impact: {impact}",
+            "",
+            "Requested action:",
+        ])
+        body_lines.extend(f"{index}. {action}" for index, action in enumerate(requested_actions, start=1))
+        body_lines.extend([
+            "",
+            "Please advise how we can proceed after review of the attached evidence.",
+            "",
+            "Sincerely,",
+            "CleanHouse",
+        ])
+        return {
+            "template": "letter_of_concern_v1",
+            "generated_at": generated_at,
+            "subject": subject,
+            "recipient": recipient,
+            "topic": topic,
+            "facts": facts,
+            "impact": impact,
+            "requested_actions": requested_actions,
+            "response_requested_by": "",
+            "evidence_level": verdict,
+            "body": "\n".join(body_lines),
+        }
+
+    @staticmethod
     def _summary_report_dict(report: Dict[str, Any]) -> Dict[str, Any]:
         record = copy.deepcopy(report)
         receipt = record.get("receipt")
@@ -14905,8 +15328,8 @@ class CleanHouseMonitoringAdapter:
             records = [r for r in records if r.get("session_id") == session_id]
         if report_type:
             records = [r for r in records if r.get("report_type") == report_type]
-        if limit is not None:
-            records = records[:max(0, int(limit))]
+        max_records = limit if limit is not None else LOW_PROCESSING_HISTORY_LIMIT
+        records = records[:max(0, int(max_records))]
         if summary_only:
             records = [self._summary_report_dict(r) for r in records]
         return {
@@ -15301,13 +15724,15 @@ class CleanHouseMonitoringAdapter:
         sorted_processes = sorted(processes, key=lambda item: item.get("cpu", 0.0), reverse=True)
         selected_processes = sorted_processes[:100]
         selected_pids = {str(proc.get("pid")) for proc in selected_processes}
-        supported_app_markers = ("terminal.app", "com.apple.terminal", "/utilities/terminal")
+        supported_app_markers = (".app/contents/", "terminal.app", "com.apple.terminal", "/utilities/terminal")
         for proc in sorted_processes[100:]:
             pid = str(proc.get("pid"))
             command = str(proc.get("command", "")).lower()
             if pid not in selected_pids and any(marker in command for marker in supported_app_markers):
                 selected_processes.append(proc)
                 selected_pids.add(pid)
+                if len(selected_processes) >= 400:
+                    break
 
         for proc in selected_processes:
             command = proc.get("command", "")
@@ -15519,6 +15944,12 @@ class CleanHouseMonitoringAdapter:
                 "port": conn.get("port"),
                 "domain": conn.get("domain"),
                 "address": conn.get("address"),
+                "local_address": conn.get("local_address"),
+                "local_host": conn.get("local_host"),
+                "local_port": conn.get("local_port"),
+                "remote_address": conn.get("remote_address"),
+                "remote_host": conn.get("remote_host"),
+                "remote_port": conn.get("remote_port"),
                 "suspicious": bool(conn.get("suspicious")),
                 "reason": conn.get("suspicious_reason"),
             }

@@ -19,7 +19,10 @@ function harness(url, avatarUrl = '') {
     };
     const calls = [];
     const window = { location: { href: url } };
-    const history = { state: {}, replaceState(_state, _title, path) { window.location.href = new URL(path, window.location.href).href; } };
+    const history = {
+        state: {},
+        replaceState(_state, _title, path) { window.location.href = new URL(path, window.location.href).href; },
+    };
     const context = vm.createContext({
         window, history, URL, URLSearchParams, console,
         document: { addEventListener() {}, getElementById(id) { return nodes[id] || null; }, querySelectorAll() { return []; } },

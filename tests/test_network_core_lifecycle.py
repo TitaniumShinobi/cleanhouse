@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import Mock, patch
 
@@ -73,7 +74,12 @@ class NetworkServerLifecycleTests(unittest.TestCase):
         collector = collector or Mock(return_value={"status": "running", "reason_code": ""})
         heartbeat = heartbeat or Mock()
         completion = Mock()
-        with patch.object(self.server, "_wait_for_listener_ready", return_value=True), patch.object(
+        with patch.dict(os.environ, {
+            "CLEANHOUSE_NETWORK_COLLECTOR_AUTOSTART": "1",
+            "CLEANHOUSE_NETWORK_HISTORY_ENABLED": "1",
+        }), patch.object(
+            self.server, "_wait_for_listener_ready", return_value=True
+        ), patch.object(
             self.server.runtime_supervisor, "mark_backend_bootstrap_ready"
         ), patch.object(
             self.server.runtime_supervisor, "mark_backend_warmup_started"
@@ -101,7 +107,7 @@ class NetworkServerLifecycleTests(unittest.TestCase):
             self.server._start_events_services()
         return completion.call_args.kwargs, watcher, history, collector, heartbeat
 
-    def test_missing_engine_degrades_warmup_with_exact_reason(self):
+    def test_missing_engine_degrades_network_without_blocking_runtime_warmup(self):
         result, _, _, _, _ = self._run_startup(
             collector=Mock(
                 return_value={
@@ -111,11 +117,15 @@ class NetworkServerLifecycleTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result["runtime_state"], "degraded")
-        self.assertIn("network_capture_engine_unavailable", result["reason_codes"])
+        self.assertEqual(result["runtime_state"], "healthy")
+        self.assertNotIn("network_capture_engine_unavailable", result["reason_codes"])
         self.assertEqual(
             result["details"]["network_collector"]["reason_code"],
             "capture_engine_unavailable",
+        )
+        self.assertEqual(
+            result["details"]["network_collector"]["runtime_impact"],
+            "subsystem_degraded",
         )
 
     def test_watcher_failure_does_not_skip_network_or_heartbeat(self):

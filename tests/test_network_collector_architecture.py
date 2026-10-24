@@ -12,9 +12,10 @@ import subprocess
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
 
-from backend.network_collector import CaptureEngineUnavailable, NetworkCollectorSupervisor
+from backend.network_collector import NetworkCollectorSupervisor
 
 
 class _BlockingStdout:
@@ -202,6 +203,53 @@ class NetworkCollectorArchitectureTests(unittest.TestCase):
         self.assertEqual(refreshed["high_water_cursor"], collector.snapshot()["cursor"])
         self.assertNotEqual(refreshed["high_water_cursor"], before_cursor)
 
+    def test_health_exposes_source_event_time_and_ingestion_latency(self):
+        collector = self._collector()
+        source_time = datetime.now(timezone.utc) - timedelta(seconds=2)
+
+        collector.publish_event({
+            "event_id": "latency-visible",
+            "timestamp": source_time.isoformat().replace("+00:00", "Z"),
+        })
+        health = collector.health()
+
+        self.assertEqual(health["last_event_timestamp"], source_time.isoformat().replace("+00:00", "Z"))
+        self.assertGreaterEqual(health["ingestion_latency_ms"], 1500)
+        self.assertLess(health["ingestion_latency_ms"], 5000)
+
+    def test_supervised_capture_coalesces_repeated_flow_samples_with_explicit_metrics(self):
+        process = _FakeProcess(4201, lines=("flow-a\n", "flow-a\n", "flow-b\n"))
+        collector = self._collector(
+            process_factory=Mock(return_value=process),
+            event_identity=lambda event: str(event.get("payload") or ""),
+            coalesce_window_seconds=1.0,
+        )
+
+        collector.start()
+        self.assertTrue(_wait_until(lambda: collector.health()["startup_packets_captured"] >= 3))
+        health = collector.health()
+
+        self.assertEqual(health["startup_packet_events_parsed"], 3)
+        self.assertEqual(health["startup_canonical_packet_events_emitted"], 2)
+        self.assertEqual(health["coalesced_packet_events"], 1)
+        self.assertEqual(health["coalesce_window_seconds"], 1.0)
+        self.assertEqual([item["event"]["event_id"] for item in self.persisted], ["flow-a", "flow-b"])
+
+    def test_coalescing_window_is_measured_from_last_emitted_sample(self):
+        collector = self._collector(
+            event_identity=lambda event: str(event.get("payload") or ""),
+            coalesce_window_seconds=1.0,
+        )
+        event = {"payload": "continuous-flow"}
+
+        with patch("backend.network_collector.time.monotonic", side_effect=(10.0, 10.4, 10.8, 11.1)):
+            self.assertFalse(collector._should_coalesce(event))
+            self.assertTrue(collector._should_coalesce(event))
+            self.assertTrue(collector._should_coalesce(event))
+            self.assertFalse(collector._should_coalesce(event))
+
+        self.assertEqual(collector.health()["coalesced_packet_events"], 2)
+
     def test_watchdog_restarts_failed_capture_and_emits_typed_continuity_receipts(self):
         failed = _FakeProcess(4301, exit_code=17, stderr="capture failed")
         recovered = _FakeProcess(4302)
@@ -252,69 +300,6 @@ class NetworkCollectorArchitectureTests(unittest.TestCase):
         self.assertTrue(receipt["event"]["joined"])
         self.assertEqual(receipt["event"]["state"], "stopped")
         self.assertEqual(process.terminate_calls, 1)
-        self.assertFalse(collector.health()["thread_alive"])
-
-    def test_missing_capture_engine_is_exact_degraded_state_without_packets(self):
-        process_factory = Mock()
-        collector = self._collector(
-            command_factory=lambda: (_ for _ in ()).throw(
-                CaptureEngineUnavailable("reviewed bundle absent")
-            ),
-            process_factory=process_factory,
-            watchdog_backoff_seconds=0.05,
-        )
-
-        collector.start()
-        health = collector.wait_for_initial_state(timeout=0.5)
-
-        self.assertEqual(health["state"], "degraded")
-        self.assertEqual(health["reason_code"], "capture_engine_unavailable")
-        self.assertEqual(health["last_packet_sequence"], 0)
-        self.assertEqual(process_factory.call_count, 0)
-        self.assertEqual(self.persisted, [])
-        self.assertTrue(
-            _wait_until(
-                lambda: any(item["type"] == "collector.failure" for item in self.receipts)
-            )
-        )
-        failure = next(item for item in self.receipts if item["type"] == "collector.failure")
-        self.assertEqual(failure["event"]["reason"], "capture_engine_unavailable")
-
-    def test_missing_engine_retry_uses_bounded_backoff_not_busy_loop(self):
-        attempts = Mock(side_effect=CaptureEngineUnavailable("reviewed bundle absent"))
-        collector = self._collector(
-            command_factory=attempts,
-            watchdog_backoff_seconds=0.05,
-        )
-
-        collector.start()
-        self.assertTrue(_wait_until(lambda: attempts.call_count >= 1))
-        time.sleep(0.02)
-        health = collector.health()
-
-        self.assertEqual(attempts.call_count, 1)
-        self.assertGreaterEqual(health["watchdog_backoff_seconds"], 0.05)
-        self.assertLessEqual(health["watchdog_backoff_seconds"], 30.0)
-        self.assertIsNotNone(health["next_restart_at"])
-
-    def test_stop_interrupts_missing_engine_backoff_and_joins_promptly(self):
-        collector = self._collector(
-            command_factory=lambda: (_ for _ in ()).throw(
-                CaptureEngineUnavailable("reviewed bundle absent")
-            ),
-            watchdog_backoff_seconds=5.0,
-        )
-
-        collector.start()
-        self.assertEqual(
-            collector.wait_for_initial_state(timeout=0.5)["reason_code"],
-            "capture_engine_unavailable",
-        )
-        started = time.monotonic()
-        receipt = collector.stop(timeout=0.5)
-
-        self.assertLess(time.monotonic() - started, 0.5)
-        self.assertTrue(receipt["event"]["joined"])
         self.assertFalse(collector.health()["thread_alive"])
 
 

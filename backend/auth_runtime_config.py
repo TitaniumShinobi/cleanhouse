@@ -19,6 +19,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONTRACT_PATH = REPO_ROOT / "config" / "auth-runtime.json"
 DEFAULT_PUBLIC_OVERLAY_PATH = Path.home() / ".cleanhouse" / "auth" / "public.json"
 INSTALLED_KEYCHAIN_HELPER = Path.home() / ".cleanhouse" / "auth" / "keychain-helper"
+MFA_KEYCHAIN_SERVICE = "com.life.cleanhouse.auth.mfa"
+MFA_KEYCHAIN_ACCOUNT = "encryption-key"
+DEFAULT_MFA_KEY_FILE = Path.home() / ".cleanhouse" / "auth" / "mfa-encryption-key"
 
 _runtime: dict[str, Any] | None = None
 
@@ -70,6 +73,25 @@ def _keychain_secret(service: str, account: str) -> str:
     if result.returncode != 0:
         return ""
     return secret
+
+
+def mfa_encryption_key(env: Mapping[str, str] | None = None) -> str:
+    """Resolve the product-owned MFA key without exposing it in public config."""
+    source = env if env is not None else os.environ
+    configured = str(source.get('CLEANHOUSE_MFA_ENCRYPTION_KEY') or source.get('AUTH_MFA_ENCRYPTION_KEY') or '').strip()
+    if configured:
+        return configured
+    keychain = _keychain_secret(MFA_KEYCHAIN_SERVICE, MFA_KEYCHAIN_ACCOUNT)
+    if keychain:
+        return keychain
+    key_path = Path(str(source.get('CLEANHOUSE_MFA_ENCRYPTION_KEY_FILE') or DEFAULT_MFA_KEY_FILE)).expanduser()
+    try:
+        stat = key_path.stat()
+        if not key_path.is_file() or stat.st_uid != os.getuid() or stat.st_mode & 0o077:
+            return ""
+        return key_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
 
 
 def sys_platform() -> str:

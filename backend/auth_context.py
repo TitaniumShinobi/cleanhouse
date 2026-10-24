@@ -121,6 +121,10 @@ def resolve_identity(
             return None
         if result.replacement:
             g.cleanhouse_session_replacement = result.replacement
+            previous = str(result.record.get("previous_session_id") or "")
+            if previous:
+                from backend.auth_mfa import CleanHouseMFA
+                CleanHouseMFA(store.path).rebind_rotated_session(user_id=str(result.record["user_id"]), old_session_id=previous, new_session_id=result.replacement.id)
         user_id = str(result.record["user_id"])
         user = _user_dict(user_loader(user_id))
         if not user:

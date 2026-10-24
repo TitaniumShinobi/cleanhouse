@@ -242,9 +242,11 @@ class AuthStore:
                 BEFORE UPDATE ON consent_receipts BEGIN SELECT RAISE(ABORT, 'consent receipts are append-only'); END;
                 CREATE TRIGGER IF NOT EXISTS consent_receipts_no_delete
                 BEFORE DELETE ON consent_receipts BEGIN SELECT RAISE(ABORT, 'consent receipts are append-only'); END;
-                PRAGMA user_version = 1;
                 """
             )
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version < 1:
+                connection.execute("PRAGMA user_version = 1")
         if self.path.exists():
             try:
                 self.path.chmod(0o600)
@@ -407,7 +409,9 @@ class AuthStore:
         self._event(connection, user_id=old["user_id"], event_type="session_rotated", occurred_at=now,
                     session_id=old["id"], data={"replacement_session_id": new_id})
         new_row = connection.execute("SELECT * FROM device_sessions WHERE id = ?", (new_id,)).fetchone()
-        return CredentialResult("rotated", self._session_record(new_row), IssuedCredential(new_id, raw, _iso(absolute)))
+        record = self._session_record(new_row)
+        record["previous_session_id"] = old["id"]
+        return CredentialResult("rotated", record, IssuedCredential(new_id, raw, _iso(absolute)))
 
     def revoke_session(self, session_id: str, user_id: str, *, now: datetime | None = None) -> bool:
         now = _as_utc(now)

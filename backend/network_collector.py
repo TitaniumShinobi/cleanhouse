@@ -10,6 +10,9 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import copy
+from datetime import datetime, timezone
+import json
+import logging
 import queue
 import subprocess
 import threading
@@ -21,9 +24,11 @@ from typing import Any, Callable, Optional
 Envelope = dict[str, Any]
 CommandFactory = Callable[[], dict[str, Any]]
 EventCallback = Callable[[Envelope], Optional[Envelope]]
+EventIdentity = Callable[[dict[str, Any]], str]
 
 
 _CLOSED = object()
+_LOG = logging.getLogger(__name__)
 
 
 class CaptureEngineUnavailable(RuntimeError):
@@ -80,6 +85,9 @@ class NetworkCollectorSupervisor:
         subscriber_queue_size: int = 256,
         watchdog_backoff_seconds: float = 1.0,
         process_factory: Callable[[list[str], str | None], Any] | None = None,
+        event_identity: EventIdentity | None = None,
+        coalesce_window_seconds: float = 0.0,
+        coalesce_identity_limit: int = 8192,
     ) -> None:
         if replay_size < 1:
             raise ValueError("replay_size must be positive")
@@ -95,6 +103,9 @@ class NetworkCollectorSupervisor:
         self._subscriber_queue_size = int(subscriber_queue_size)
         self._watchdog_backoff_seconds = max(0.01, float(watchdog_backoff_seconds))
         self._process_factory = process_factory or self._default_process_factory
+        self._event_identity = event_identity
+        self._coalesce_window_seconds = max(0.0, float(coalesce_window_seconds))
+        self._coalesce_identity_limit = max(64, int(coalesce_identity_limit))
 
         self._state_lock = threading.RLock()
         self._state_changed = threading.Condition(self._state_lock)
@@ -113,6 +124,8 @@ class NetworkCollectorSupervisor:
         self._interface = ""
         self._started_at: float | None = None
         self._last_packet_at: float | None = None
+        self._last_event_timestamp = ""
+        self._last_ingestion_latency_ms: float | None = None
         self._last_packet_sequence = 0
         self._last_exit_at: float | None = None
         self._last_exit_code: int | None = None
@@ -126,6 +139,29 @@ class NetworkCollectorSupervisor:
         self._receipt_persistence_failures = 0
         self._subscriber_drops = 0
         self._replay_evictions = 0
+        self._packets_captured = 0
+        self._packet_events_parsed = 0
+        self._canonical_packet_events_emitted = 0
+        self._coalesced_packet_events = 0
+        self._coalesce_seen: dict[str, float] = {}
+
+    def _should_coalesce(self, event: dict[str, Any]) -> bool:
+        if self._event_identity is None or self._coalesce_window_seconds <= 0:
+            return False
+        identity = str(self._event_identity(event) or "").strip()
+        if not identity:
+            return False
+        now = time.monotonic()
+        with self._state_lock:
+            previous = self._coalesce_seen.get(identity)
+            if previous is not None and now - previous < self._coalesce_window_seconds:
+                self._coalesced_packet_events += 1
+                return True
+            self._coalesce_seen.pop(identity, None)
+            self._coalesce_seen[identity] = now
+            while len(self._coalesce_seen) > self._coalesce_identity_limit:
+                self._coalesce_seen.pop(next(iter(self._coalesce_seen)))
+        return False
 
     @staticmethod
     def _default_process_factory(command: list[str], cwd: str | None) -> subprocess.Popen[str]:
@@ -291,8 +327,30 @@ class NetworkCollectorSupervisor:
                 if envelope.get("type") == "network.event":
                     self._last_packet_at = time.time()
                     self._last_packet_sequence = sequence
+                    persisted_event = envelope.get("event") if isinstance(envelope.get("event"), dict) else {}
+                    self._last_event_timestamp = str(persisted_event.get("timestamp") or "")
+                    self._last_ingestion_latency_ms = self._event_ingestion_latency_ms(
+                        self._last_event_timestamp,
+                        self._last_packet_at,
+                    )
             self._append_and_fan_out(envelope)
             return copy.deepcopy(envelope)
+
+    @staticmethod
+    def _event_ingestion_latency_ms(timestamp: Any, ingested_at: float) -> float | None:
+        text = str(timestamp or "").strip()
+        if not text:
+            return None
+        try:
+            event_epoch = float(text)
+            if event_epoch > 100000000000:
+                event_epoch /= 1000.0
+        except (TypeError, ValueError):
+            try:
+                event_epoch = datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc).timestamp()
+            except (TypeError, ValueError):
+                return None
+        return max(0.0, round((float(ingested_at) - event_epoch) * 1000.0, 3))
 
     def _stderr_drain(self, stream: Any, chunks: deque[str]) -> None:
         if stream is None:
@@ -398,9 +456,35 @@ class NetworkCollectorSupervisor:
                 for line in stdout:
                     if self._stop_event.is_set():
                         break
+                    with self._state_lock:
+                        self._packets_captured += 1
+                        packet_number = self._packets_captured
                     parsed = self._parse_line(str(line), interface)
                     if parsed:
-                        self.publish_event(parsed)
+                        with self._state_lock:
+                            self._packet_events_parsed += 1
+                        if self._should_coalesce(parsed):
+                            continue
+                        envelope = self.publish_event(parsed)
+                        emitted = envelope.get("type") == "network.event"
+                        if emitted:
+                            with self._state_lock:
+                                self._canonical_packet_events_emitted += 1
+                        _LOG.debug("network_startup_reconciliation %s", json.dumps({
+                            "stage": "packet_captured",
+                            "packet_number": packet_number,
+                            "canonical_event_emitted": emitted,
+                            "sequence": envelope.get("sequence"),
+                            "event_id": (envelope.get("event") or {}).get("event_id"),
+                            "reason": "parsed_and_emitted" if emitted else str((envelope.get("event") or {}).get("reason") or "canonical_event_not_emitted"),
+                        }, sort_keys=True, default=str))
+                    else:
+                        _LOG.info("network_startup_reconciliation %s", json.dumps({
+                            "stage": "packet_captured",
+                            "packet_number": packet_number,
+                            "canonical_event_emitted": False,
+                            "reason": "parser_returned_no_operator_visible_packet_event",
+                        }, sort_keys=True))
 
                 if self._stop_event.is_set():
                     self._terminate_process(process)
@@ -674,6 +758,8 @@ class NetworkCollectorSupervisor:
                 "thread_alive": thread_alive,
                 "started_at": self._started_at,
                 "last_packet_at": self._last_packet_at,
+                "last_event_timestamp": self._last_event_timestamp,
+                "ingestion_latency_ms": self._last_ingestion_latency_ms,
                 "last_packet_sequence": self._last_packet_sequence,
                 "last_exit_at": self._last_exit_at,
                 "last_exit_code": self._last_exit_code,
@@ -694,4 +780,10 @@ class NetworkCollectorSupervisor:
                 "replay_buffer_depth": len(self._replay),
                 "replay_buffer_capacity": self._replay_size,
                 "replay_evictions": self._replay_evictions,
+                "startup_packets_captured": self._packets_captured,
+                "startup_packet_events_parsed": self._packet_events_parsed,
+                "startup_canonical_packet_events_emitted": self._canonical_packet_events_emitted,
+                "coalesced_packet_events": self._coalesced_packet_events,
+                "coalesce_window_seconds": self._coalesce_window_seconds,
+                "coalesce_identity_count": len(self._coalesce_seen),
             }

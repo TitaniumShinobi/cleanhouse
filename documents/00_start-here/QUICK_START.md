@@ -18,16 +18,7 @@ cd /Users/devonwoodson/Documents/GitHub/cleanhouse
 /bin/bash scripts/cleanhouse-up.sh
 ```
 
-This resolves the interpreter deterministically, preferring the managed runtime at
-`~/.cleanhouse/runtime/python/bin/python3` before repository environments, starts the
-supervised runtime, waits for `operator_ready=true`, and opens: **http://localhost:3333/overview**
-
-Operator readiness is fail-closed: runtime state must be `healthy`, startup must be `warm`,
-the supervisor and backend must be alive, exactly one CleanHouse-owned listener must match the
-backend PID, no foreign listener may exist, heartbeat and readiness probes must be current, and
-no self-deviation or hard resource block may be active. A bootstrap timestamp or LaunchAgent
-`KeepAlive` state alone is not readiness. The interpreter probe imports `backend.server`, so
-missing transitive launch dependencies fail before startup.
+This resolves the interpreter deterministically, starts the supervised runtime, waits for readiness, and opens: **http://localhost:3333/dashboard**
 
 ### Debug-Only Startup Paths (Non-Canonical)
 

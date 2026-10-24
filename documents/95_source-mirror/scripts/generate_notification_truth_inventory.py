@@ -13,10 +13,9 @@ MONITORING_PATH = REPO / "backend" / "api" / "cleanhouse_monitoring.py"
 OUTPUT_PATH = REPO / "docs" / "evidence" / "CLEANHOUSE_NOTIFICATION_TRUTH_INVENTORY.md"
 
 PRODUCTION_TYPES = {
-    "codex_prompt_sent",
     "session_started",
     "session_ended",
-    "incident_action_required",
+    "scope_drift_detected",
 }
 
 VALIDATION_SOURCES = {"probe", "notification_probe"}

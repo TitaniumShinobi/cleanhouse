@@ -1,0 +1,40 @@
+{
+  "name": "bundled_wireshark",
+  "platform": "darwin-arm64",
+  "version": "4.6.6",
+  "source": "cleanhouse-bundled-wireshark",
+  "license": "GPL-2.0-or-later",
+  "license_file": "Resources/share/wireshark/COPYING",
+  "layout": {
+    "bin": "bin",
+    "frameworks": "Frameworks",
+    "resources": "Resources/share",
+    "extras": "Resources/Extras",
+    "plugins": "PlugIns/wireshark"
+  },
+  "components": {
+    "bin/tshark": {
+      "sha256": "130bc8af719e15d081a00c32101a93beb56d4ed14dddd4e5d556712fd49ef75c"
+    },
+    "bin/dumpcap": {
+      "sha256": "3468f750f66f2889c2c85a314d340834a70e2fa88665191954a1c0de6df9e679"
+    }
+  },
+  "runtime_closure": {
+    "bin/tshark": {
+      "sha256": "130bc8af719e15d081a00c32101a93beb56d4ed14dddd4e5d556712fd49ef75c"
+    },
+    "bin/dumpcap": {
+      "sha256": "3468f750f66f2889c2c85a314d340834a70e2fa88665191954a1c0de6df9e679"
+    },
+    "Frameworks": {
+      "sha256": "3332aa8b4bd802e8792016f7a8b562f044666e11322fcf32bf36d1659c483360"
+    },
+    "Resources/share/wireshark": {
+      "sha256": "223287493f271d1ceae23d2844b37a21d9792664d163070e67fcafa9cafd0e84"
+    },
+    "PlugIns/wireshark": {
+      "sha256": "0cfe532bd1e62d82faf13c657e69821eb7db9278341e7b0da68579cda759667c"
+    }
+  }
+}

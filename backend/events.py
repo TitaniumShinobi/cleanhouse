@@ -641,7 +641,13 @@ def _start_db_writer() -> None:
         _WRITER_STATE["thread"] = thread
         _WRITER_STATE["queue"] = event_queue
         _WRITER_STOP_EVENT.clear()
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            _WRITER_STATE["thread"] = None
+            _WRITER_STATE["queue"] = None
+            raise
+        _WRITER_STATE["last_error"] = None
 
 
 def _stop_db_writer() -> None:
@@ -747,19 +753,18 @@ def get_writer_health() -> dict[str, Any]:
         "unfinished_tasks": int(getattr(_EVENT_QUEUE, "unfinished_tasks", 0)),
         "full": _EVENT_QUEUE.full(),
     }
+    # Metrics are cumulative evidence. They must remain visible, but an old
+    # startup failure or recovered retry cannot keep the live writer degraded
+    # forever after a successful restart clears ``last_error``.
     degradation_reasons: list[str] = []
-    if metrics.get("write_failures", 0):
-        degradation_reasons.append("write_failures")
-    if metrics.get("dropped", 0):
-        degradation_reasons.append("dropped_records")
-    if metrics.get("write_retries", 0):
-        degradation_reasons.append("write_retries")
+    if last_error is not None:
+        degradation_reasons.append(str(last_error.get("source") or "writer_error"))
     if queue_metrics["full"]:
         degradation_reasons.append("queue_full")
 
-    if metrics.get("write_failures", 0) or metrics.get("dropped", 0):
+    if last_error is not None:
         collector_status = "failure"
-    elif metrics.get("write_retries", 0) or queue_metrics["full"]:
+    elif queue_metrics["full"]:
         collector_status = "degraded"
     elif running:
         collector_status = "ok"
@@ -783,6 +788,16 @@ def get_writer_health() -> dict[str, Any]:
             "reasons": degradation_reasons,
         },
     }
+
+
+def start_event_writer() -> dict[str, Any]:
+    """Start the durable event writer independently of the first observed event."""
+    try:
+        _start_db_writer()
+    except Exception as exc:
+        record_event_write_failure("writer_start", exc)
+        logging.warning("Could not start event writer: %s", exc)
+    return get_writer_health()
 
 
 def _queue_db_write(payload: dict[str, Any]) -> None:
@@ -1084,6 +1099,8 @@ def list_events(
     session_id: str | None = None,
     event_type: str | None = None,
     source_surface: str | None = None,
+    start_timestamp: str | None = None,
+    end_timestamp: str | None = None,
 ) -> list[dict[str, Any]]:
     db_path = _resolve_usable_db_path()
     init_db()
@@ -1122,6 +1139,12 @@ def list_events(
     if source_surface:
         where_clauses.append("source_surface = ?")
         params.append(source_surface)
+    if start_timestamp:
+        where_clauses.append("datetime(timestamp) >= datetime(?)")
+        params.append(start_timestamp)
+    if end_timestamp:
+        where_clauses.append("datetime(timestamp) <= datetime(?)")
+        params.append(end_timestamp)
     if where_clauses:
         query += " WHERE " + " AND ".join(where_clauses)
     if session_id:

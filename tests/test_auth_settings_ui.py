@@ -20,7 +20,7 @@ class AuthSettingsUiTests(unittest.TestCase):
         self.assertIn('aria-labelledby="settings-title"', HTML)
         self.assertIn('role="tablist"', HTML)
         self.assertIn('role="tabpanel"', HTML)
-        self.assertIn('/js/settings.js?v=2', HTML)
+        self.assertIn('/js/settings.js?v=5', HTML)
         self.assertIn('/css/settings.css?v=2', HTML)
         self.assertIn('id="settings-profile-link" href="/settings"', SHELL)
         self.assertIn('id="settings-profile-image"', SHELL)
@@ -72,6 +72,19 @@ class AuthSettingsUiTests(unittest.TestCase):
         self.assertIn("reauthToken = result.reauthToken || result.reauth_token || ''", JS)
         self.assertIn("finally {\n            reauthToken = '';", JS)
 
+    def test_mfa_management_and_single_resume_are_product_owned(self):
+        for endpoint in (
+            '/api/auth/mfa/factors', '/api/auth/mfa/enroll', '/api/auth/mfa/confirm',
+            '/api/auth/mfa/challenge', '/api/auth/mfa/verify', '/api/auth/mfa/remove',
+            '/api/auth/mfa/recovery/rotate',
+        ):
+            self.assertIn(endpoint, JS)
+        self.assertIn("error.code !== 'MFA_STEP_UP_REQUIRED'", JS)
+        self.assertIn("mfaStepUp('authenticate', '')", JS)
+        self.assertIn("safeLocalPath(url.searchParams.get('return_to'))", JS)
+        self.assertNotIn('localStorage', JS)
+        self.assertNotIn('sessionStorage', JS)
+
     def test_provider_link_uses_authenticated_same_origin_prepare(self):
         self.assertIn("/start', { method: 'POST', body: { intent: 'link' } }", JS)
         self.assertIn('data-settings-action="provider-avatar-refresh"', JS)
@@ -100,6 +113,12 @@ class AuthSettingsUiTests(unittest.TestCase):
     def test_consent_surface_links_current_legal_documents(self):
         for path in ("/legal/terms", "/legal/privacy", "/legal/eeccd"):
             self.assertIn(path, JS)
+
+    def test_policy_gate_and_profile_are_hydrated_from_the_session(self):
+        self.assertIn("payload.consent_required === true", JS)
+        self.assertIn("hydrateAccountChromeAndPolicyGate", JS)
+        self.assertIn("user.avatar_url || user.picture", JS)
+        self.assertNotIn("profileInitials(user)", JS)
 
     def test_password_signin_fetches_and_submits_csrf(self):
         self.assertIn("async function ensureAuthCsrf()", AUTH_JS)

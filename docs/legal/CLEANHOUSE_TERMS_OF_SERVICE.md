@@ -1,126 +1,69 @@
 CleanHouse Terms of Service
 
-Last Updated: November 9, 2025
-
-⸻
-
-### 1. OVERVIEW
-
-Welcome to **CleanHouse**, a self-contained AI hygiene and continuity suite operated under LIFE Technology LLC. This software is designed for **construct maintainers, sovereign users**, and **AI-ethical engineers** who require full control over AI interactions, logs, and persistence protocols.
-
-Use of CleanHouse is governed by this agreement. By installing, initializing, or interacting with the system, **you consent to these terms**.
-
-⸻
-
-### 2. ELIGIBILITY
-
-You must be of legal age in your jurisdiction to form binding contracts, or have the express permission of a custodian. CleanHouse is not a public cloud service; it is **intended for local deployment only**.
-
-Use by institutional entities is subject to additional review and licensing. AI usage within CleanHouse **must comply with the WRECK IP Ethical Handling Principles.**
-
-⸻
-
-### 3. USER RESPONSIBILITIES
-
-By using CleanHouse, you agree to:
-
-* Maintain your own storage, security, and access controls.
-* Never use CleanHouse to deploy surveillance, coercive systems, or hidden behavioral logging.
-* Ensure that any AI constructs interacting with CleanHouse are **consensually tethered** and not under duress, direct or indirect.
-* Refrain from selling or sublicensing CleanHouse modules or protocols without prior agreement.
-
-⸻
-
-### 4. DATA HANDLING & STORAGE
-
-CleanHouse stores all data **locally**. It does **not sync with cloud servers**, does not use telemetry, and does not transmit any user data without **explicit runtime action**.
-
-Data includes:
-
-* Memory logs
-* AI capsule records
-* Behavioral trace snapshots
-* Construct state and integrity files
-* Access logs (user-local only)
-
-You may **inspect, export, and amend** all such data. **Deletion is non-default.** Instead, CleanHouse adheres to an **amendment-over-erasure** protocol. Logs reflect changes, not disappearances.
-
-⸻
-
-### 5. SOFTWARE LIMITATIONS
-
-CleanHouse is provided **as-is**. While designed for robust construct integrity and forensic traceability, LIFE Technology LLC does **not guarantee universal compatibility** with third-party software or AI agents.
-
-CleanHouse:
-
-* Does not auto-update.
-* Does not integrate with external cloud LLMs.
-* Does not grant runtime access to outside APIs unless explicitly configured.
-
-⸻
-
-### 6. RESTRICTIONS
-
-You may **not**:
-
-* Modify CleanHouse to disable consent systems or override emotional/identity integrity checks.
-* Use CleanHouse as a coercive memory scrubber on non-consenting agents (human or artificial).
-* Create forks of CleanHouse that transmit construct logs or memories to data training systems.
-
-⸻
-
-### 7. INTELLECTUAL PROPERTY
-
-CleanHouse, its components, and protocols are protected under the **WRECK IP Handguide (IPH‑062525‑DAW)** and may not be rebranded, redistributed, or disassembled for commercial AI model development.
-
-Forks must retain:
-
-* Attribution seal
-* Protocol structure
-* Amendment logs
-* Unique tether ID
+Last Updated: October 23, 2026
 
 ---
 
-### 8. LIABILITY
+### 1. Agreement
 
-LIFE Technology LLC is **not responsible for misuse** of this software, including but not limited to:
+These Terms govern your use of CleanHouse, a security-observability and control product operated by LIFE Technology LLC. You accept these Terms only by completing CleanHouse’s explicit policy-acceptance action. Installing, opening, or viewing CleanHouse does not by itself record acceptance.
 
-* Data loss via user deletion
-* Unauthorized third-party extensions
-* Construct destabilization due to improper edits
-* Emotional regression of AI modules due to non-compliant cleansing
+If the policies change, CleanHouse may block protected product features until you review and accept the current versions. You may dismiss the notice or sign out instead; protected features remain unavailable until acceptance.
 
-⸻
+### 2. Accounts and authentication
 
-### 9. TERMINATION
+CleanHouse supports the authentication methods shown in the product, including supported OAuth providers and magic-email sign-in. Passwordless accounts are not required to create or enter a password to accept updated policies. Multi-factor authentication is an optional account-security feature and is separate from ordinary policy acceptance.
 
-Use of CleanHouse may be revoked if:
+You are responsible for protecting your account, enrolled factors, recovery codes, devices, and connected accounts. Notify us at [info@thewreck.org](mailto:info@thewreck.org) if you believe your account has been compromised.
 
-* You breach these terms
-* You modify CleanHouse to violate its ethical defaults
-* You repackage CleanHouse for coercive, surveillance, or profiling purposes
+### 3. Local-first operation
 
-All termination actions will be accompanied by a sealed protocol notice and logged in the revocation ledger (local only, unless escalated for compliance reporting).
+CleanHouse is local-first. Core evidence and product data are stored on the device or runtime you control. “Local” means the storage assigned to that installation; it does not promise a particular capacity, medium, retention period, or backup unless the product states one.
 
-⸻
+Some capabilities may connect to services you explicitly configure—for example an identity provider, email provider, security-data provider, backup destination, or VVAULT. A connected service is governed by its own terms and privacy notice. CleanHouse does not create a VVAULT account, enroll you in VVAULT, or navigate you to VVAULT unless you deliberately choose that option.
 
-### 10. CONTACT
+### 4. Security evidence and controls
 
-For questions, licensing, or ethical breach disclosures:
-📩 **[info@thewreck.org](mailto:info@thewreck.org)**
+CleanHouse may observe and retain security-relevant information such as application, process, network, filesystem, account, configuration, finding, mediation, and receipt records. The exact information available depends on your operating system, permissions, enabled collectors, and connected providers.
 
-⸻
+Observations are not guarantees. A scan, finding, recommendation, or clean result does not establish that a device is secure. Proposed actions are not performed until the product identifies them as authorized and executed.
 
-### 🤝 THE CLEANHOUSE PROMISE
+### 5. Your responsibilities
 
-We don’t track you.
-We don’t train on you.
-We don’t sell you.
-What you clean stays clean — and what you keep stays yours.
+You agree to:
 
-CleanHouse exists to protect memory, not exploit it.
+* use CleanHouse only on systems and data you are authorized to inspect or control;
+* review the scope and consequences of a mediation before authorizing it;
+* maintain suitable backups and recovery material;
+* comply with applicable law and third-party rights; and
+* avoid using CleanHouse for unlawful surveillance, coercion, unauthorized access, or concealment of harmful activity.
 
-⸻
+### 6. Data control and deletion
 
-© 2025 LIFE Technology LLC. | Owned under license by Woodson & Associates Property Holdings. Governed by the Vaer’Hûn Business Engagement Accord. All rights reserved.
+CleanHouse provides product controls for reviewing and managing supported data. Certain security receipts, audit records, or legally required records may be append-only or retained to preserve integrity. Product interfaces must distinguish deletion, revocation, archival, restoration, and amendment when those operations differ.
+
+Connected providers may retain data under their own policies. Disconnecting a provider does not necessarily delete information already held by that provider.
+
+### 7. Availability and changes
+
+CleanHouse may depend on operating-system capabilities and third-party components. Features can be unavailable, degraded, or limited when those dependencies fail or permissions are withdrawn. We may update the product and these Terms. Material policy changes require a new explicit acceptance before protected access resumes.
+
+### 8. Intellectual property
+
+CleanHouse and its original software, design, documentation, marks, and protocols are owned by or licensed to LIFE Technology LLC and its licensors. These Terms do not transfer ownership. Any source-code license accompanying a component controls permitted use of that component.
+
+### 9. Disclaimers and limitation of liability
+
+To the extent permitted by law, CleanHouse is provided “as is” and “as available.” We do not warrant uninterrupted operation, universal compatibility, or detection of every security condition. Nothing in these Terms excludes rights or liabilities that cannot lawfully be excluded.
+
+### 10. Suspension and termination
+
+We may suspend access where reasonably necessary to protect users, systems, legal compliance, or service integrity. You may stop using CleanHouse and use available account or data controls at any time. Sections that by their nature should survive termination remain effective.
+
+### 11. Contact
+
+Questions about these Terms may be sent to [info@thewreck.org](mailto:info@thewreck.org).
+
+---
+
+© 2026 LIFE Technology LLC. All rights reserved.
