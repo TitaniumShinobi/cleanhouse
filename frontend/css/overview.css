@@ -1,0 +1,220 @@
+.sidebar-brand-link {
+    display: inline-grid;
+    width: 48px;
+    height: 44px;
+    place-items: center;
+    border-radius: 8px;
+}
+
+.sidebar-brand-link:focus-visible,
+.nav-link:focus-visible,
+.advanced-entry:focus-visible,
+.overview-status-link:focus-visible,
+#overview-retry:focus-visible,
+#cleanhouse-logout:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 3px;
+}
+
+.sidebar-utility {
+    display: grid;
+    gap: 8px;
+    margin-top: auto;
+}
+
+.sidebar-utility .advanced-entry {
+    margin-top: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+}
+
+.home-view {
+    align-content: start;
+    min-height: 100vh;
+    padding: clamp(88px, 12vh, 150px) clamp(8px, 4vw, 56px) 64px;
+}
+
+.overview-heading {
+    display: flex;
+    align-items: end;
+    justify-content: space-between;
+    gap: 24px;
+}
+
+.overview-heading h1 {
+    max-width: 760px;
+    margin: 4px 0 8px;
+    color: var(--muted);
+    font-size: clamp(48px, 7vw, 84px);
+    letter-spacing: -0.055em;
+    line-height: 0.98;
+}
+
+.overview-heading p {
+    max-width: 680px;
+    margin: 0;
+    color: var(--muted);
+}
+
+.overview-announcement {
+    min-height: 24px;
+    margin: 28px 0 12px;
+    color: var(--muted);
+    font-size: 14px;
+}
+
+.overview-status-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.overview-status-card {
+    display: grid;
+    min-height: 190px;
+    align-content: space-between;
+    gap: 28px;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: rgba(28, 31, 38, 0.72);
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.18);
+    color: var(--ink);
+    padding: 22px;
+}
+
+.overview-status-link {
+    text-decoration: none;
+    transition: border-color 120ms ease, transform 120ms ease;
+}
+
+.overview-status-link:hover {
+    border-color: rgba(143, 211, 199, 0.5);
+    transform: translateY(-2px);
+}
+
+.overview-card-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.overview-card-heading h2,
+.overview-status-card p {
+    margin: 0;
+}
+
+.overview-status-card p {
+    color: var(--muted);
+    line-height: 1.55;
+}
+
+.overview-state-pill {
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 850;
+    letter-spacing: 0.05em;
+    padding: 6px 9px;
+    text-transform: uppercase;
+}
+
+.overview-status-card[data-state="live"] .overview-state-pill,
+.overview-status-card[data-state="no_data"] .overview-state-pill {
+    border-color: rgba(145, 216, 162, 0.5);
+    color: var(--ok);
+}
+
+.overview-status-card[data-state="fallback"] .overview-state-pill,
+.overview-status-card[data-state="warming"] .overview-state-pill {
+    border-color: rgba(216, 181, 95, 0.55);
+    color: var(--warn);
+}
+
+.overview-status-card[data-state="degraded"] .overview-state-pill,
+.overview-status-card[data-state="unavailable"] .overview-state-pill,
+.overview-status-card[data-state="error"] .overview-state-pill {
+    border-color: rgba(239, 140, 130, 0.52);
+    color: var(--bad);
+}
+
+.overview-status-card[data-state="loading"] {
+    opacity: 0.78;
+}
+
+.overview-boundary-note {
+    max-width: 760px;
+    margin-top: 26px;
+    border-left: 3px solid var(--accent);
+    color: var(--muted);
+    padding: 4px 0 4px 16px;
+}
+
+.overview-boundary-note strong {
+    display: block;
+    color: var(--ink);
+    margin-bottom: 5px;
+}
+
+.overview-boundary-note p {
+    margin: 0;
+    line-height: 1.55;
+}
+
+@media (max-width: 980px) {
+    .sidebar-utility {
+        display: flex;
+        margin-top: 0;
+    }
+
+    .home-view {
+        min-height: auto;
+        padding: 72px 8px 40px;
+    }
+
+    .overview-heading {
+        align-items: start;
+        flex-direction: column;
+    }
+
+    .overview-heading h1 {
+        font-size: clamp(42px, 12vw, 64px);
+    }
+
+    .overview-status-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .overview-status-card {
+        min-height: 150px;
+    }
+}
+
+@media (max-width: 560px) {
+    .app-shell {
+        padding-inline: 10px;
+    }
+
+    .liquid-sidebar {
+        justify-content: flex-start;
+        overflow-x: auto;
+        padding-inline: 4px;
+    }
+
+    .sidebar-nav,
+    .sidebar-utility {
+        flex: 0 0 auto;
+    }
+
+    .overview-heading .secondary-action {
+        width: 100%;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .overview-status-link {
+        transition: none;
+    }
+}

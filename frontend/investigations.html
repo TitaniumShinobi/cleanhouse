@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CleanHouse App Security Center</title>
+<link rel="icon" href="/assets/fourstars.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/investigations.css?v=30">
+<link rel="stylesheet" href="/css/settings.css?v=2">
+</head>
+<body>
+<div class="app-shell">
+    <aside class="liquid-sidebar" aria-label="CleanHouse navigation">
+        <a class="sidebar-brand-link" href="/overview" aria-label="Overview">
+            <img class="sidebar-brand" src="/assets/fourstars.svg" alt="">
+        </a>
+        <nav class="sidebar-nav" aria-label="Primary">
+            <a class="nav-link" href="#applications" data-view="applications" aria-label="Applications" data-label="Applications">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h5v5H5z"/><path d="M14 5h5v5h-5z"/><path d="M5 14h5v5H5z"/><path d="M14 14h5v5h-5z"/></svg>
+            </a>
+            <a class="nav-link" href="#network" data-view="network" aria-label="Network" data-label="Network">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 18.75a6.75 6.75 0 1 0 0-13.5 6.75 6.75 0 0 0 0 13.5Z"/><path d="M5.75 9.5h12.5"/><path d="M5.75 14.5h12.5"/><path d="M12 5.25c1.75 1.7 2.55 3.95 2.55 6.75s-.8 5.05-2.55 6.75C10.25 17.05 9.45 14.8 9.45 12S10.25 6.95 12 5.25Z"/></svg>
+            </a>
+            <a class="nav-link" href="#files" data-view="files" aria-label="Files" data-label="Files">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4.75 7.25h5.5l1.55 2h7.45v8.5h-14.5z"/><path d="M4.75 7.25v10.5"/></svg>
+            </a>
+            <a class="nav-link" href="/zaelith" aria-label="Zaelith" data-label="Zaelith">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.25 6.75h13.5v10.5H5.25z"/><path d="M8.25 10.25h7.5"/><path d="M8.25 13.25h4.5"/><path d="M7.25 19.25 9.5 17.25"/><path d="M16.75 19.25 14.5 17.25"/></svg>
+            </a>
+            <a class="nav-link" href="/identity" aria-label="Identity" data-label="Identity">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.75 18.25 7v4.6c0 3.8-2.55 6.15-6.25 7.65-3.7-1.5-6.25-3.85-6.25-7.65V7z"/><path d="M12 9.25a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z"/><path d="M8.75 16.25c.65-1.25 1.75-1.9 3.25-1.9s2.6.65 3.25 1.9"/></svg>
+            </a>
+            <a class="nav-link" href="/reports" aria-label="Reports" data-label="Reports">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.25 4.75h7l2.5 2.5v12H7.25z"/><path d="M14.25 4.75v3h3"/><path d="M9.75 11.25h4.5"/><path d="M9.75 14.25h6"/><path d="M9.75 17.25h3.5"/></svg>
+            </a>
+        </nav>
+        <div class="sidebar-utility" aria-label="Utility">
+            <button class="advanced-entry" id="cleanhouse-logout" type="button" aria-label="Sign out" data-label="Sign out">↪</button>
+            <a class="advanced-entry" href="/help" aria-label="Help" data-label="Help">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.25"/><path d="M9.55 9.25a2.55 2.55 0 1 1 4.15 1.98c-.92.68-1.7 1.2-1.7 2.52"/><path d="M12 16.75h.01"/></svg>
+            </a>
+            <a class="advanced-entry" href="/advanced" aria-label="Advanced" data-label="Advanced">
+                <svg class="nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.75A3.25 3.25 0 1 0 12 15.25 3.25 3.25 0 0 0 12 8.75Z"/><path d="M19.25 12a7.2 7.2 0 0 0-.1-1.2l2.1-1.55-2-3.45-2.45 1a7.65 7.65 0 0 0-2.05-1.2L14.45 3h-4.9l-.3 2.6A7.65 7.65 0 0 0 7.2 6.8l-2.45-1-2 3.45 2.1 1.55a7.2 7.2 0 0 0 0 2.4l-2.1 1.55 2 3.45 2.45-1a7.65 7.65 0 0 0 2.05 1.2l.3 2.6h4.9l.3-2.6a7.65 7.65 0 0 0 2.05-1.2l2.45 1 2-3.45-2.1-1.55c.07-.4.1-.8.1-1.2Z"/></svg>
+            </a>
+            <a class="advanced-entry sidebar-profile" id="settings-profile-link" href="/settings" aria-label="Open account settings" data-label="Account settings">
+                <img id="settings-profile-image" class="sidebar-profile-image" alt="" referrerpolicy="no-referrer" hidden>
+                <span id="settings-profile-fallback" class="sidebar-profile-fallback" aria-hidden="true">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="8.25" r="3.25"/><path d="M5.75 19c.5-3.5 2.6-5.25 6.25-5.25S17.75 15.5 18.25 19"/></svg>
+                </span>
+            </a>
+        </div>
+    </aside>
+
+    <main class="main-canvas">
+        <div class="corner-actions" aria-label="CleanHouse controls">
+            <div id="notification-center" class="notification-center">
+            <button id="notification-center-button" class="notification-center-button" type="button" aria-label="Notification Center" aria-haspopup="menu" aria-expanded="false" aria-controls="notification-center-menu" data-label="Notification Center">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M18 16.25H6l1.25-1.7V10.5a4.75 4.75 0 0 1 9.5 0v4.05z"/>
+                    <path d="M10 18.25a2.2 2.2 0 0 0 4 0"/>
+                </svg>
+                <span id="notification-center-badge" class="notification-center-badge" hidden>0</span>
+            </button>
+            <section id="notification-center-menu" class="notification-dropdown" role="menu" aria-label="Notification Center" hidden>
+                <header>
+                    <strong>Notifications</strong>
+                    <small id="notification-center-count">No unread</small>
+                </header>
+                <div id="notification-list" class="notification-list">
+                    <p class="notification-empty">No live CleanHouse notifications.</p>
+                </div>
+            </section>
+            </div>
+        </div>
+        <section id="home" class="view-section home-view" data-view-panel="home">
+            <div class="section-head overview-head">
+                <h1 class="sr-only">CleanHouse security overview</h1>
+                <h2>Security at a glance</h2>
+            </div>
+
+            <section class="overview-details" aria-label="Overview details">
+                <div class="overview-threats">
+                    <h3>Current Threats</h3>
+                    <div id="overview-threats">No active threats detected</div>
+                </div>
+                <dl class="overview-metrics">
+                    <div><dt>Last FullHouse Scan</dt><dd id="overview-last-scan">Unavailable</dd></div>
+                    <div><dt>Threats</dt><dd id="overview-threat-count">0</dd></div>
+                    <div><dt>Scan Time</dt><dd id="overview-scan-time">Unavailable</dd></div>
+                    <div><dt>LLMs Scanned</dt><dd id="overview-llms-scanned">Unavailable</dd></div>
+                    <div><dt>Files Scanned</dt><dd id="overview-files-scanned">Unavailable</dd></div>
+                    <div><dt>Ports Scanned</dt><dd id="overview-ports-scanned">Unavailable</dd></div>
+                </dl>
+                <a class="overview-allowed-link" href="/allowed-threats">Allowed Threats <span id="overview-allowed-threats-count"></span></a>
+            </section>
+
+            <div class="scan-orb">
+                <button id="system-scan-btn" class="scan-button" type="button">Scan</button>
+                <a class="custom-scan-link" href="#custom-scan" data-view="custom">Custom scan</a>
+            </div>
+
+            <section id="scan-results" class="result-strip" aria-label="Scan results" hidden>
+                <article><span>Status</span><strong id="scan-status">Unknown</strong></article>
+                <article><span>Findings</span><strong id="scan-findings">0</strong></article>
+                <article><span>Evidence</span><code id="scan-evidence">Unavailable</code></article>
+                <article><span>Receipt</span><code id="scan-receipt">Unavailable</code></article>
+                <article><span>Next Action</span><p id="scan-next-action">Run a scan.</p></article>
+            </section>
+        </section>
+
+        <section id="applications" class="view-section" data-view-panel="applications" hidden>
+            <div class="section-head">
+                <h2>Applications</h2>
+                <button id="refresh-apps-btn" class="secondary-action" type="button">Refresh</button>
+            </div>
+            <div id="app-grid" class="app-grid" aria-label="Applications">
+                <div class="empty-state">Loading applications from this Mac...</div>
+            </div>
+        </section>
+
+        <section id="app-dashboard" class="view-section app-dashboard" data-view-panel="app-dashboard" hidden>
+            <p id="app-route-context" class="route-context" hidden></p>
+            <div class="section-head">
+                <div class="selected-app-head">
+                    <img id="selected-app-icon" class="selected-app-icon" alt="">
+                    <div>
+                        <p class="section-kicker">App security dashboard</p>
+                        <h2 id="selected-app-name">Application</h2>
+                        <p id="selected-app-subtitle">Identity pending</p>
+                    </div>
+                </div>
+                <div class="app-scan-actions">
+                    <button id="scan-app-btn" class="primary-action" type="button">Scan App</button>
+                    <button id="app-custom-scan-toggle" class="inline-scan-link" type="button">Custom scan</button>
+                </div>
+            </div>
+
+            <div class="dashboard-grid">
+                <article class="truth-panel">
+                    <h3>Identity</h3>
+                    <dl class="identity-list">
+                        <div><dt>Name</dt><dd id="app-identity-name">Unknown</dd></div>
+                        <div><dt>Bundle ID</dt><dd id="app-identity-bundle">Unknown</dd></div>
+                        <div><dt>Version</dt><dd id="app-identity-version">Unknown</dd></div>
+                        <div><dt>Path</dt><dd id="app-identity-path">Unknown</dd></div>
+                    </dl>
+                </article>
+                <article class="truth-panel">
+                    <h3>Status</h3>
+                    <dl class="identity-list">
+                        <div><dt>Running</dt><dd id="app-running-state">Unknown</dd></div>
+                        <div><dt>Audit</dt><dd id="app-audit-state">Unknown</dd></div>
+                        <div><dt>Badge</dt><dd id="app-badge-state">None</dd></div>
+                    </dl>
+                </article>
+                <article class="truth-panel">
+                    <h3>Permissions</h3>
+                    <p class="muted-copy">Permission evidence appears after an app scan.</p>
+                </article>
+            </div>
+
+            <article class="truth-panel">
+                <div class="panel-heading">
+                    <h3>Processes</h3>
+                    <span class="panel-note">At a glance</span>
+                </div>
+                <div id="app-process-list" class="process-list">
+                    <div class="empty-state">No app-owned processes observed yet.</div>
+                </div>
+                <p id="process-scan-status" class="status-line">Use Custom scan to select individual app processes or components.</p>
+            </article>
+
+            <article id="app-custom-scan-panel" class="truth-panel app-custom-scan-panel" hidden>
+                <div class="panel-heading">
+                    <h3>App custom scan</h3>
+                    <button id="scan-processes-btn" class="secondary-action" type="button">Scan Selected</button>
+                </div>
+                <p class="muted-copy">Select the specific processes or app components to scan.</p>
+                <div id="app-custom-process-list" class="process-list">
+                    <div class="empty-state">No app-owned processes observed yet.</div>
+                </div>
+                <p id="app-custom-scan-status" class="status-line">Choose at least one process or component.</p>
+            </article>
+
+            <article class="truth-panel" id="app-scan-result" hidden>
+                <h3 id="app-result-title">Scan result</h3>
+                <p id="app-result-summary">No app scan has run.</p>
+                <div id="app-finding-list" class="operator-findings"></div>
+            </article>
+
+            <section id="evidence" class="case-file-section" aria-labelledby="evidence-title" hidden>
+                <div class="section-heading">
+                    <h2 id="evidence-title">Evidence</h2>
+                    <p>Case file</p>
+                </div>
+                <div class="case-file">
+                    <details class="case-item" open>
+                        <summary>Timeline</summary>
+                        <div id="evidence-timeline" class="case-copy empty">Timeline evidence appears after a scan.</div>
+                    </details>
+                    <details class="case-item">
+                        <summary>Process Tree</summary>
+                        <div id="evidence-process" class="case-copy empty">Process evidence appears after a scan.</div>
+                    </details>
+                    <details class="case-item">
+                        <summary>File Activity</summary>
+                        <div id="evidence-file" class="case-copy empty">File evidence appears after a scan.</div>
+                    </details>
+                    <details class="case-item">
+                        <summary>Network</summary>
+                        <div id="evidence-network" class="case-copy empty">Network evidence appears after a scan.</div>
+                    </details>
+                    <details class="case-item">
+                        <summary>Receipt</summary>
+                        <div id="evidence-receipt" class="case-copy empty">Receipt artifact appears after a scan.</div>
+                    </details>
+                </div>
+            </section>
+        </section>
+
+        <section id="network" class="view-section" data-view-panel="network" hidden>
+            <div class="section-head">
+                <h2>Network</h2>
+            </div>
+            <p id="network-route-context" class="route-context" hidden></p>
+            <div id="network-engine-panel" class="network-state-panel" aria-live="polite">
+                <div class="network-status-row">
+                    <span id="network-status-tag" class="network-status-pill network-activity-pill">QUIET</span>
+                    <span id="network-state-tag" class="network-status-pill network-state-pill">UNKNOWN</span>
+                    <span id="network-reason-tags" class="network-reason-tags" hidden></span>
+                </div>
+                <div id="network-posture-summary" class="network-posture-summary" aria-live="polite" aria-label="Network security posture">
+                    <span data-network-posture="threats">— Threats</span>
+                    <span data-network-posture="vulnerabilities">— Vulnerabilities</span>
+                    <span data-network-posture="strengths">— Strengths</span>
+                </div>
+                <p id="network-message">Starting network view.</p>
+            </div>
+            <div class="network-toolbar">
+                <div class="network-display-controls" role="tablist" aria-label="Network evidence views">
+                    <button id="network-tab-connections" class="active" type="button" role="tab" aria-selected="true" aria-controls="network-results" data-network-view="table">Connections</button>
+                    <button id="network-tab-findings" type="button" role="tab" aria-selected="false" aria-controls="network-results" data-network-view="findings" tabindex="-1">Findings</button>
+                    <button id="network-tab-trend" type="button" role="tab" aria-selected="false" aria-controls="network-results" data-network-view="bar" tabindex="-1">Trend</button>
+                    <button id="network-tab-distribution" type="button" role="tab" aria-selected="false" aria-controls="network-results" data-network-view="pie" tabindex="-1">Distribution</button>
+                    <button id="network-tab-timeline" type="button" role="tab" aria-selected="false" aria-controls="network-results" data-network-view="timeline" tabindex="-1">Timeline</button>
+                </div>
+                <div class="network-toolbar-actions">
+                    <div id="network-toolbar-context" class="network-toolbar-context" hidden></div>
+                    <div class="network-graph-toggle" aria-label="Network visual navigation" hidden>
+                        <button type="button" data-network-graph-view="bar" aria-pressed="false">Graph</button>
+                        <button type="button" data-network-graph-view="pie" aria-pressed="false">Chart</button>
+                    </div>
+                    <button id="scan-network-btn" class="network-refresh-pill" type="button">Refresh Network</button>
+                </div>
+            </div>
+            <div id="network-results" class="case-file" role="tabpanel" aria-labelledby="network-tab-connections"></div>
+            <div id="network-provider" class="network-powered-fixed" aria-label="Powered by Wireshark — verifying" data-provider-state="verifying">
+                <span>Powered by</span>
+                <img src="/assets/wireshark-logo.png" alt="Wireshark">
+            </div>
+        </section>
+
+        <section id="files" class="view-section" data-view-panel="files" hidden>
+            <div class="section-head">
+                <h2>Files</h2>
+            </div>
+            <p id="files-route-context" class="route-context" hidden></p>
+            <div class="files-state-panel" aria-live="polite">
+                <div class="files-status-row">
+                    <span id="files-activity-tag" class="files-status-pill">QUIET</span>
+                    <span id="files-integrity-tag" class="files-status-pill">NO RECENT DEVIATIONS</span>
+                    <span id="files-location-tag" class="files-status-pill">0 LOCATIONS</span>
+                </div>
+                <p id="files-status">Monitoring file changes in real time.</p>
+            </div>
+            <div class="files-toolbar">
+                <div class="files-display-controls" role="tablist" aria-label="File lineage views">
+                    <button id="files-tab-changes" class="active" type="button" role="tab" aria-selected="true" aria-controls="files-results" data-files-view="changes">Changes</button>
+                    <button id="files-tab-findings" type="button" role="tab" aria-selected="false" aria-controls="files-results" data-files-view="findings">Findings</button>
+                    <button id="files-tab-integrity" type="button" role="tab" aria-selected="false" aria-controls="files-results" data-files-view="integrity">Integrity</button>
+                    <button id="files-tab-locations" type="button" role="tab" aria-selected="false" aria-controls="files-results" data-files-view="locations">Locations</button>
+                    <button id="files-tab-timeline" type="button" role="tab" aria-selected="false" aria-controls="files-results" data-files-view="timeline">Timeline</button>
+                </div>
+                <div class="files-toolbar-actions">
+                    <label class="files-search">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.25"/><path d="m14.5 14.5 4 4"/></svg>
+                        <span class="sr-only">Search file lineage</span>
+                        <input id="files-search" type="search" placeholder="Search files or paths…" autocomplete="off">
+                    </label>
+                    <button id="reconcile-files-btn" class="files-refresh-pill" type="button">Reconcile Files</button>
+                </div>
+            </div>
+            <div id="files-results" class="files-results" role="tabpanel" aria-live="polite" aria-labelledby="files-tab-changes"></div>
+            <div id="files-provider" class="files-provider-fixed" aria-label="Powered by Wazuh" aria-hidden="true" hidden>
+                <span>Powered by</span>
+                <strong>Wazuh</strong>
+            </div>
+        </section>
+
+        <section id="custom-scan" class="view-section" data-view-panel="custom" hidden>
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Custom scan</p>
+                    <h2>Select apps or filters</h2>
+                </div>
+                <button id="run-custom-scan-btn" class="primary-action" type="button">Scan Selected</button>
+            </div>
+            <div class="filter-row" aria-label="Custom scan filters">
+                <button type="button" data-filter="running">Running apps</button>
+                <button type="button" data-filter="new">New apps</button>
+                <button type="button" data-filter="communications">Communication apps</button>
+                <button type="button" data-filter="files">File apps</button>
+                <button type="button" data-filter="developer">Developer tools</button>
+                <button type="button" data-filter="network">Network-active apps</button>
+                <button type="button" data-filter="attention">Needs attention</button>
+            </div>
+            <div id="custom-app-list" class="custom-app-list"></div>
+            <p id="custom-scan-status" class="status-line">Choose apps or a filter.</p>
+        </section>
+    </main>
+    <button id="files-mediation-toggle" class="files-mediation-toggle" type="button" aria-label="Open mediation panel" aria-controls="files-mediation-panel" aria-expanded="false" data-testid="files-mediation-toggle" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.75 5.25h14.5v13.5H4.75z"/><path d="M9.6 5.25v13.5"/><path d="M14.4 5.25v13.5"/></svg>
+        <span class="sr-only">Mediation</span>
+        <span id="files-mediation-badge" class="files-mediation-badge" aria-label="0 mediation notifications" hidden>0</span>
+    </button>
+    <aside id="files-mediation-panel" class="files-mediation-panel" aria-label="File mediation queue" aria-hidden="true" tabindex="-1" data-testid="files-mediation-panel" inert>
+        <header class="files-mediation-panel__header">
+            <div>
+                <strong>Mediation</strong>
+                <span>File action queue</span>
+            </div>
+            <button id="files-mediation-open-board" class="files-mediation-panel__expand" type="button" aria-label="Open full mediation board" aria-controls="files-mediation-board" aria-expanded="false" title="Open full mediation board" data-testid="files-mediation-open-board">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+            </button>
+        </header>
+        <div class="files-mediation-panel__body">
+            <section class="files-mediation-summary" aria-label="Mediation summary">
+                <div><strong id="files-mediation-queue-count">0</strong><span>Queue</span></div>
+                <div><strong id="files-mediation-progress-count">0</strong><span>In progress</span></div>
+                <div><strong id="files-mediation-ready-count">0</strong><span>Ready</span></div>
+                <div><strong id="files-mediation-ledger-count">0</strong><span>Ledger</span></div>
+            </section>
+        </div>
+        <form id="files-mediation-panel-composer" class="files-mediation-composer files-mediation-composer--panel" data-mediation-composer>
+            <label class="sr-only" for="files-mediation-panel-request">Mediation request</label>
+            <textarea id="files-mediation-panel-request" rows="3" placeholder="Request a file mediation..." autocomplete="off" data-mediation-request data-testid="files-mediation-panel-request"></textarea>
+            <div class="files-mediation-composer__controls">
+                <div>
+                    <button id="files-mediation-panel-add-evidence" class="files-mediation-composer__icon" type="button" aria-label="Add evidence" title="Add evidence" data-mediation-add-evidence>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                    </button>
+                    <input id="files-mediation-panel-evidence" type="file" multiple hidden data-mediation-evidence>
+                    <span data-mediation-evidence-label>No evidence</span>
+                </div>
+                <label class="files-mediation-composer__scope">
+                    <span class="sr-only">Mediation scope</span>
+                    <select id="files-mediation-panel-scope" aria-label="Mediation scope" data-mediation-scope>
+                        <option value="all">All locations</option>
+                        <option value="current">Current lineage</option>
+                    </select>
+                </label>
+                <button id="files-mediation-panel-submit" class="files-mediation-composer__submit" type="submit" aria-label="Queue mediation request" title="Queue mediation request" data-mediation-submit data-testid="files-mediation-panel-submit" disabled>
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"/></svg>
+                </button>
+            </div>
+        </form>
+    </aside>
+
+    <section id="files-mediation-board" class="files-mediation-board" aria-label="File mediation board" aria-hidden="true" data-testid="files-mediation-board" hidden inert>
+        <header class="files-mediation-board__topbar">
+            <div class="files-mediation-board__brand">
+                <strong>Mediation</strong>
+                <span>File action queue</span>
+            </div>
+            <button id="files-mediation-close-board" class="files-mediation-board__back" type="button" aria-label="Close full mediation board" title="Close full mediation board" data-testid="files-mediation-close-board">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg>
+            </button>
+        </header>
+        <div class="files-mediation-board__columns" data-testid="files-mediation-columns">
+            <section class="files-mediation-column is-queue" data-testid="files-mediation-column-queue">
+                <div class="files-mediation-column__body files-mediation-queue">
+                    <section class="files-mediation-summary" aria-label="Mediation summary">
+                        <div><strong id="files-mediation-column-queue-count">0</strong><span>Queue</span></div>
+                        <div><strong id="files-mediation-column-progress-count">0</strong><span>In progress</span></div>
+                        <div><strong id="files-mediation-column-ready-count">0</strong><span>Ready</span></div>
+                        <div><strong id="files-mediation-column-ledger-count">0</strong><span>Ledger</span></div>
+                    </section>
+                    <div class="files-mediation-suggestions-wrap">
+                        <p>Suggestions are optional until added to the queue.</p>
+                        <div id="files-mediation-suggestions" class="files-mediation-suggestions" aria-live="polite"></div>
+                    </div>
+                    <div id="files-mediation-queue-items" class="files-mediation-queue__items" aria-live="polite"></div>
+                    <form id="files-mediation-composer" class="files-mediation-composer files-mediation-composer--panel" data-mediation-composer>
+                        <label class="sr-only" for="files-mediation-request">Mediation request</label>
+                        <textarea id="files-mediation-request" rows="3" placeholder="Request a file mediation..." autocomplete="off" data-mediation-request data-testid="files-mediation-request"></textarea>
+                        <div class="files-mediation-composer__controls">
+                            <div>
+                                <button id="files-mediation-add-evidence" class="files-mediation-composer__icon" type="button" aria-label="Add evidence" title="Add evidence" data-mediation-add-evidence>
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+                                </button>
+                                <input id="files-mediation-evidence" type="file" multiple hidden data-mediation-evidence>
+                                <span id="files-mediation-evidence-label" data-mediation-evidence-label>No evidence</span>
+                            </div>
+                            <label class="files-mediation-composer__scope">
+                                <span class="sr-only">Mediation scope</span>
+                                <select id="files-mediation-scope" aria-label="Mediation scope" data-mediation-scope>
+                                    <option value="all">All locations</option>
+                                    <option value="current">Current lineage</option>
+                                </select>
+                            </label>
+                            <button id="files-mediation-submit" class="files-mediation-composer__submit" type="submit" aria-label="Queue mediation request" title="Queue mediation request" data-mediation-submit data-testid="files-mediation-submit" disabled>
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"/></svg>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+            <section class="files-mediation-column is-progress" data-testid="files-mediation-column-progress">
+                <header><strong>In Progress</strong><span id="files-mediation-progress-lane-count">0</span></header>
+                <div id="files-mediation-progress-items" class="files-mediation-column__body" aria-live="polite"></div>
+            </section>
+            <section class="files-mediation-column is-ready" data-testid="files-mediation-column-ready">
+                <header><strong>Ready</strong><span id="files-mediation-ready-lane-count">0</span></header>
+                <div id="files-mediation-ready-items" class="files-mediation-column__body" aria-live="polite"></div>
+            </section>
+            <section class="files-mediation-column is-ledger" data-testid="files-mediation-column-ledger">
+                <header><strong>Ledger</strong><span id="files-mediation-ledger-lane-count">0</span></header>
+                <div class="files-mediation-column__body" aria-live="polite">
+                    <label class="files-mediation-board__search">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="5.25"/><path d="m14.5 14.5 4 4"/></svg>
+                        <span class="sr-only">Search mediations</span>
+                        <input id="files-mediation-search" type="search" placeholder="searchMediations" autocomplete="off" data-testid="files-mediation-search">
+                    </label>
+                    <div id="files-mediation-ledger-items" class="files-mediation-ledger-items"></div>
+                </div>
+            </section>
+        </div>
+    </section>
+
+    <aside id="action-sidebar" class="action-sidebar" aria-label="control center" aria-hidden="true" tabindex="-1">
+        <div id="action-sidebar-body" class="action-sidebar-body">
+            <h2 class="action-sidebar-title">ctrl</h2>
+            <p class="action-sidebar-empty">No control actions needed.</p>
+        </div>
+        <div class="action-sidebar-powered" aria-label="Powered by Apple Intelligence">
+            <img class="action-sidebar-powered-mark" src="/assets/appleintelligence.gif" alt="">
+            <span class="action-sidebar-powered-copy">Powered by</span>
+            <img class="action-sidebar-powered-logo" src="/assets/appleintelligence-logo.svg" alt="Apple Intelligence">
+        </div>
+    </aside>
+    <button id="action-sidebar-toggle" class="action-sidebar-toggle" type="button" title="More actions" aria-label="Open control center" aria-controls="action-sidebar" aria-expanded="false">ctrl</button>
+</div>
+
+<div id="settings-modal" class="modal-overlay settings-overlay" hidden>
+    <div class="modal-card modal-card-wide settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-describedby="settings-description">
+        <div class="modal-header">
+            <div>
+                <span id="settings-title">CleanHouse Settings</span>
+                <p id="settings-description" class="settings-description">Manage this Mac's antivirus access and local controls.</p>
+            </div>
+            <button class="modal-close" type="button" data-settings-action="close" aria-label="Close settings">&#10005;</button>
+        </div>
+        <div class="settings-layout">
+            <nav id="settings-tabs" class="settings-tabs" role="tablist" aria-label="Settings sections"></nav>
+            <div class="modal-body settings-panel" id="settings-body" role="tabpanel" tabindex="0" aria-live="polite">
+                <p class="loading">Loading settings...</p>
+            </div>
+        </div>
+        <div class="modal-footer" id="settings-footer"></div>
+    </div>
+</div>
+
+<script src="/js/click-trace.js?v=1"></script>
+<script src="/js/auth-state.js?v=2"></script>
+<script src="/js/session-controls.js?v=1"></script>
+<script src="/js/api-client.js?v=5"></script>
+<script src="/js/investigations.js?v=32"></script>
+<script src="/js/settings.js?v=2"></script>
+</body>
+</html>

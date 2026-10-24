@@ -1,0 +1,17 @@
+{
+  "schema": "cleanhouse.product_surface_baseline.v1",
+  "authority": "owner-approved CleanHouse product canon",
+  "surfaces": [
+    {"name": "Overview", "route": "/overview", "file": "frontend/investigations.html", "marker": "data-view-panel=\"home\""},
+    {"name": "Applications", "route": "/applications", "file": "frontend/investigations.html", "marker": "data-view-panel=\"applications\""},
+    {"name": "Network", "route": "/network", "file": "frontend/investigations.html", "marker": "data-view-panel=\"network\""},
+    {"name": "Files", "route": "/files", "file": "frontend/investigations.html", "marker": "data-view-panel=\"files\""},
+    {"name": "Zaelith", "route": "/zaelith", "file": "frontend/zaelith.html", "marker": "Zaelith"},
+    {"name": "Identity", "route": "/identity", "file": "frontend/identity.html", "marker": "Identity"},
+    {"name": "Reports", "route": "/reports", "file": "frontend/reports.html", "marker": "Reports"},
+    {"name": "Allowed Threats", "route": "/allowed-threats", "file": "frontend/allowed-threats.html", "marker": "Allowed Threats"},
+    {"name": "Help", "route": "/help", "file": "frontend/help.html", "marker": "Help"},
+    {"name": "Advanced / Settings", "route": "/advanced", "file": "frontend/dashboard.html", "marker": "Advanced"},
+    {"name": "Custom Scan", "route": "/custom-scan", "file": "frontend/investigations.html", "marker": "data-view-panel=\"custom\""}
+  ]
+}

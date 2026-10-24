@@ -1,0 +1,16 @@
+{
+  "count": 11,
+  "evidence_refs": [
+    "local://cleanhouse/process/719",
+    "local://cleanhouse/pattern/platform/code",
+    "local://cleanhouse/evidence/processes:8d9a3ec03b3814bf.json",
+    "local://cleanhouse/integrity/465c0afaf0f3b68a",
+    "local://cleanhouse/evidence/integrity:2e17bacfba7125f3.json",
+    "local://cleanhouse/correlation/process-integrity/799e0eefe7005cf0",
+    "local://cleanhouse/process/6211",
+    "local://cleanhouse/evidence/processes:4fc445bbfbe2a7db.json",
+    "local://cleanhouse/integrity/49814113d3023cf8",
+    "local://cleanhouse/evidence/integrity:a7b095ec2535d5af.json",
+    "local://cleanhouse/correlation/process-integrity/5d768a923fc7c7af"
+  ]
+}

@@ -1,0 +1,4642 @@
+{
+  "after_snapshot": {
+    "file_count": 1,
+    "id": "snap:c9e5349aa80205a8",
+    "status": "ok"
+  },
+  "before_snapshot": {
+    "file_count": 1,
+    "id": "snap:8a6d40502367fc80",
+    "status": "ok"
+  },
+  "bundle_export": {
+    "bundle": {
+      "approval": null,
+      "artifact_type": "receipt_timeline_bundle",
+      "bundle_id": "receipt_bundle:1e80960e8ad33904",
+      "evidence_chain": [
+        {
+          "label": "receipt artifact",
+          "ref": "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4",
+          "source": "receipt"
+        },
+        {
+          "label": "observed",
+          "ref": "local://cleanhouse/timeline/tl:beta-proof-session:0",
+          "source": "prompt"
+        },
+        {
+          "label": "observed",
+          "ref": "local://cleanhouse/timeline/tl:beta-proof-session:1",
+          "source": "intent"
+        },
+        {
+          "label": "inferred",
+          "ref": "local://cleanhouse/timeline/tl:beta-proof-session:2",
+          "source": "diff"
+        }
+      ],
+      "integrity": {
+        "algorithm": "sha-256",
+        "approval_history_count": 0,
+        "bundle_hash": "b2771eb6efb125865214610af486ac4ce46e83b382f5ffd96d4dfc279d4617ac",
+        "evidence_ref_count": 4,
+        "manifest_hash": "5b9e9570020daab98074473ef5c096de8891b0db672e3ada6573aaacf5048c23",
+        "purpose": "receipt timeline bundle verification",
+        "receipt_root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca",
+        "replay_hash": "c4a38682669fbddc50b1df50fe3ac6ebf571b037b1c2da3fecedb97f1fa46537",
+        "timeline_event_count": 3,
+        "timeline_hash": "79c9da144c1b539d14bd90432e32ff6d35faf047baaa5d1277050207bba3be1b"
+      },
+      "manifest": {
+        "approval_history_count": 0,
+        "artifact_type": "signed_evidence_manifest",
+        "bundle_hash": "b2771eb6efb125865214610af486ac4ce46e83b382f5ffd96d4dfc279d4617ac",
+        "bundle_id": "receipt_bundle:1e80960e8ad33904",
+        "evidence_ref_count": 4,
+        "evidence_refs": [
+          "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4",
+          "local://cleanhouse/timeline/tl:beta-proof-session:0",
+          "local://cleanhouse/timeline/tl:beta-proof-session:1",
+          "local://cleanhouse/timeline/tl:beta-proof-session:2"
+        ],
+        "key_management": {
+          "limitations": [
+            "private_key_is_local_unencrypted_file_storage",
+            "bundled_public_key_requires_out_of_band_fingerprint_trust",
+            "no_rotation_revocation_ca_or_hardware_backing_in_gate_a"
+          ],
+          "mode": "local_unmanaged_ed25519_file",
+          "private_key_storage": "cleanhouse_data_dir_keys_file",
+          "trust_model": "self_contained_bundle_signature_with_out_of_band_fingerprint_check"
+        },
+        "receipt_id": "receipt:e51b8a73b6ca96c4",
+        "receipt_root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca",
+        "replay_hash": "c4a38682669fbddc50b1df50fe3ac6ebf571b037b1c2da3fecedb97f1fa46537",
+        "schema": "cleanhouse.evidence_manifest.v1",
+        "schema_version": 1,
+        "session_id": "beta-proof-session",
+        "signer": {
+          "algorithm": "ed25519",
+          "key_id": "ed25519:6f09e216db08d329",
+          "public_key_b64": "w8V6KMt48yQUKAZ5LtUXR3klxjZkO3Pq5KVnZVWXPaA=",
+          "public_key_encoding": "raw-base64",
+          "public_key_fingerprint": "6f09e216db08d32977a361029d168bc392fb5ceedd14b3c7bf129cae7011a02d"
+        },
+        "timeline_hash": "79c9da144c1b539d14bd90432e32ff6d35faf047baaa5d1277050207bba3be1b"
+      },
+      "manifest_signature": {
+        "algorithm": "ed25519",
+        "key_id": "ed25519:6f09e216db08d329",
+        "manifest_hash": "5b9e9570020daab98074473ef5c096de8891b0db672e3ada6573aaacf5048c23",
+        "public_key_fingerprint": "6f09e216db08d32977a361029d168bc392fb5ceedd14b3c7bf129cae7011a02d",
+        "signature_b64": "6GxAUsWGexhw2ty/uz9WQxbqp1uHCk8qsXfEIvzYxZniLWrmjEhQdyO6viN1ZizwXFGnSuZuCTs72BApxOPXCg==",
+        "signature_encoding": "base64"
+      },
+      "receipt": {
+        "alerts": [
+          {
+            "alert_type": "endpoint_drift",
+            "confidence": 0.0,
+            "description": "No classified signals available for alert generation",
+            "evidence_refs": [],
+            "id": "alert:4002503e15674312",
+            "rationale": "No signal data to derive alerts from \u2014 entire session is unknown",
+            "session_id": "beta-proof-session",
+            "severity": "high",
+            "source": "correlation",
+            "source_ids": [],
+            "timestamp": "2026-05-29T14:19:21.741346",
+            "uncertainty": 1.0
+          }
+        ],
+        "collector_manifest": {
+          "collector_health": {
+            "degraded_count": 9,
+            "degraded_surfaces": [
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "processes"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "network"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "ai_activity"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "anomalies"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "integrity"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "command"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "cloud_usage"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "tool_events"
+              },
+              {
+                "collector_status": "dependency_missing",
+                "reasons": [
+                  "dependency_missing",
+                  "unavailable",
+                  "unsupported"
+                ],
+                "status": "unavailable",
+                "surface": "filesystem_watcher"
+              }
+            ],
+            "healthy_count": 2,
+            "status": "degraded",
+            "surface_count": 11,
+            "unknown": [
+              "processes",
+              "network",
+              "ai_activity",
+              "anomalies",
+              "integrity",
+              "command",
+              "cloud_usage",
+              "tool_events"
+            ],
+            "unsupported": [
+              "filesystem_watcher"
+            ]
+          },
+          "degradation": {
+            "degraded": true,
+            "reasons": [
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "processes"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "network"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "ai_activity"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "anomalies"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "integrity"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "command"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "cloud_usage"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "tool_events"
+              },
+              {
+                "collector_status": "dependency_missing",
+                "reasons": [
+                  "dependency_missing",
+                  "unavailable",
+                  "unsupported"
+                ],
+                "status": "unavailable",
+                "surface": "filesystem_watcher"
+              }
+            ],
+            "status": "degraded"
+          },
+          "generated_at": "2026-05-29T14:19:21.741392",
+          "runtime": {
+            "degradation": {
+              "degraded": true,
+              "reasons": [
+                {
+                  "collector_status": "dependency_missing",
+                  "reasons": [
+                    "dependency_missing"
+                  ],
+                  "surface": "watcher"
+                }
+              ]
+            },
+            "queue": {
+              "depth": 0,
+              "full": false,
+              "maxsize": 2000,
+              "unfinished_tasks": 0
+            },
+            "runtime_event_writer": {
+              "collector_status": "ok",
+              "failure_total": 0,
+              "latest_failure": null,
+              "recent_failure_count": 0,
+              "recent_failures": [],
+              "status": "ok"
+            },
+            "status": "degraded",
+            "watcher": {
+              "collector_status": "dependency_missing",
+              "degradation": {
+                "degraded": true,
+                "reasons": [
+                  "dependency_missing"
+                ]
+              },
+              "dependency_available": false,
+              "last_error": null,
+              "state": "unavailable",
+              "status": "unavailable",
+              "support_status": "unsupported",
+              "unsupported_reason": "watchdog dependency missing",
+              "watch_dir": null
+            },
+            "writer": {
+              "collector_status": "ok",
+              "degradation": {
+                "degraded": false,
+                "reasons": []
+              },
+              "last_error": null,
+              "metrics": {
+                "dropped": 0,
+                "enqueued": 4,
+                "max_depth": 1,
+                "write_failures": 0,
+                "write_retries": 0,
+                "written": 4
+              },
+              "queue": {
+                "depth": 0,
+                "full": false,
+                "maxsize": 2000,
+                "unfinished_tasks": 0
+              },
+              "queue_depth": 0,
+              "queue_maxsize": 2000,
+              "state": "running",
+              "status": "running",
+              "stop_requested": false,
+              "support_status": "supported",
+              "unsupported_reason": null
+            }
+          },
+          "schema": "cleanhouse.collector_manifest.v1",
+          "surfaces": {
+            "ai_activity": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "anomalies": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "cloud_usage": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "command": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "event_writer": {
+              "collector_status": "ok",
+              "degradation": {
+                "degraded": false,
+                "reasons": []
+              },
+              "last_error": null,
+              "metrics": {
+                "dropped": 0,
+                "enqueued": 4,
+                "max_depth": 1,
+                "write_failures": 0,
+                "write_retries": 0,
+                "written": 4
+              },
+              "queue": {
+                "depth": 0,
+                "full": false,
+                "maxsize": 2000,
+                "unfinished_tasks": 0
+              },
+              "queue_depth": 0,
+              "queue_maxsize": 2000,
+              "state": "running",
+              "status": "running",
+              "stop_requested": false,
+              "support_status": "supported",
+              "unsupported_reason": null
+            },
+            "filesystem_watcher": {
+              "collector_status": "dependency_missing",
+              "degradation": {
+                "degraded": true,
+                "reasons": [
+                  "dependency_missing"
+                ]
+              },
+              "dependency_available": false,
+              "last_error": null,
+              "state": "unavailable",
+              "status": "unavailable",
+              "support_status": "unsupported",
+              "unsupported_reason": "watchdog dependency missing",
+              "watch_dir": null
+            },
+            "integrity": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "network": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "processes": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "runtime_event_writer": {
+              "collector_status": "ok",
+              "degradation": {
+                "degraded": false,
+                "reasons": []
+              },
+              "failure_total": 0,
+              "latest_failure": null,
+              "recent_failure_count": 0,
+              "status": "ok",
+              "support_status": "supported",
+              "unsupported_reason": null
+            },
+            "tool_events": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            }
+          }
+        },
+        "drift_reasons": [
+          {
+            "category": "scope",
+            "data": {
+              "change_count": 1,
+              "changed_paths": [
+                "src/demo.txt"
+              ],
+              "cluster": "src",
+              "explanation": "1 change(s) in src matched declared scope prefix src/.",
+              "in_scope_count": 1,
+              "out_of_scope_count": 0,
+              "relation": "within_declared_scope",
+              "scope_weight": 0.0
+            },
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/scope/f27fede2220bcd32"
+            ],
+            "reason_id": "drift:beb4f3e2754f0968",
+            "relation": "within_declared_scope",
+            "summary": "1 change(s) in src matched declared scope prefix src/."
+          },
+          {
+            "category": "endpoint_drift",
+            "data": {
+              "severity": "high",
+              "source": "correlation"
+            },
+            "evidence_level": "inferred",
+            "evidence_refs": [],
+            "reason_id": "drift:ded3666064756f59",
+            "relation": "inferred",
+            "summary": "No classified signals available for alert generation"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "processes collector status: unknown",
+              "event_id": "collector:processes",
+              "evidence_refs": [
+                "local://cleanhouse/collector/processes"
+              ],
+              "label": "collector_gap",
+              "source": "processes"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/processes"
+            ],
+            "reason_id": "drift:f88f3eb644c711cc",
+            "relation": "unknown",
+            "summary": "processes collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "network collector status: unknown",
+              "event_id": "collector:network",
+              "evidence_refs": [
+                "local://cleanhouse/collector/network"
+              ],
+              "label": "collector_gap",
+              "source": "network"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/network"
+            ],
+            "reason_id": "drift:0a1ab90bd15a2cc1",
+            "relation": "unknown",
+            "summary": "network collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "ai_activity collector status: unknown",
+              "event_id": "collector:ai_activity",
+              "evidence_refs": [
+                "local://cleanhouse/collector/ai_activity"
+              ],
+              "label": "collector_gap",
+              "source": "ai_activity"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/ai_activity"
+            ],
+            "reason_id": "drift:ebd5dec8bc69be70",
+            "relation": "unknown",
+            "summary": "ai_activity collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "anomalies collector status: unknown",
+              "event_id": "collector:anomalies",
+              "evidence_refs": [
+                "local://cleanhouse/collector/anomalies"
+              ],
+              "label": "collector_gap",
+              "source": "anomalies"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/anomalies"
+            ],
+            "reason_id": "drift:c7fa83f264846d57",
+            "relation": "unknown",
+            "summary": "anomalies collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "integrity collector status: unknown",
+              "event_id": "collector:integrity",
+              "evidence_refs": [
+                "local://cleanhouse/collector/integrity"
+              ],
+              "label": "collector_gap",
+              "source": "integrity"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/integrity"
+            ],
+            "reason_id": "drift:ccfb9be0a5476596",
+            "relation": "unknown",
+            "summary": "integrity collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "command collector status: unknown",
+              "event_id": "collector:command",
+              "evidence_refs": [
+                "local://cleanhouse/collector/command"
+              ],
+              "label": "collector_gap",
+              "source": "command"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/command"
+            ],
+            "reason_id": "drift:e1ab9291f295cc14",
+            "relation": "unknown",
+            "summary": "command collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "cloud_usage collector status: unknown",
+              "event_id": "collector:cloud_usage",
+              "evidence_refs": [
+                "local://cleanhouse/collector/cloud_usage"
+              ],
+              "label": "collector_gap",
+              "source": "cloud_usage"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/cloud_usage"
+            ],
+            "reason_id": "drift:a0be820067163825",
+            "relation": "unknown",
+            "summary": "cloud_usage collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "tool_events collector status: unknown",
+              "event_id": "collector:tool_events",
+              "evidence_refs": [
+                "local://cleanhouse/collector/tool_events"
+              ],
+              "label": "collector_gap",
+              "source": "tool_events"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/tool_events"
+            ],
+            "reason_id": "drift:73dadb13fc65f0f9",
+            "relation": "unknown",
+            "summary": "tool_events collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "dependency_missing",
+              "description": "filesystem_watcher collector status: dependency_missing",
+              "event_id": "collector:filesystem_watcher",
+              "evidence_refs": [
+                "local://cleanhouse/collector/filesystem_watcher"
+              ],
+              "label": "unknown",
+              "source": "filesystem_watcher"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/filesystem_watcher"
+            ],
+            "reason_id": "drift:3e23c92a410dcfeb",
+            "relation": "unknown",
+            "summary": "filesystem_watcher collector status: dependency_missing"
+          }
+        ],
+        "events": [
+          {
+            "actor_type": "human",
+            "collector_status": "ok",
+            "data": {
+              "actor_type": "human",
+              "collector_status": "ok",
+              "context": "beta proof bundle run",
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+              ],
+              "objective_id": "objective-beta-proof",
+              "observed_vs_expected": {
+                "details": "prompt/context captured",
+                "status": "matched"
+              },
+              "prompt_id": "prompt:bbe1b290436187fc",
+              "raw_evidence_ref": "local://cleanhouse/prompt/prompt:bbe1b290436187fc",
+              "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+              "scope": "src/",
+              "scope_relation": "objective_root",
+              "session_id": "beta-proof-session",
+              "source_surface": "prompt_context",
+              "tool_identity": "codex"
+            },
+            "event_id": "tl:beta-proof-session:0",
+            "event_type": "prompt",
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+            ],
+            "label": "Generate deterministic evidence chain",
+            "objective_id": "objective-beta-proof",
+            "observed_vs_expected": {
+              "details": "prompt/context captured",
+              "status": "matched"
+            },
+            "previous_event_id": null,
+            "raw_evidence_ref": "local://cleanhouse/prompt/prompt:bbe1b290436187fc",
+            "scope_relation": "objective_root",
+            "session_id": "beta-proof-session",
+            "source_surface": "prompt_context",
+            "status": "observed",
+            "timestamp": "2026-05-29T14:19:21.728498"
+          },
+          {
+            "actor_type": "human",
+            "collector_status": "ok",
+            "data": {
+              "actor_type": "human",
+              "collector_status": "ok",
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/intent/beta-proof-session"
+              ],
+              "objective_id": "objective-beta-proof",
+              "observed_vs_expected": {
+                "details": "intent captured",
+                "status": "matched"
+              },
+              "raw_evidence_ref": "local://cleanhouse/intent/beta-proof-session",
+              "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+              "scope": "src/",
+              "scope_relation": "objective_root",
+              "session_id": "beta-proof-session",
+              "source_surface": "intent",
+              "tool_identity": "codex"
+            },
+            "event_id": "tl:beta-proof-session:1",
+            "event_type": "intent",
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/intent/beta-proof-session"
+            ],
+            "label": "Generate deterministic evidence chain",
+            "objective_id": "objective-beta-proof",
+            "observed_vs_expected": {
+              "details": "intent captured",
+              "status": "matched"
+            },
+            "previous_event_id": "tl:beta-proof-session:0",
+            "raw_evidence_ref": "local://cleanhouse/intent/beta-proof-session",
+            "scope_relation": "objective_root",
+            "session_id": "beta-proof-session",
+            "source_surface": "intent",
+            "status": "observed",
+            "timestamp": "2026-05-29T14:19:21.728498"
+          },
+          {
+            "actor_type": "filesystem",
+            "collector_status": "ok",
+            "data": {
+              "actor_type": "filesystem",
+              "changes": [
+                "src/demo.txt"
+              ],
+              "collector_status": "ok",
+              "created": 0,
+              "deleted": 0,
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/diff/diff:b9c8142a00b36767"
+              ],
+              "file_changes": [
+                {
+                  "after_hash": "7b9a72466d3960eb",
+                  "before_hash": "9160d4be34c8695b",
+                  "change_type": "modified",
+                  "path": "src/demo.txt"
+                }
+              ],
+              "modified": 1,
+              "objective_id": "objective-beta-proof",
+              "observed_vs_expected": {
+                "details": "snapshot diff captured",
+                "status": "observed"
+              },
+              "raw_evidence_ref": "local://cleanhouse/diff/diff:b9c8142a00b36767",
+              "scope_relation": "mixed",
+              "session_id": "beta-proof-session",
+              "source_surface": "snapshot_diff"
+            },
+            "event_id": "tl:beta-proof-session:2",
+            "event_type": "diff",
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/diff/diff:b9c8142a00b36767"
+            ],
+            "label": "1 change(s)",
+            "objective_id": "objective-beta-proof",
+            "observed_vs_expected": {
+              "details": "snapshot diff captured",
+              "status": "observed"
+            },
+            "previous_event_id": "tl:beta-proof-session:1",
+            "raw_evidence_ref": "local://cleanhouse/diff/diff:b9c8142a00b36767",
+            "scope_relation": "mixed",
+            "session_id": "beta-proof-session",
+            "source_surface": "snapshot_diff",
+            "status": "inferred",
+            "timestamp": "2026-05-29T14:19:21.738104"
+          }
+        ],
+        "evidence_index": [
+          {
+            "label": "observed",
+            "ref": "local://cleanhouse/timeline/tl:beta-proof-session:0",
+            "source": "prompt"
+          },
+          {
+            "label": "observed",
+            "ref": "local://cleanhouse/timeline/tl:beta-proof-session:1",
+            "source": "intent"
+          },
+          {
+            "label": "inferred",
+            "ref": "local://cleanhouse/timeline/tl:beta-proof-session:2",
+            "source": "diff"
+          }
+        ],
+        "gaps": [
+          {
+            "collector_status": "unknown",
+            "description": "processes collector status: unknown",
+            "event_id": "collector:processes",
+            "evidence_refs": [
+              "local://cleanhouse/collector/processes"
+            ],
+            "label": "collector_gap",
+            "source": "processes"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "network collector status: unknown",
+            "event_id": "collector:network",
+            "evidence_refs": [
+              "local://cleanhouse/collector/network"
+            ],
+            "label": "collector_gap",
+            "source": "network"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "ai_activity collector status: unknown",
+            "event_id": "collector:ai_activity",
+            "evidence_refs": [
+              "local://cleanhouse/collector/ai_activity"
+            ],
+            "label": "collector_gap",
+            "source": "ai_activity"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "anomalies collector status: unknown",
+            "event_id": "collector:anomalies",
+            "evidence_refs": [
+              "local://cleanhouse/collector/anomalies"
+            ],
+            "label": "collector_gap",
+            "source": "anomalies"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "integrity collector status: unknown",
+            "event_id": "collector:integrity",
+            "evidence_refs": [
+              "local://cleanhouse/collector/integrity"
+            ],
+            "label": "collector_gap",
+            "source": "integrity"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "command collector status: unknown",
+            "event_id": "collector:command",
+            "evidence_refs": [
+              "local://cleanhouse/collector/command"
+            ],
+            "label": "collector_gap",
+            "source": "command"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "cloud_usage collector status: unknown",
+            "event_id": "collector:cloud_usage",
+            "evidence_refs": [
+              "local://cleanhouse/collector/cloud_usage"
+            ],
+            "label": "collector_gap",
+            "source": "cloud_usage"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "tool_events collector status: unknown",
+            "event_id": "collector:tool_events",
+            "evidence_refs": [
+              "local://cleanhouse/collector/tool_events"
+            ],
+            "label": "collector_gap",
+            "source": "tool_events"
+          },
+          {
+            "collector_status": "dependency_missing",
+            "description": "filesystem_watcher collector status: dependency_missing",
+            "event_id": "collector:filesystem_watcher",
+            "evidence_refs": [
+              "local://cleanhouse/collector/filesystem_watcher"
+            ],
+            "label": "unknown",
+            "source": "filesystem_watcher"
+          }
+        ],
+        "id": "receipt:e51b8a73b6ca96c4",
+        "integrity": {
+          "algorithm": "sha-256",
+          "event_count": 3,
+          "event_hash_chain": [
+            "7c99eb09b1eca79d63db6a9878ce387610ba4252a0d35d86896ea64e6ce73c87",
+            "12b22384b58b5c3eeccc81928a69fa60240a8540046e80879e967f121b12ad29",
+            "1b4af5991a7d6b2970466af9f597bbd2960a7d7821a3d6c8cdcc401be7ae04ff"
+          ],
+          "purpose": "receipt integrity verification",
+          "root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca"
+        },
+        "lineage_graph": {
+          "edge_count": 4,
+          "edges": [
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+              ],
+              "relationship": "objective_lineage",
+              "source_id": "objective-beta-proof",
+              "target_id": "tl:beta-proof-session:0"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/intent/beta-proof-session"
+              ],
+              "relationship": "temporal_sequence",
+              "source_id": "tl:beta-proof-session:0",
+              "target_id": "tl:beta-proof-session:1"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/diff/diff:b9c8142a00b36767"
+              ],
+              "relationship": "temporal_sequence",
+              "source_id": "tl:beta-proof-session:1",
+              "target_id": "tl:beta-proof-session:2"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4"
+              ],
+              "relationship": "captured_in_receipt",
+              "source_id": "tl:beta-proof-session:2",
+              "target_id": "receipt:e51b8a73b6ca96c4"
+            }
+          ],
+          "node_count": 5,
+          "nodes": [
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/session/beta-proof-session"
+              ],
+              "id": "objective-beta-proof",
+              "label": "objective-beta-proof",
+              "type": "objective"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+              ],
+              "id": "tl:beta-proof-session:0",
+              "label": "Generate deterministic evidence chain",
+              "scope_relation": "objective_root",
+              "timestamp": "2026-05-29T14:19:21.728498",
+              "type": "prompt"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/intent/beta-proof-session"
+              ],
+              "id": "tl:beta-proof-session:1",
+              "label": "Generate deterministic evidence chain",
+              "scope_relation": "objective_root",
+              "timestamp": "2026-05-29T14:19:21.728498",
+              "type": "intent"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/diff/diff:b9c8142a00b36767"
+              ],
+              "id": "tl:beta-proof-session:2",
+              "label": "1 change(s)",
+              "scope_relation": "mixed",
+              "timestamp": "2026-05-29T14:19:21.738104",
+              "type": "diff"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4"
+              ],
+              "id": "receipt:e51b8a73b6ca96c4",
+              "label": "receipt:e51b8a73b6ca96c4",
+              "type": "receipt"
+            }
+          ],
+          "objective_id": "objective-beta-proof",
+          "schema": "cleanhouse.lineage_graph.v1",
+          "session_id": "beta-proof-session"
+        },
+        "metadata": {
+          "alert_count": 1,
+          "context": "beta proof bundle run",
+          "duration_seconds": 0.01,
+          "event_count": 3,
+          "gap_count": 9,
+          "objective_id": "objective-beta-proof",
+          "origin": "2026-05-29T14:19:21.728498",
+          "prompt_id": "prompt:bbe1b290436187fc",
+          "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+          "scope": "src/",
+          "session_id": "beta-proof-session",
+          "tool_identity": "codex"
+        },
+        "rollback_state": {
+          "count": 0,
+          "records": [],
+          "status": "not_requested"
+        },
+        "runtime_gaps": [
+          {
+            "collector_status": "unknown",
+            "description": "processes collector status: unknown",
+            "event_id": "collector:processes",
+            "evidence_refs": [
+              "local://cleanhouse/collector/processes"
+            ],
+            "label": "collector_gap",
+            "source": "processes"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "network collector status: unknown",
+            "event_id": "collector:network",
+            "evidence_refs": [
+              "local://cleanhouse/collector/network"
+            ],
+            "label": "collector_gap",
+            "source": "network"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "ai_activity collector status: unknown",
+            "event_id": "collector:ai_activity",
+            "evidence_refs": [
+              "local://cleanhouse/collector/ai_activity"
+            ],
+            "label": "collector_gap",
+            "source": "ai_activity"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "anomalies collector status: unknown",
+            "event_id": "collector:anomalies",
+            "evidence_refs": [
+              "local://cleanhouse/collector/anomalies"
+            ],
+            "label": "collector_gap",
+            "source": "anomalies"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "integrity collector status: unknown",
+            "event_id": "collector:integrity",
+            "evidence_refs": [
+              "local://cleanhouse/collector/integrity"
+            ],
+            "label": "collector_gap",
+            "source": "integrity"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "command collector status: unknown",
+            "event_id": "collector:command",
+            "evidence_refs": [
+              "local://cleanhouse/collector/command"
+            ],
+            "label": "collector_gap",
+            "source": "command"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "cloud_usage collector status: unknown",
+            "event_id": "collector:cloud_usage",
+            "evidence_refs": [
+              "local://cleanhouse/collector/cloud_usage"
+            ],
+            "label": "collector_gap",
+            "source": "cloud_usage"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "tool_events collector status: unknown",
+            "event_id": "collector:tool_events",
+            "evidence_refs": [
+              "local://cleanhouse/collector/tool_events"
+            ],
+            "label": "collector_gap",
+            "source": "tool_events"
+          },
+          {
+            "collector_status": "dependency_missing",
+            "description": "filesystem_watcher collector status: dependency_missing",
+            "event_id": "collector:filesystem_watcher",
+            "evidence_refs": [
+              "local://cleanhouse/collector/filesystem_watcher"
+            ],
+            "label": "unknown",
+            "source": "filesystem_watcher"
+          }
+        ],
+        "scope_analysis": {
+          "change_count": 1,
+          "changed_paths": [
+            "src/demo.txt"
+          ],
+          "classification": "within_declared_scope",
+          "declared_scope": "src/",
+          "in_scope_count": 1,
+          "out_of_scope_count": 0,
+          "path_clusters": [
+            {
+              "change_count": 1,
+              "changed_paths": [
+                "src/demo.txt"
+              ],
+              "cluster": "src",
+              "explanation": "1 change(s) in src matched declared scope prefix src/.",
+              "in_scope_count": 1,
+              "out_of_scope_count": 0,
+              "relation": "within_declared_scope",
+              "scope_weight": 0.0
+            }
+          ],
+          "scope_weight": 0.0
+        },
+        "session_id": "beta-proof-session",
+        "status": "ok",
+        "summary": {
+          "text": "Session for 'Generate deterministic evidence chain' completed with 3 event(s), 1 alert(s), 9 unresolved gap(s). Verdict: unknown.",
+          "verdict": "unknown"
+        }
+      },
+      "receipt_id": "receipt:e51b8a73b6ca96c4",
+      "replay": {
+        "approval_history": [],
+        "approval_state": {
+          "approval_id": "",
+          "resolution_note": "",
+          "resolved_at": null,
+          "reviewer": "",
+          "reviewer_note": "",
+          "status": "unreviewed"
+        },
+        "collector_manifest": {
+          "collector_health": {
+            "degraded_count": 9,
+            "degraded_surfaces": [
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "processes"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "network"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "ai_activity"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "anomalies"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "integrity"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "command"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "cloud_usage"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "tool_events"
+              },
+              {
+                "collector_status": "dependency_missing",
+                "reasons": [
+                  "dependency_missing",
+                  "unavailable",
+                  "unsupported"
+                ],
+                "status": "unavailable",
+                "surface": "filesystem_watcher"
+              }
+            ],
+            "healthy_count": 2,
+            "status": "degraded",
+            "surface_count": 11,
+            "unknown": [
+              "processes",
+              "network",
+              "ai_activity",
+              "anomalies",
+              "integrity",
+              "command",
+              "cloud_usage",
+              "tool_events"
+            ],
+            "unsupported": [
+              "filesystem_watcher"
+            ]
+          },
+          "degradation": {
+            "degraded": true,
+            "reasons": [
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "processes"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "network"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "ai_activity"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "anomalies"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "integrity"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "command"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "cloud_usage"
+              },
+              {
+                "collector_status": "unknown",
+                "reasons": [
+                  "unknown"
+                ],
+                "status": "unknown",
+                "surface": "tool_events"
+              },
+              {
+                "collector_status": "dependency_missing",
+                "reasons": [
+                  "dependency_missing",
+                  "unavailable",
+                  "unsupported"
+                ],
+                "status": "unavailable",
+                "surface": "filesystem_watcher"
+              }
+            ],
+            "status": "degraded"
+          },
+          "generated_at": "2026-05-29T14:19:21.741392",
+          "runtime": {
+            "degradation": {
+              "degraded": true,
+              "reasons": [
+                {
+                  "collector_status": "dependency_missing",
+                  "reasons": [
+                    "dependency_missing"
+                  ],
+                  "surface": "watcher"
+                }
+              ]
+            },
+            "queue": {
+              "depth": 0,
+              "full": false,
+              "maxsize": 2000,
+              "unfinished_tasks": 0
+            },
+            "runtime_event_writer": {
+              "collector_status": "ok",
+              "failure_total": 0,
+              "latest_failure": null,
+              "recent_failure_count": 0,
+              "recent_failures": [],
+              "status": "ok"
+            },
+            "status": "degraded",
+            "watcher": {
+              "collector_status": "dependency_missing",
+              "degradation": {
+                "degraded": true,
+                "reasons": [
+                  "dependency_missing"
+                ]
+              },
+              "dependency_available": false,
+              "last_error": null,
+              "state": "unavailable",
+              "status": "unavailable",
+              "support_status": "unsupported",
+              "unsupported_reason": "watchdog dependency missing",
+              "watch_dir": null
+            },
+            "writer": {
+              "collector_status": "ok",
+              "degradation": {
+                "degraded": false,
+                "reasons": []
+              },
+              "last_error": null,
+              "metrics": {
+                "dropped": 0,
+                "enqueued": 4,
+                "max_depth": 1,
+                "write_failures": 0,
+                "write_retries": 0,
+                "written": 4
+              },
+              "queue": {
+                "depth": 0,
+                "full": false,
+                "maxsize": 2000,
+                "unfinished_tasks": 0
+              },
+              "queue_depth": 0,
+              "queue_maxsize": 2000,
+              "state": "running",
+              "status": "running",
+              "stop_requested": false,
+              "support_status": "supported",
+              "unsupported_reason": null
+            }
+          },
+          "schema": "cleanhouse.collector_manifest.v1",
+          "surfaces": {
+            "ai_activity": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "anomalies": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "cloud_usage": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "command": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "event_writer": {
+              "collector_status": "ok",
+              "degradation": {
+                "degraded": false,
+                "reasons": []
+              },
+              "last_error": null,
+              "metrics": {
+                "dropped": 0,
+                "enqueued": 4,
+                "max_depth": 1,
+                "write_failures": 0,
+                "write_retries": 0,
+                "written": 4
+              },
+              "queue": {
+                "depth": 0,
+                "full": false,
+                "maxsize": 2000,
+                "unfinished_tasks": 0
+              },
+              "queue_depth": 0,
+              "queue_maxsize": 2000,
+              "state": "running",
+              "status": "running",
+              "stop_requested": false,
+              "support_status": "supported",
+              "unsupported_reason": null
+            },
+            "filesystem_watcher": {
+              "collector_status": "dependency_missing",
+              "degradation": {
+                "degraded": true,
+                "reasons": [
+                  "dependency_missing"
+                ]
+              },
+              "dependency_available": false,
+              "last_error": null,
+              "state": "unavailable",
+              "status": "unavailable",
+              "support_status": "unsupported",
+              "unsupported_reason": "watchdog dependency missing",
+              "watch_dir": null
+            },
+            "integrity": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "network": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "processes": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            },
+            "runtime_event_writer": {
+              "collector_status": "ok",
+              "degradation": {
+                "degraded": false,
+                "reasons": []
+              },
+              "failure_total": 0,
+              "latest_failure": null,
+              "recent_failure_count": 0,
+              "status": "ok",
+              "support_status": "supported",
+              "unsupported_reason": null
+            },
+            "tool_events": {
+              "collector_failures": 0,
+              "collector_status": "unknown",
+              "issue_count": 0,
+              "status": "unknown"
+            }
+          }
+        },
+        "drift_reasons": [
+          {
+            "category": "scope",
+            "data": {
+              "change_count": 1,
+              "changed_paths": [
+                "src/demo.txt"
+              ],
+              "cluster": "src",
+              "explanation": "1 change(s) in src matched declared scope prefix src/.",
+              "in_scope_count": 1,
+              "out_of_scope_count": 0,
+              "relation": "within_declared_scope",
+              "scope_weight": 0.0
+            },
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/scope/f27fede2220bcd32"
+            ],
+            "reason_id": "drift:beb4f3e2754f0968",
+            "relation": "within_declared_scope",
+            "summary": "1 change(s) in src matched declared scope prefix src/."
+          },
+          {
+            "category": "endpoint_drift",
+            "data": {
+              "severity": "high",
+              "source": "correlation"
+            },
+            "evidence_level": "inferred",
+            "evidence_refs": [],
+            "reason_id": "drift:ded3666064756f59",
+            "relation": "inferred",
+            "summary": "No classified signals available for alert generation"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "processes collector status: unknown",
+              "event_id": "collector:processes",
+              "evidence_refs": [
+                "local://cleanhouse/collector/processes"
+              ],
+              "label": "collector_gap",
+              "source": "processes"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/processes"
+            ],
+            "reason_id": "drift:f88f3eb644c711cc",
+            "relation": "unknown",
+            "summary": "processes collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "network collector status: unknown",
+              "event_id": "collector:network",
+              "evidence_refs": [
+                "local://cleanhouse/collector/network"
+              ],
+              "label": "collector_gap",
+              "source": "network"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/network"
+            ],
+            "reason_id": "drift:0a1ab90bd15a2cc1",
+            "relation": "unknown",
+            "summary": "network collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "ai_activity collector status: unknown",
+              "event_id": "collector:ai_activity",
+              "evidence_refs": [
+                "local://cleanhouse/collector/ai_activity"
+              ],
+              "label": "collector_gap",
+              "source": "ai_activity"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/ai_activity"
+            ],
+            "reason_id": "drift:ebd5dec8bc69be70",
+            "relation": "unknown",
+            "summary": "ai_activity collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "anomalies collector status: unknown",
+              "event_id": "collector:anomalies",
+              "evidence_refs": [
+                "local://cleanhouse/collector/anomalies"
+              ],
+              "label": "collector_gap",
+              "source": "anomalies"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/anomalies"
+            ],
+            "reason_id": "drift:c7fa83f264846d57",
+            "relation": "unknown",
+            "summary": "anomalies collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "integrity collector status: unknown",
+              "event_id": "collector:integrity",
+              "evidence_refs": [
+                "local://cleanhouse/collector/integrity"
+              ],
+              "label": "collector_gap",
+              "source": "integrity"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/integrity"
+            ],
+            "reason_id": "drift:ccfb9be0a5476596",
+            "relation": "unknown",
+            "summary": "integrity collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "command collector status: unknown",
+              "event_id": "collector:command",
+              "evidence_refs": [
+                "local://cleanhouse/collector/command"
+              ],
+              "label": "collector_gap",
+              "source": "command"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/command"
+            ],
+            "reason_id": "drift:e1ab9291f295cc14",
+            "relation": "unknown",
+            "summary": "command collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "cloud_usage collector status: unknown",
+              "event_id": "collector:cloud_usage",
+              "evidence_refs": [
+                "local://cleanhouse/collector/cloud_usage"
+              ],
+              "label": "collector_gap",
+              "source": "cloud_usage"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/cloud_usage"
+            ],
+            "reason_id": "drift:a0be820067163825",
+            "relation": "unknown",
+            "summary": "cloud_usage collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "unknown",
+              "description": "tool_events collector status: unknown",
+              "event_id": "collector:tool_events",
+              "evidence_refs": [
+                "local://cleanhouse/collector/tool_events"
+              ],
+              "label": "collector_gap",
+              "source": "tool_events"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/tool_events"
+            ],
+            "reason_id": "drift:73dadb13fc65f0f9",
+            "relation": "unknown",
+            "summary": "tool_events collector status: unknown"
+          },
+          {
+            "category": "runtime_gap",
+            "data": {
+              "collector_status": "dependency_missing",
+              "description": "filesystem_watcher collector status: dependency_missing",
+              "event_id": "collector:filesystem_watcher",
+              "evidence_refs": [
+                "local://cleanhouse/collector/filesystem_watcher"
+              ],
+              "label": "unknown",
+              "source": "filesystem_watcher"
+            },
+            "evidence_level": "unknown",
+            "evidence_refs": [
+              "local://cleanhouse/collector/filesystem_watcher"
+            ],
+            "reason_id": "drift:3e23c92a410dcfeb",
+            "relation": "unknown",
+            "summary": "filesystem_watcher collector status: dependency_missing"
+          }
+        ],
+        "evidence_chain": [
+          {
+            "label": "receipt artifact",
+            "ref": "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4",
+            "source": "receipt"
+          },
+          {
+            "label": "observed",
+            "ref": "local://cleanhouse/timeline/tl:beta-proof-session:0",
+            "source": "prompt"
+          },
+          {
+            "label": "observed",
+            "ref": "local://cleanhouse/timeline/tl:beta-proof-session:1",
+            "source": "intent"
+          },
+          {
+            "label": "inferred",
+            "ref": "local://cleanhouse/timeline/tl:beta-proof-session:2",
+            "source": "diff"
+          }
+        ],
+        "lineage_graph": {
+          "edge_count": 4,
+          "edges": [
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+              ],
+              "relationship": "objective_lineage",
+              "source_id": "objective-beta-proof",
+              "target_id": "tl:beta-proof-session:0"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/intent/beta-proof-session"
+              ],
+              "relationship": "temporal_sequence",
+              "source_id": "tl:beta-proof-session:0",
+              "target_id": "tl:beta-proof-session:1"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/diff/diff:b9c8142a00b36767"
+              ],
+              "relationship": "temporal_sequence",
+              "source_id": "tl:beta-proof-session:1",
+              "target_id": "tl:beta-proof-session:2"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4"
+              ],
+              "relationship": "captured_in_receipt",
+              "source_id": "tl:beta-proof-session:2",
+              "target_id": "receipt:e51b8a73b6ca96c4"
+            }
+          ],
+          "node_count": 5,
+          "nodes": [
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/session/beta-proof-session"
+              ],
+              "id": "objective-beta-proof",
+              "label": "objective-beta-proof",
+              "type": "objective"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+              ],
+              "id": "tl:beta-proof-session:0",
+              "label": "Generate deterministic evidence chain",
+              "scope_relation": "objective_root",
+              "timestamp": "2026-05-29T14:19:21.728498",
+              "type": "prompt"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/intent/beta-proof-session"
+              ],
+              "id": "tl:beta-proof-session:1",
+              "label": "Generate deterministic evidence chain",
+              "scope_relation": "objective_root",
+              "timestamp": "2026-05-29T14:19:21.728498",
+              "type": "intent"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/diff/diff:b9c8142a00b36767"
+              ],
+              "id": "tl:beta-proof-session:2",
+              "label": "1 change(s)",
+              "scope_relation": "mixed",
+              "timestamp": "2026-05-29T14:19:21.738104",
+              "type": "diff"
+            },
+            {
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4"
+              ],
+              "id": "receipt:e51b8a73b6ca96c4",
+              "label": "receipt:e51b8a73b6ca96c4",
+              "type": "receipt"
+            }
+          ],
+          "objective_id": "objective-beta-proof",
+          "schema": "cleanhouse.lineage_graph.v1",
+          "session_id": "beta-proof-session"
+        },
+        "receipt_id": "receipt:e51b8a73b6ca96c4",
+        "receipt_root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca",
+        "rollback_state": {
+          "count": 0,
+          "records": [],
+          "status": "not_requested"
+        },
+        "runtime_gaps": [
+          {
+            "collector_status": "unknown",
+            "description": "processes collector status: unknown",
+            "event_id": "collector:processes",
+            "evidence_refs": [
+              "local://cleanhouse/collector/processes"
+            ],
+            "label": "collector_gap",
+            "source": "processes"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "network collector status: unknown",
+            "event_id": "collector:network",
+            "evidence_refs": [
+              "local://cleanhouse/collector/network"
+            ],
+            "label": "collector_gap",
+            "source": "network"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "ai_activity collector status: unknown",
+            "event_id": "collector:ai_activity",
+            "evidence_refs": [
+              "local://cleanhouse/collector/ai_activity"
+            ],
+            "label": "collector_gap",
+            "source": "ai_activity"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "anomalies collector status: unknown",
+            "event_id": "collector:anomalies",
+            "evidence_refs": [
+              "local://cleanhouse/collector/anomalies"
+            ],
+            "label": "collector_gap",
+            "source": "anomalies"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "integrity collector status: unknown",
+            "event_id": "collector:integrity",
+            "evidence_refs": [
+              "local://cleanhouse/collector/integrity"
+            ],
+            "label": "collector_gap",
+            "source": "integrity"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "command collector status: unknown",
+            "event_id": "collector:command",
+            "evidence_refs": [
+              "local://cleanhouse/collector/command"
+            ],
+            "label": "collector_gap",
+            "source": "command"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "cloud_usage collector status: unknown",
+            "event_id": "collector:cloud_usage",
+            "evidence_refs": [
+              "local://cleanhouse/collector/cloud_usage"
+            ],
+            "label": "collector_gap",
+            "source": "cloud_usage"
+          },
+          {
+            "collector_status": "unknown",
+            "description": "tool_events collector status: unknown",
+            "event_id": "collector:tool_events",
+            "evidence_refs": [
+              "local://cleanhouse/collector/tool_events"
+            ],
+            "label": "collector_gap",
+            "source": "tool_events"
+          },
+          {
+            "collector_status": "dependency_missing",
+            "description": "filesystem_watcher collector status: dependency_missing",
+            "event_id": "collector:filesystem_watcher",
+            "evidence_refs": [
+              "local://cleanhouse/collector/filesystem_watcher"
+            ],
+            "label": "unknown",
+            "source": "filesystem_watcher"
+          }
+        ],
+        "scope_analysis": {
+          "change_count": 1,
+          "changed_paths": [
+            "src/demo.txt"
+          ],
+          "classification": "within_declared_scope",
+          "declared_scope": "src/",
+          "in_scope_count": 1,
+          "out_of_scope_count": 0,
+          "path_clusters": [
+            {
+              "change_count": 1,
+              "changed_paths": [
+                "src/demo.txt"
+              ],
+              "cluster": "src",
+              "explanation": "1 change(s) in src matched declared scope prefix src/.",
+              "in_scope_count": 1,
+              "out_of_scope_count": 0,
+              "relation": "within_declared_scope",
+              "scope_weight": 0.0
+            }
+          ],
+          "scope_weight": 0.0
+        },
+        "session_id": "beta-proof-session"
+      },
+      "schema": "cleanhouse.receipt_timeline_bundle.v1",
+      "schema_version": 1,
+      "session_id": "beta-proof-session",
+      "timeline": {
+        "entries": [
+          {
+            "actor_type": "human",
+            "collector_status": "ok",
+            "data": {
+              "actor_type": "human",
+              "collector_status": "ok",
+              "context": "beta proof bundle run",
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+              ],
+              "objective_id": "objective-beta-proof",
+              "observed_vs_expected": {
+                "details": "prompt/context captured",
+                "status": "matched"
+              },
+              "prompt_id": "prompt:bbe1b290436187fc",
+              "raw_evidence_ref": "local://cleanhouse/prompt/prompt:bbe1b290436187fc",
+              "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+              "scope": "src/",
+              "scope_relation": "objective_root",
+              "session_id": "beta-proof-session",
+              "source_surface": "prompt_context",
+              "tool_identity": "codex"
+            },
+            "event_id": "tl:beta-proof-session:0",
+            "event_type": "prompt",
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+            ],
+            "label": "Generate deterministic evidence chain",
+            "objective_id": "objective-beta-proof",
+            "observed_vs_expected": {
+              "details": "prompt/context captured",
+              "status": "matched"
+            },
+            "previous_event_id": null,
+            "raw_evidence_ref": "local://cleanhouse/prompt/prompt:bbe1b290436187fc",
+            "scope_relation": "objective_root",
+            "session_id": "beta-proof-session",
+            "source_surface": "prompt_context",
+            "status": "observed",
+            "timestamp": "2026-05-29T14:19:21.728498"
+          },
+          {
+            "actor_type": "human",
+            "collector_status": "ok",
+            "data": {
+              "actor_type": "human",
+              "collector_status": "ok",
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/intent/beta-proof-session"
+              ],
+              "objective_id": "objective-beta-proof",
+              "observed_vs_expected": {
+                "details": "intent captured",
+                "status": "matched"
+              },
+              "raw_evidence_ref": "local://cleanhouse/intent/beta-proof-session",
+              "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+              "scope": "src/",
+              "scope_relation": "objective_root",
+              "session_id": "beta-proof-session",
+              "source_surface": "intent",
+              "tool_identity": "codex"
+            },
+            "event_id": "tl:beta-proof-session:1",
+            "event_type": "intent",
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/intent/beta-proof-session"
+            ],
+            "label": "Generate deterministic evidence chain",
+            "objective_id": "objective-beta-proof",
+            "observed_vs_expected": {
+              "details": "intent captured",
+              "status": "matched"
+            },
+            "previous_event_id": "tl:beta-proof-session:0",
+            "raw_evidence_ref": "local://cleanhouse/intent/beta-proof-session",
+            "scope_relation": "objective_root",
+            "session_id": "beta-proof-session",
+            "source_surface": "intent",
+            "status": "observed",
+            "timestamp": "2026-05-29T14:19:21.728498"
+          },
+          {
+            "actor_type": "filesystem",
+            "collector_status": "ok",
+            "data": {
+              "actor_type": "filesystem",
+              "changes": [
+                "src/demo.txt"
+              ],
+              "collector_status": "ok",
+              "created": 0,
+              "deleted": 0,
+              "evidence_level": "observed",
+              "evidence_refs": [
+                "local://cleanhouse/diff/diff:b9c8142a00b36767"
+              ],
+              "file_changes": [
+                {
+                  "after_hash": "7b9a72466d3960eb",
+                  "before_hash": "9160d4be34c8695b",
+                  "change_type": "modified",
+                  "path": "src/demo.txt"
+                }
+              ],
+              "modified": 1,
+              "objective_id": "objective-beta-proof",
+              "observed_vs_expected": {
+                "details": "snapshot diff captured",
+                "status": "observed"
+              },
+              "raw_evidence_ref": "local://cleanhouse/diff/diff:b9c8142a00b36767",
+              "scope_relation": "mixed",
+              "session_id": "beta-proof-session",
+              "source_surface": "snapshot_diff"
+            },
+            "event_id": "tl:beta-proof-session:2",
+            "event_type": "diff",
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/diff/diff:b9c8142a00b36767"
+            ],
+            "label": "1 change(s)",
+            "objective_id": "objective-beta-proof",
+            "observed_vs_expected": {
+              "details": "snapshot diff captured",
+              "status": "observed"
+            },
+            "previous_event_id": "tl:beta-proof-session:1",
+            "raw_evidence_ref": "local://cleanhouse/diff/diff:b9c8142a00b36767",
+            "scope_relation": "mixed",
+            "session_id": "beta-proof-session",
+            "source_surface": "snapshot_diff",
+            "status": "inferred",
+            "timestamp": "2026-05-29T14:19:21.738104"
+          }
+        ],
+        "entry_count": 3,
+        "receipt_id": "receipt:e51b8a73b6ca96c4",
+        "session_id": "beta-proof-session",
+        "source": "receipt.events"
+      }
+    },
+    "status": "ok",
+    "verification": {
+      "bundle_hash_match": true,
+      "bundle_id_match": true,
+      "computed_bundle_hash": "b2771eb6efb125865214610af486ac4ce46e83b382f5ffd96d4dfc279d4617ac",
+      "computed_receipt_root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca",
+      "computed_replay_hash": "c4a38682669fbddc50b1df50fe3ac6ebf571b037b1c2da3fecedb97f1fa46537",
+      "computed_timeline_hash": "79c9da144c1b539d14bd90432e32ff6d35faf047baaa5d1277050207bba3be1b",
+      "expected_bundle_hash": "b2771eb6efb125865214610af486ac4ce46e83b382f5ffd96d4dfc279d4617ac",
+      "expected_bundle_id": "receipt_bundle:1e80960e8ad33904",
+      "expected_receipt_root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca",
+      "expected_replay_hash": "c4a38682669fbddc50b1df50fe3ac6ebf571b037b1c2da3fecedb97f1fa46537",
+      "expected_timeline_hash": "79c9da144c1b539d14bd90432e32ff6d35faf047baaa5d1277050207bba3be1b",
+      "key_management_label_match": true,
+      "key_management_label_present": true,
+      "key_management_limitations": [
+        "private_key_is_local_unencrypted_file_storage",
+        "bundled_public_key_requires_out_of_band_fingerprint_trust",
+        "no_rotation_revocation_ca_or_hardware_backing_in_gate_a"
+      ],
+      "key_management_status": "local_unmanaged_ed25519_file",
+      "manifest_contents_match": true,
+      "manifest_hash": "5b9e9570020daab98074473ef5c096de8891b0db672e3ada6573aaacf5048c23",
+      "manifest_hash_match": true,
+      "public_key_fingerprint": "6f09e216db08d32977a361029d168bc392fb5ceedd14b3c7bf129cae7011a02d",
+      "receipt_root_hash_match": true,
+      "replay_hash_match": true,
+      "signature_error": "",
+      "signature_status": "verified",
+      "signature_verified": true,
+      "signer_key_id": "ed25519:6f09e216db08d329",
+      "timeline_hash_match": true
+    }
+  },
+  "bundle_verification": {
+    "receipt_id": "receipt:e51b8a73b6ca96c4",
+    "session_id": "beta-proof-session",
+    "status": "ok",
+    "verification": {
+      "bundle_hash_match": true,
+      "bundle_id_match": true,
+      "computed_bundle_hash": "b2771eb6efb125865214610af486ac4ce46e83b382f5ffd96d4dfc279d4617ac",
+      "computed_receipt_root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca",
+      "computed_replay_hash": "c4a38682669fbddc50b1df50fe3ac6ebf571b037b1c2da3fecedb97f1fa46537",
+      "computed_timeline_hash": "79c9da144c1b539d14bd90432e32ff6d35faf047baaa5d1277050207bba3be1b",
+      "expected_bundle_hash": "b2771eb6efb125865214610af486ac4ce46e83b382f5ffd96d4dfc279d4617ac",
+      "expected_bundle_id": "receipt_bundle:1e80960e8ad33904",
+      "expected_receipt_root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca",
+      "expected_replay_hash": "c4a38682669fbddc50b1df50fe3ac6ebf571b037b1c2da3fecedb97f1fa46537",
+      "expected_timeline_hash": "79c9da144c1b539d14bd90432e32ff6d35faf047baaa5d1277050207bba3be1b",
+      "key_management_label_match": true,
+      "key_management_label_present": true,
+      "key_management_limitations": [
+        "private_key_is_local_unencrypted_file_storage",
+        "bundled_public_key_requires_out_of_band_fingerprint_trust",
+        "no_rotation_revocation_ca_or_hardware_backing_in_gate_a"
+      ],
+      "key_management_status": "local_unmanaged_ed25519_file",
+      "manifest_contents_match": true,
+      "manifest_hash": "5b9e9570020daab98074473ef5c096de8891b0db672e3ada6573aaacf5048c23",
+      "manifest_hash_match": true,
+      "public_key_fingerprint": "6f09e216db08d32977a361029d168bc392fb5ceedd14b3c7bf129cae7011a02d",
+      "receipt_root_hash_match": true,
+      "replay_hash_match": true,
+      "signature_error": "",
+      "signature_status": "verified",
+      "signature_verified": true,
+      "signer_key_id": "ed25519:6f09e216db08d329",
+      "timeline_hash_match": true
+    }
+  },
+  "diff": {
+    "changes": [
+      "src/demo.txt"
+    ],
+    "created_count": 0,
+    "deleted_count": 0,
+    "id": "diff:b9c8142a00b36767",
+    "modified_count": 1,
+    "status": "ok"
+  },
+  "objective_lifecycle": [
+    {
+      "notification": {
+        "acknowledged": false,
+        "acknowledged_at": null,
+        "created_at": "2026-05-29T14:19:21.735405",
+        "evidence_refs": [
+          "local://cleanhouse/session/beta-proof-session",
+          "local://cleanhouse/runtime_presence/runtime_presence:global"
+        ],
+        "id": "notification:40f867bbc51f7b75",
+        "incident_key": "session_started:beta-proof-session:evidence:ba6680777c1b3eac",
+        "metadata": {
+          "click_url": "http://localhost:3333/dashboard?session_id=beta-proof-session&notification_id=notification%3A40f867bbc51f7b75&runtime_focus=1&objective_id=objective-beta-proof",
+          "delivery_phases": {
+            "backend_accepted": null,
+            "dispatch_attempted": "2026-05-29T14:19:21.735405",
+            "operator_acknowledged": null,
+            "visibility_confirmed": null
+          },
+          "escalation_history": [
+            {
+              "attempts": [],
+              "backend": "native_notifications_disabled",
+              "phase": "",
+              "reason": "CLEANHOUSE_NATIVE_NOTIFICATIONS disabled",
+              "status": "skipped",
+              "timestamp": "2026-05-29T14:19:21.735640"
+            }
+          ],
+          "incident_key": "session_started:beta-proof-session:evidence:ba6680777c1b3eac",
+          "live_delivery_eligible": true,
+          "live_delivery_started_at": "2026-05-29T14:19:21.728094",
+          "native_delivery": {
+            "attempt_count": 1,
+            "backend": "native_notifications_disabled",
+            "channel": "native_notifications_disabled",
+            "reason": "CLEANHOUSE_NATIVE_NOTIFICATIONS disabled",
+            "runtime_recovery_artifact_id": null,
+            "runtime_recovery_evidence_ref": null,
+            "status": "skipped",
+            "updated_at": "2026-05-29T14:19:21.735640"
+          },
+          "native_delivery_result": {
+            "backend": "native_notifications_disabled",
+            "reason": "CLEANHOUSE_NATIVE_NOTIFICATIONS disabled",
+            "status": "skipped",
+            "timestamp": "2026-05-29T14:19:21.735640"
+          },
+          "native_delivery_results": [
+            {
+              "backend": "native_notifications_disabled",
+              "reason": "CLEANHOUSE_NATIVE_NOTIFICATIONS disabled",
+              "status": "skipped",
+              "timestamp": "2026-05-29T14:19:21.735640"
+            }
+          ],
+          "notification_boot_id": "c4d2186c5719f783",
+          "objective_id": "objective-beta-proof",
+          "runtime_connection_state": "unknown",
+          "runtime_presence_ref": "local://cleanhouse/runtime_presence/runtime_presence:global",
+          "runtime_state": "unknown",
+          "session_status": "active",
+          "visibility": {
+            "next_reminder_at": "2026-05-29T14:24:21.735455",
+            "reminder_seconds": 300,
+            "risk_after_seconds": 180,
+            "state": "dispatch_attempted"
+          },
+          "visibility_proof": "transport_only",
+          "visibility_state": "dispatch_attempted"
+        },
+        "notification_type": "session_started",
+        "objective_id": "objective-beta-proof",
+        "session_id": "beta-proof-session",
+        "severity": "info",
+        "source": "session_api",
+        "summary": "beta proof objective started",
+        "visibility_proof": "transport_only"
+      },
+      "session": {
+        "evidence_refs": [
+          "local://cleanhouse/session/beta-proof-session"
+        ],
+        "finalized_at": null,
+        "id": "operator_session:c96ef7a7b823ad67",
+        "metadata": {
+          "source": "beta-proof"
+        },
+        "objective_id": "objective-beta-proof",
+        "session_id": "beta-proof-session",
+        "started_at": "2026-05-29T14:19:21.734886",
+        "status": "active",
+        "stopped_at": null,
+        "summary": "beta proof objective started"
+      },
+      "status": "ok"
+    },
+    {
+      "notifications": [
+        {
+          "acknowledged": false,
+          "acknowledged_at": null,
+          "created_at": "2026-05-29T14:19:21.757329",
+          "evidence_refs": [
+            "local://cleanhouse/session/beta-proof-session",
+            "local://cleanhouse/runtime_presence/runtime_presence:global"
+          ],
+          "id": "notification:dd139700f099d0da",
+          "incident_key": "session_ended:beta-proof-session:evidence:ba6680777c1b3eac",
+          "metadata": {
+            "click_url": "http://localhost:3333/dashboard?session_id=beta-proof-session&notification_id=notification%3Add139700f099d0da&runtime_focus=1&objective_id=objective-beta-proof",
+            "delivery_phases": {
+              "backend_accepted": null,
+              "dispatch_attempted": "2026-05-29T14:19:21.757329",
+              "operator_acknowledged": null,
+              "visibility_confirmed": null
+            },
+            "escalation_history": [
+              {
+                "attempts": [],
+                "backend": "native_notifications_disabled",
+                "phase": "",
+                "reason": "CLEANHOUSE_NATIVE_NOTIFICATIONS disabled",
+                "status": "skipped",
+                "timestamp": "2026-05-29T14:19:21.757620"
+              }
+            ],
+            "incident_key": "session_ended:beta-proof-session:evidence:ba6680777c1b3eac",
+            "live_delivery_eligible": true,
+            "live_delivery_started_at": "2026-05-29T14:19:21.728094",
+            "native_delivery": {
+              "attempt_count": 1,
+              "backend": "native_notifications_disabled",
+              "channel": "native_notifications_disabled",
+              "reason": "CLEANHOUSE_NATIVE_NOTIFICATIONS disabled",
+              "runtime_recovery_artifact_id": null,
+              "runtime_recovery_evidence_ref": null,
+              "status": "skipped",
+              "updated_at": "2026-05-29T14:19:21.757620"
+            },
+            "native_delivery_result": {
+              "backend": "native_notifications_disabled",
+              "reason": "CLEANHOUSE_NATIVE_NOTIFICATIONS disabled",
+              "status": "skipped",
+              "timestamp": "2026-05-29T14:19:21.757620"
+            },
+            "native_delivery_results": [
+              {
+                "backend": "native_notifications_disabled",
+                "reason": "CLEANHOUSE_NATIVE_NOTIFICATIONS disabled",
+                "status": "skipped",
+                "timestamp": "2026-05-29T14:19:21.757620"
+              }
+            ],
+            "notification_boot_id": "c4d2186c5719f783",
+            "objective_id": "objective-beta-proof",
+            "runtime_connection_state": "unknown",
+            "runtime_presence_ref": "local://cleanhouse/runtime_presence/runtime_presence:global",
+            "runtime_state": "unknown",
+            "session_status": "finalized",
+            "visibility": {
+              "next_reminder_at": "2026-05-29T14:24:21.757384",
+              "reminder_seconds": 300,
+              "risk_after_seconds": 180,
+              "state": "dispatch_attempted"
+            },
+            "visibility_proof": "transport_only",
+            "visibility_state": "dispatch_attempted"
+          },
+          "notification_type": "session_ended",
+          "objective_id": "objective-beta-proof",
+          "session_id": "beta-proof-session",
+          "severity": "info",
+          "source": "session_api",
+          "summary": "beta proof objective completed",
+          "visibility_proof": "transport_only"
+        }
+      ],
+      "session": {
+        "evidence_refs": [
+          "local://cleanhouse/session/beta-proof-session"
+        ],
+        "finalized_at": "2026-05-29T14:19:21.756801",
+        "id": "operator_session:c96ef7a7b823ad67",
+        "metadata": {
+          "source": "beta-proof"
+        },
+        "objective_id": "objective-beta-proof",
+        "session_id": "beta-proof-session",
+        "started_at": "2026-05-29T14:19:21.734886",
+        "status": "finalized",
+        "stopped_at": "2026-05-29T14:19:21.756801",
+        "summary": "beta proof objective completed"
+      },
+      "status": "ok"
+    }
+  ],
+  "prompt": {
+    "id": "prompt:bbe1b290436187fc",
+    "session_id": "beta-proof-session",
+    "status": "ok"
+  },
+  "receipt": {
+    "alerts": [
+      {
+        "alert_type": "endpoint_drift",
+        "confidence": 0.0,
+        "description": "No classified signals available for alert generation",
+        "evidence_refs": [],
+        "id": "alert:4002503e15674312",
+        "rationale": "No signal data to derive alerts from \u2014 entire session is unknown",
+        "session_id": "beta-proof-session",
+        "severity": "high",
+        "source": "correlation",
+        "source_ids": [],
+        "timestamp": "2026-05-29T14:19:21.741346",
+        "uncertainty": 1.0
+      }
+    ],
+    "collector_manifest": {
+      "collector_health": {
+        "degraded_count": 9,
+        "degraded_surfaces": [
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "processes"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "network"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "ai_activity"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "anomalies"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "integrity"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "command"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "cloud_usage"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "tool_events"
+          },
+          {
+            "collector_status": "dependency_missing",
+            "reasons": [
+              "dependency_missing",
+              "unavailable",
+              "unsupported"
+            ],
+            "status": "unavailable",
+            "surface": "filesystem_watcher"
+          }
+        ],
+        "healthy_count": 2,
+        "status": "degraded",
+        "surface_count": 11,
+        "unknown": [
+          "processes",
+          "network",
+          "ai_activity",
+          "anomalies",
+          "integrity",
+          "command",
+          "cloud_usage",
+          "tool_events"
+        ],
+        "unsupported": [
+          "filesystem_watcher"
+        ]
+      },
+      "degradation": {
+        "degraded": true,
+        "reasons": [
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "processes"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "network"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "ai_activity"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "anomalies"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "integrity"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "command"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "cloud_usage"
+          },
+          {
+            "collector_status": "unknown",
+            "reasons": [
+              "unknown"
+            ],
+            "status": "unknown",
+            "surface": "tool_events"
+          },
+          {
+            "collector_status": "dependency_missing",
+            "reasons": [
+              "dependency_missing",
+              "unavailable",
+              "unsupported"
+            ],
+            "status": "unavailable",
+            "surface": "filesystem_watcher"
+          }
+        ],
+        "status": "degraded"
+      },
+      "generated_at": "2026-05-29T14:19:21.741392",
+      "runtime": {
+        "degradation": {
+          "degraded": true,
+          "reasons": [
+            {
+              "collector_status": "dependency_missing",
+              "reasons": [
+                "dependency_missing"
+              ],
+              "surface": "watcher"
+            }
+          ]
+        },
+        "queue": {
+          "depth": 0,
+          "full": false,
+          "maxsize": 2000,
+          "unfinished_tasks": 0
+        },
+        "runtime_event_writer": {
+          "collector_status": "ok",
+          "failure_total": 0,
+          "latest_failure": null,
+          "recent_failure_count": 0,
+          "recent_failures": [],
+          "status": "ok"
+        },
+        "status": "degraded",
+        "watcher": {
+          "collector_status": "dependency_missing",
+          "degradation": {
+            "degraded": true,
+            "reasons": [
+              "dependency_missing"
+            ]
+          },
+          "dependency_available": false,
+          "last_error": null,
+          "state": "unavailable",
+          "status": "unavailable",
+          "support_status": "unsupported",
+          "unsupported_reason": "watchdog dependency missing",
+          "watch_dir": null
+        },
+        "writer": {
+          "collector_status": "ok",
+          "degradation": {
+            "degraded": false,
+            "reasons": []
+          },
+          "last_error": null,
+          "metrics": {
+            "dropped": 0,
+            "enqueued": 4,
+            "max_depth": 1,
+            "write_failures": 0,
+            "write_retries": 0,
+            "written": 4
+          },
+          "queue": {
+            "depth": 0,
+            "full": false,
+            "maxsize": 2000,
+            "unfinished_tasks": 0
+          },
+          "queue_depth": 0,
+          "queue_maxsize": 2000,
+          "state": "running",
+          "status": "running",
+          "stop_requested": false,
+          "support_status": "supported",
+          "unsupported_reason": null
+        }
+      },
+      "schema": "cleanhouse.collector_manifest.v1",
+      "surfaces": {
+        "ai_activity": {
+          "collector_failures": 0,
+          "collector_status": "unknown",
+          "issue_count": 0,
+          "status": "unknown"
+        },
+        "anomalies": {
+          "collector_failures": 0,
+          "collector_status": "unknown",
+          "issue_count": 0,
+          "status": "unknown"
+        },
+        "cloud_usage": {
+          "collector_failures": 0,
+          "collector_status": "unknown",
+          "issue_count": 0,
+          "status": "unknown"
+        },
+        "command": {
+          "collector_failures": 0,
+          "collector_status": "unknown",
+          "issue_count": 0,
+          "status": "unknown"
+        },
+        "event_writer": {
+          "collector_status": "ok",
+          "degradation": {
+            "degraded": false,
+            "reasons": []
+          },
+          "last_error": null,
+          "metrics": {
+            "dropped": 0,
+            "enqueued": 4,
+            "max_depth": 1,
+            "write_failures": 0,
+            "write_retries": 0,
+            "written": 4
+          },
+          "queue": {
+            "depth": 0,
+            "full": false,
+            "maxsize": 2000,
+            "unfinished_tasks": 0
+          },
+          "queue_depth": 0,
+          "queue_maxsize": 2000,
+          "state": "running",
+          "status": "running",
+          "stop_requested": false,
+          "support_status": "supported",
+          "unsupported_reason": null
+        },
+        "filesystem_watcher": {
+          "collector_status": "dependency_missing",
+          "degradation": {
+            "degraded": true,
+            "reasons": [
+              "dependency_missing"
+            ]
+          },
+          "dependency_available": false,
+          "last_error": null,
+          "state": "unavailable",
+          "status": "unavailable",
+          "support_status": "unsupported",
+          "unsupported_reason": "watchdog dependency missing",
+          "watch_dir": null
+        },
+        "integrity": {
+          "collector_failures": 0,
+          "collector_status": "unknown",
+          "issue_count": 0,
+          "status": "unknown"
+        },
+        "network": {
+          "collector_failures": 0,
+          "collector_status": "unknown",
+          "issue_count": 0,
+          "status": "unknown"
+        },
+        "processes": {
+          "collector_failures": 0,
+          "collector_status": "unknown",
+          "issue_count": 0,
+          "status": "unknown"
+        },
+        "runtime_event_writer": {
+          "collector_status": "ok",
+          "degradation": {
+            "degraded": false,
+            "reasons": []
+          },
+          "failure_total": 0,
+          "latest_failure": null,
+          "recent_failure_count": 0,
+          "status": "ok",
+          "support_status": "supported",
+          "unsupported_reason": null
+        },
+        "tool_events": {
+          "collector_failures": 0,
+          "collector_status": "unknown",
+          "issue_count": 0,
+          "status": "unknown"
+        }
+      }
+    },
+    "drift_reasons": [
+      {
+        "category": "scope",
+        "data": {
+          "change_count": 1,
+          "changed_paths": [
+            "src/demo.txt"
+          ],
+          "cluster": "src",
+          "explanation": "1 change(s) in src matched declared scope prefix src/.",
+          "in_scope_count": 1,
+          "out_of_scope_count": 0,
+          "relation": "within_declared_scope",
+          "scope_weight": 0.0
+        },
+        "evidence_level": "observed",
+        "evidence_refs": [
+          "local://cleanhouse/scope/f27fede2220bcd32"
+        ],
+        "reason_id": "drift:beb4f3e2754f0968",
+        "relation": "within_declared_scope",
+        "summary": "1 change(s) in src matched declared scope prefix src/."
+      },
+      {
+        "category": "endpoint_drift",
+        "data": {
+          "severity": "high",
+          "source": "correlation"
+        },
+        "evidence_level": "inferred",
+        "evidence_refs": [],
+        "reason_id": "drift:ded3666064756f59",
+        "relation": "inferred",
+        "summary": "No classified signals available for alert generation"
+      },
+      {
+        "category": "runtime_gap",
+        "data": {
+          "collector_status": "unknown",
+          "description": "processes collector status: unknown",
+          "event_id": "collector:processes",
+          "evidence_refs": [
+            "local://cleanhouse/collector/processes"
+          ],
+          "label": "collector_gap",
+          "source": "processes"
+        },
+        "evidence_level": "unknown",
+        "evidence_refs": [
+          "local://cleanhouse/collector/processes"
+        ],
+        "reason_id": "drift:f88f3eb644c711cc",
+        "relation": "unknown",
+        "summary": "processes collector status: unknown"
+      },
+      {
+        "category": "runtime_gap",
+        "data": {
+          "collector_status": "unknown",
+          "description": "network collector status: unknown",
+          "event_id": "collector:network",
+          "evidence_refs": [
+            "local://cleanhouse/collector/network"
+          ],
+          "label": "collector_gap",
+          "source": "network"
+        },
+        "evidence_level": "unknown",
+        "evidence_refs": [
+          "local://cleanhouse/collector/network"
+        ],
+        "reason_id": "drift:0a1ab90bd15a2cc1",
+        "relation": "unknown",
+        "summary": "network collector status: unknown"
+      },
+      {
+        "category": "runtime_gap",
+        "data": {
+          "collector_status": "unknown",
+          "description": "ai_activity collector status: unknown",
+          "event_id": "collector:ai_activity",
+          "evidence_refs": [
+            "local://cleanhouse/collector/ai_activity"
+          ],
+          "label": "collector_gap",
+          "source": "ai_activity"
+        },
+        "evidence_level": "unknown",
+        "evidence_refs": [
+          "local://cleanhouse/collector/ai_activity"
+        ],
+        "reason_id": "drift:ebd5dec8bc69be70",
+        "relation": "unknown",
+        "summary": "ai_activity collector status: unknown"
+      },
+      {
+        "category": "runtime_gap",
+        "data": {
+          "collector_status": "unknown",
+          "description": "anomalies collector status: unknown",
+          "event_id": "collector:anomalies",
+          "evidence_refs": [
+            "local://cleanhouse/collector/anomalies"
+          ],
+          "label": "collector_gap",
+          "source": "anomalies"
+        },
+        "evidence_level": "unknown",
+        "evidence_refs": [
+          "local://cleanhouse/collector/anomalies"
+        ],
+        "reason_id": "drift:c7fa83f264846d57",
+        "relation": "unknown",
+        "summary": "anomalies collector status: unknown"
+      },
+      {
+        "category": "runtime_gap",
+        "data": {
+          "collector_status": "unknown",
+          "description": "integrity collector status: unknown",
+          "event_id": "collector:integrity",
+          "evidence_refs": [
+            "local://cleanhouse/collector/integrity"
+          ],
+          "label": "collector_gap",
+          "source": "integrity"
+        },
+        "evidence_level": "unknown",
+        "evidence_refs": [
+          "local://cleanhouse/collector/integrity"
+        ],
+        "reason_id": "drift:ccfb9be0a5476596",
+        "relation": "unknown",
+        "summary": "integrity collector status: unknown"
+      },
+      {
+        "category": "runtime_gap",
+        "data": {
+          "collector_status": "unknown",
+          "description": "command collector status: unknown",
+          "event_id": "collector:command",
+          "evidence_refs": [
+            "local://cleanhouse/collector/command"
+          ],
+          "label": "collector_gap",
+          "source": "command"
+        },
+        "evidence_level": "unknown",
+        "evidence_refs": [
+          "local://cleanhouse/collector/command"
+        ],
+        "reason_id": "drift:e1ab9291f295cc14",
+        "relation": "unknown",
+        "summary": "command collector status: unknown"
+      },
+      {
+        "category": "runtime_gap",
+        "data": {
+          "collector_status": "unknown",
+          "description": "cloud_usage collector status: unknown",
+          "event_id": "collector:cloud_usage",
+          "evidence_refs": [
+            "local://cleanhouse/collector/cloud_usage"
+          ],
+          "label": "collector_gap",
+          "source": "cloud_usage"
+        },
+        "evidence_level": "unknown",
+        "evidence_refs": [
+          "local://cleanhouse/collector/cloud_usage"
+        ],
+        "reason_id": "drift:a0be820067163825",
+        "relation": "unknown",
+        "summary": "cloud_usage collector status: unknown"
+      },
+      {
+        "category": "runtime_gap",
+        "data": {
+          "collector_status": "unknown",
+          "description": "tool_events collector status: unknown",
+          "event_id": "collector:tool_events",
+          "evidence_refs": [
+            "local://cleanhouse/collector/tool_events"
+          ],
+          "label": "collector_gap",
+          "source": "tool_events"
+        },
+        "evidence_level": "unknown",
+        "evidence_refs": [
+          "local://cleanhouse/collector/tool_events"
+        ],
+        "reason_id": "drift:73dadb13fc65f0f9",
+        "relation": "unknown",
+        "summary": "tool_events collector status: unknown"
+      },
+      {
+        "category": "runtime_gap",
+        "data": {
+          "collector_status": "dependency_missing",
+          "description": "filesystem_watcher collector status: dependency_missing",
+          "event_id": "collector:filesystem_watcher",
+          "evidence_refs": [
+            "local://cleanhouse/collector/filesystem_watcher"
+          ],
+          "label": "unknown",
+          "source": "filesystem_watcher"
+        },
+        "evidence_level": "unknown",
+        "evidence_refs": [
+          "local://cleanhouse/collector/filesystem_watcher"
+        ],
+        "reason_id": "drift:3e23c92a410dcfeb",
+        "relation": "unknown",
+        "summary": "filesystem_watcher collector status: dependency_missing"
+      }
+    ],
+    "events": [
+      {
+        "actor_type": "human",
+        "collector_status": "ok",
+        "data": {
+          "actor_type": "human",
+          "collector_status": "ok",
+          "context": "beta proof bundle run",
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+          ],
+          "objective_id": "objective-beta-proof",
+          "observed_vs_expected": {
+            "details": "prompt/context captured",
+            "status": "matched"
+          },
+          "prompt_id": "prompt:bbe1b290436187fc",
+          "raw_evidence_ref": "local://cleanhouse/prompt/prompt:bbe1b290436187fc",
+          "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+          "scope": "src/",
+          "scope_relation": "objective_root",
+          "session_id": "beta-proof-session",
+          "source_surface": "prompt_context",
+          "tool_identity": "codex"
+        },
+        "event_id": "tl:beta-proof-session:0",
+        "event_type": "prompt",
+        "evidence_level": "observed",
+        "evidence_refs": [
+          "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+        ],
+        "label": "Generate deterministic evidence chain",
+        "objective_id": "objective-beta-proof",
+        "observed_vs_expected": {
+          "details": "prompt/context captured",
+          "status": "matched"
+        },
+        "previous_event_id": null,
+        "raw_evidence_ref": "local://cleanhouse/prompt/prompt:bbe1b290436187fc",
+        "scope_relation": "objective_root",
+        "session_id": "beta-proof-session",
+        "source_surface": "prompt_context",
+        "status": "observed",
+        "timestamp": "2026-05-29T14:19:21.728498"
+      },
+      {
+        "actor_type": "human",
+        "collector_status": "ok",
+        "data": {
+          "actor_type": "human",
+          "collector_status": "ok",
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/intent/beta-proof-session"
+          ],
+          "objective_id": "objective-beta-proof",
+          "observed_vs_expected": {
+            "details": "intent captured",
+            "status": "matched"
+          },
+          "raw_evidence_ref": "local://cleanhouse/intent/beta-proof-session",
+          "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+          "scope": "src/",
+          "scope_relation": "objective_root",
+          "session_id": "beta-proof-session",
+          "source_surface": "intent",
+          "tool_identity": "codex"
+        },
+        "event_id": "tl:beta-proof-session:1",
+        "event_type": "intent",
+        "evidence_level": "observed",
+        "evidence_refs": [
+          "local://cleanhouse/intent/beta-proof-session"
+        ],
+        "label": "Generate deterministic evidence chain",
+        "objective_id": "objective-beta-proof",
+        "observed_vs_expected": {
+          "details": "intent captured",
+          "status": "matched"
+        },
+        "previous_event_id": "tl:beta-proof-session:0",
+        "raw_evidence_ref": "local://cleanhouse/intent/beta-proof-session",
+        "scope_relation": "objective_root",
+        "session_id": "beta-proof-session",
+        "source_surface": "intent",
+        "status": "observed",
+        "timestamp": "2026-05-29T14:19:21.728498"
+      },
+      {
+        "actor_type": "filesystem",
+        "collector_status": "ok",
+        "data": {
+          "actor_type": "filesystem",
+          "changes": [
+            "src/demo.txt"
+          ],
+          "collector_status": "ok",
+          "created": 0,
+          "deleted": 0,
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/diff/diff:b9c8142a00b36767"
+          ],
+          "file_changes": [
+            {
+              "after_hash": "7b9a72466d3960eb",
+              "before_hash": "9160d4be34c8695b",
+              "change_type": "modified",
+              "path": "src/demo.txt"
+            }
+          ],
+          "modified": 1,
+          "objective_id": "objective-beta-proof",
+          "observed_vs_expected": {
+            "details": "snapshot diff captured",
+            "status": "observed"
+          },
+          "raw_evidence_ref": "local://cleanhouse/diff/diff:b9c8142a00b36767",
+          "scope_relation": "mixed",
+          "session_id": "beta-proof-session",
+          "source_surface": "snapshot_diff"
+        },
+        "event_id": "tl:beta-proof-session:2",
+        "event_type": "diff",
+        "evidence_level": "observed",
+        "evidence_refs": [
+          "local://cleanhouse/diff/diff:b9c8142a00b36767"
+        ],
+        "label": "1 change(s)",
+        "objective_id": "objective-beta-proof",
+        "observed_vs_expected": {
+          "details": "snapshot diff captured",
+          "status": "observed"
+        },
+        "previous_event_id": "tl:beta-proof-session:1",
+        "raw_evidence_ref": "local://cleanhouse/diff/diff:b9c8142a00b36767",
+        "scope_relation": "mixed",
+        "session_id": "beta-proof-session",
+        "source_surface": "snapshot_diff",
+        "status": "inferred",
+        "timestamp": "2026-05-29T14:19:21.738104"
+      }
+    ],
+    "evidence_index": [
+      {
+        "label": "observed",
+        "ref": "local://cleanhouse/timeline/tl:beta-proof-session:0",
+        "source": "prompt"
+      },
+      {
+        "label": "observed",
+        "ref": "local://cleanhouse/timeline/tl:beta-proof-session:1",
+        "source": "intent"
+      },
+      {
+        "label": "inferred",
+        "ref": "local://cleanhouse/timeline/tl:beta-proof-session:2",
+        "source": "diff"
+      }
+    ],
+    "gaps": [
+      {
+        "collector_status": "unknown",
+        "description": "processes collector status: unknown",
+        "event_id": "collector:processes",
+        "evidence_refs": [
+          "local://cleanhouse/collector/processes"
+        ],
+        "label": "collector_gap",
+        "source": "processes"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "network collector status: unknown",
+        "event_id": "collector:network",
+        "evidence_refs": [
+          "local://cleanhouse/collector/network"
+        ],
+        "label": "collector_gap",
+        "source": "network"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "ai_activity collector status: unknown",
+        "event_id": "collector:ai_activity",
+        "evidence_refs": [
+          "local://cleanhouse/collector/ai_activity"
+        ],
+        "label": "collector_gap",
+        "source": "ai_activity"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "anomalies collector status: unknown",
+        "event_id": "collector:anomalies",
+        "evidence_refs": [
+          "local://cleanhouse/collector/anomalies"
+        ],
+        "label": "collector_gap",
+        "source": "anomalies"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "integrity collector status: unknown",
+        "event_id": "collector:integrity",
+        "evidence_refs": [
+          "local://cleanhouse/collector/integrity"
+        ],
+        "label": "collector_gap",
+        "source": "integrity"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "command collector status: unknown",
+        "event_id": "collector:command",
+        "evidence_refs": [
+          "local://cleanhouse/collector/command"
+        ],
+        "label": "collector_gap",
+        "source": "command"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "cloud_usage collector status: unknown",
+        "event_id": "collector:cloud_usage",
+        "evidence_refs": [
+          "local://cleanhouse/collector/cloud_usage"
+        ],
+        "label": "collector_gap",
+        "source": "cloud_usage"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "tool_events collector status: unknown",
+        "event_id": "collector:tool_events",
+        "evidence_refs": [
+          "local://cleanhouse/collector/tool_events"
+        ],
+        "label": "collector_gap",
+        "source": "tool_events"
+      },
+      {
+        "collector_status": "dependency_missing",
+        "description": "filesystem_watcher collector status: dependency_missing",
+        "event_id": "collector:filesystem_watcher",
+        "evidence_refs": [
+          "local://cleanhouse/collector/filesystem_watcher"
+        ],
+        "label": "unknown",
+        "source": "filesystem_watcher"
+      }
+    ],
+    "id": "receipt:e51b8a73b6ca96c4",
+    "integrity": {
+      "algorithm": "sha-256",
+      "event_count": 3,
+      "event_hash_chain": [
+        "7c99eb09b1eca79d63db6a9878ce387610ba4252a0d35d86896ea64e6ce73c87",
+        "12b22384b58b5c3eeccc81928a69fa60240a8540046e80879e967f121b12ad29",
+        "1b4af5991a7d6b2970466af9f597bbd2960a7d7821a3d6c8cdcc401be7ae04ff"
+      ],
+      "purpose": "receipt integrity verification",
+      "root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca"
+    },
+    "lineage_graph": {
+      "edge_count": 4,
+      "edges": [
+        {
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+          ],
+          "relationship": "objective_lineage",
+          "source_id": "objective-beta-proof",
+          "target_id": "tl:beta-proof-session:0"
+        },
+        {
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/intent/beta-proof-session"
+          ],
+          "relationship": "temporal_sequence",
+          "source_id": "tl:beta-proof-session:0",
+          "target_id": "tl:beta-proof-session:1"
+        },
+        {
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/diff/diff:b9c8142a00b36767"
+          ],
+          "relationship": "temporal_sequence",
+          "source_id": "tl:beta-proof-session:1",
+          "target_id": "tl:beta-proof-session:2"
+        },
+        {
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4"
+          ],
+          "relationship": "captured_in_receipt",
+          "source_id": "tl:beta-proof-session:2",
+          "target_id": "receipt:e51b8a73b6ca96c4"
+        }
+      ],
+      "node_count": 5,
+      "nodes": [
+        {
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/session/beta-proof-session"
+          ],
+          "id": "objective-beta-proof",
+          "label": "objective-beta-proof",
+          "type": "objective"
+        },
+        {
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+          ],
+          "id": "tl:beta-proof-session:0",
+          "label": "Generate deterministic evidence chain",
+          "scope_relation": "objective_root",
+          "timestamp": "2026-05-29T14:19:21.728498",
+          "type": "prompt"
+        },
+        {
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/intent/beta-proof-session"
+          ],
+          "id": "tl:beta-proof-session:1",
+          "label": "Generate deterministic evidence chain",
+          "scope_relation": "objective_root",
+          "timestamp": "2026-05-29T14:19:21.728498",
+          "type": "intent"
+        },
+        {
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/diff/diff:b9c8142a00b36767"
+          ],
+          "id": "tl:beta-proof-session:2",
+          "label": "1 change(s)",
+          "scope_relation": "mixed",
+          "timestamp": "2026-05-29T14:19:21.738104",
+          "type": "diff"
+        },
+        {
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4"
+          ],
+          "id": "receipt:e51b8a73b6ca96c4",
+          "label": "receipt:e51b8a73b6ca96c4",
+          "type": "receipt"
+        }
+      ],
+      "objective_id": "objective-beta-proof",
+      "schema": "cleanhouse.lineage_graph.v1",
+      "session_id": "beta-proof-session"
+    },
+    "metadata": {
+      "alert_count": 1,
+      "context": "beta proof bundle run",
+      "duration_seconds": 0.01,
+      "event_count": 3,
+      "gap_count": 9,
+      "objective_id": "objective-beta-proof",
+      "origin": "2026-05-29T14:19:21.728498",
+      "prompt_id": "prompt:bbe1b290436187fc",
+      "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+      "scope": "src/",
+      "session_id": "beta-proof-session",
+      "tool_identity": "codex"
+    },
+    "notification": {
+      "acknowledged": false,
+      "acknowledged_at": null,
+      "created_at": "2026-05-29T14:19:21.742541",
+      "evidence_refs": [
+        "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4",
+        "local://cleanhouse/timeline/tl:beta-proof-session:0",
+        "local://cleanhouse/timeline/tl:beta-proof-session:1",
+        "local://cleanhouse/timeline/tl:beta-proof-session:2"
+      ],
+      "id": "notification:6863ad9e31614ad1",
+      "incident_key": "receipt_finalized:beta-proof-session:receipt_id:receipt:e51b8a73b6ca96c4",
+      "metadata": {
+        "click_url": "http://localhost:3333/dashboard?session_id=beta-proof-session&notification_id=notification%3A6863ad9e31614ad1&runtime_focus=1&objective_id=objective-beta-proof&receipt_id=receipt%3Ae51b8a73b6ca96c4",
+        "delivery_phases": {
+          "backend_accepted": null,
+          "dispatch_attempted": "2026-05-29T14:19:21.742541",
+          "operator_acknowledged": null,
+          "visibility_confirmed": null
+        },
+        "incident_key": "receipt_finalized:beta-proof-session:receipt_id:receipt:e51b8a73b6ca96c4",
+        "live_delivery_eligible": true,
+        "live_delivery_started_at": "2026-05-29T14:19:21.728094",
+        "notification_boot_id": "c4d2186c5719f783",
+        "objective_id": "objective-beta-proof",
+        "receipt_id": "receipt:e51b8a73b6ca96c4",
+        "visibility": {
+          "next_reminder_at": "2026-05-29T14:24:21.742596",
+          "reminder_seconds": 300,
+          "risk_after_seconds": 180,
+          "state": "dispatch_attempted"
+        },
+        "visibility_proof": "transport_only",
+        "visibility_state": "dispatch_attempted"
+      },
+      "notification_type": "receipt_finalized",
+      "objective_id": "objective-beta-proof",
+      "session_id": "beta-proof-session",
+      "severity": "info",
+      "source": "receipt",
+      "summary": "receipt finalized: receipt:e51b8a73b6ca96c4",
+      "visibility_proof": "transport_only"
+    },
+    "rollback_state": {
+      "count": 0,
+      "records": [],
+      "status": "not_requested"
+    },
+    "runtime_gaps": [
+      {
+        "collector_status": "unknown",
+        "description": "processes collector status: unknown",
+        "event_id": "collector:processes",
+        "evidence_refs": [
+          "local://cleanhouse/collector/processes"
+        ],
+        "label": "collector_gap",
+        "source": "processes"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "network collector status: unknown",
+        "event_id": "collector:network",
+        "evidence_refs": [
+          "local://cleanhouse/collector/network"
+        ],
+        "label": "collector_gap",
+        "source": "network"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "ai_activity collector status: unknown",
+        "event_id": "collector:ai_activity",
+        "evidence_refs": [
+          "local://cleanhouse/collector/ai_activity"
+        ],
+        "label": "collector_gap",
+        "source": "ai_activity"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "anomalies collector status: unknown",
+        "event_id": "collector:anomalies",
+        "evidence_refs": [
+          "local://cleanhouse/collector/anomalies"
+        ],
+        "label": "collector_gap",
+        "source": "anomalies"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "integrity collector status: unknown",
+        "event_id": "collector:integrity",
+        "evidence_refs": [
+          "local://cleanhouse/collector/integrity"
+        ],
+        "label": "collector_gap",
+        "source": "integrity"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "command collector status: unknown",
+        "event_id": "collector:command",
+        "evidence_refs": [
+          "local://cleanhouse/collector/command"
+        ],
+        "label": "collector_gap",
+        "source": "command"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "cloud_usage collector status: unknown",
+        "event_id": "collector:cloud_usage",
+        "evidence_refs": [
+          "local://cleanhouse/collector/cloud_usage"
+        ],
+        "label": "collector_gap",
+        "source": "cloud_usage"
+      },
+      {
+        "collector_status": "unknown",
+        "description": "tool_events collector status: unknown",
+        "event_id": "collector:tool_events",
+        "evidence_refs": [
+          "local://cleanhouse/collector/tool_events"
+        ],
+        "label": "collector_gap",
+        "source": "tool_events"
+      },
+      {
+        "collector_status": "dependency_missing",
+        "description": "filesystem_watcher collector status: dependency_missing",
+        "event_id": "collector:filesystem_watcher",
+        "evidence_refs": [
+          "local://cleanhouse/collector/filesystem_watcher"
+        ],
+        "label": "unknown",
+        "source": "filesystem_watcher"
+      }
+    ],
+    "scope_analysis": {
+      "change_count": 1,
+      "changed_paths": [
+        "src/demo.txt"
+      ],
+      "classification": "within_declared_scope",
+      "declared_scope": "src/",
+      "in_scope_count": 1,
+      "out_of_scope_count": 0,
+      "path_clusters": [
+        {
+          "change_count": 1,
+          "changed_paths": [
+            "src/demo.txt"
+          ],
+          "cluster": "src",
+          "explanation": "1 change(s) in src matched declared scope prefix src/.",
+          "in_scope_count": 1,
+          "out_of_scope_count": 0,
+          "relation": "within_declared_scope",
+          "scope_weight": 0.0
+        }
+      ],
+      "scope_weight": 0.0
+    },
+    "session_id": "beta-proof-session",
+    "status": "ok",
+    "summary": {
+      "text": "Session for 'Generate deterministic evidence chain' completed with 3 event(s), 1 alert(s), 9 unresolved gap(s). Verdict: unknown.",
+      "verdict": "unknown"
+    }
+  },
+  "replay": {
+    "approval_history": [],
+    "evidence_chain": [
+      {
+        "label": "receipt artifact",
+        "ref": "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4",
+        "source": "receipt"
+      },
+      {
+        "label": "observed",
+        "ref": "local://cleanhouse/timeline/tl:beta-proof-session:0",
+        "source": "prompt"
+      },
+      {
+        "label": "observed",
+        "ref": "local://cleanhouse/timeline/tl:beta-proof-session:1",
+        "source": "intent"
+      },
+      {
+        "label": "inferred",
+        "ref": "local://cleanhouse/timeline/tl:beta-proof-session:2",
+        "source": "diff"
+      }
+    ],
+    "generated_at": "2026-05-29T14:19:21.743631",
+    "id": "receipt_replay:d172f5d75b0ff9e6",
+    "integrity": {
+      "algorithm": "sha-256",
+      "approval_history_count": 0,
+      "evidence_ref_count": 4,
+      "purpose": "receipt state replay verification",
+      "receipt_root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca",
+      "replay_hash": "c4a38682669fbddc50b1df50fe3ac6ebf571b037b1c2da3fecedb97f1fa46537"
+    },
+    "receipt_id": "receipt:e51b8a73b6ca96c4",
+    "replay": {
+      "approval_history": [],
+      "approval_state": {
+        "approval_id": "",
+        "resolution_note": "",
+        "resolved_at": null,
+        "reviewer": "",
+        "reviewer_note": "",
+        "status": "unreviewed"
+      },
+      "collector_manifest": {
+        "collector_health": {
+          "degraded_count": 9,
+          "degraded_surfaces": [
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "processes"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "network"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "ai_activity"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "anomalies"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "integrity"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "command"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "cloud_usage"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "tool_events"
+            },
+            {
+              "collector_status": "dependency_missing",
+              "reasons": [
+                "dependency_missing",
+                "unavailable",
+                "unsupported"
+              ],
+              "status": "unavailable",
+              "surface": "filesystem_watcher"
+            }
+          ],
+          "healthy_count": 2,
+          "status": "degraded",
+          "surface_count": 11,
+          "unknown": [
+            "processes",
+            "network",
+            "ai_activity",
+            "anomalies",
+            "integrity",
+            "command",
+            "cloud_usage",
+            "tool_events"
+          ],
+          "unsupported": [
+            "filesystem_watcher"
+          ]
+        },
+        "degradation": {
+          "degraded": true,
+          "reasons": [
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "processes"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "network"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "ai_activity"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "anomalies"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "integrity"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "command"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "cloud_usage"
+            },
+            {
+              "collector_status": "unknown",
+              "reasons": [
+                "unknown"
+              ],
+              "status": "unknown",
+              "surface": "tool_events"
+            },
+            {
+              "collector_status": "dependency_missing",
+              "reasons": [
+                "dependency_missing",
+                "unavailable",
+                "unsupported"
+              ],
+              "status": "unavailable",
+              "surface": "filesystem_watcher"
+            }
+          ],
+          "status": "degraded"
+        },
+        "generated_at": "2026-05-29T14:19:21.741392",
+        "runtime": {
+          "degradation": {
+            "degraded": true,
+            "reasons": [
+              {
+                "collector_status": "dependency_missing",
+                "reasons": [
+                  "dependency_missing"
+                ],
+                "surface": "watcher"
+              }
+            ]
+          },
+          "queue": {
+            "depth": 0,
+            "full": false,
+            "maxsize": 2000,
+            "unfinished_tasks": 0
+          },
+          "runtime_event_writer": {
+            "collector_status": "ok",
+            "failure_total": 0,
+            "latest_failure": null,
+            "recent_failure_count": 0,
+            "recent_failures": [],
+            "status": "ok"
+          },
+          "status": "degraded",
+          "watcher": {
+            "collector_status": "dependency_missing",
+            "degradation": {
+              "degraded": true,
+              "reasons": [
+                "dependency_missing"
+              ]
+            },
+            "dependency_available": false,
+            "last_error": null,
+            "state": "unavailable",
+            "status": "unavailable",
+            "support_status": "unsupported",
+            "unsupported_reason": "watchdog dependency missing",
+            "watch_dir": null
+          },
+          "writer": {
+            "collector_status": "ok",
+            "degradation": {
+              "degraded": false,
+              "reasons": []
+            },
+            "last_error": null,
+            "metrics": {
+              "dropped": 0,
+              "enqueued": 4,
+              "max_depth": 1,
+              "write_failures": 0,
+              "write_retries": 0,
+              "written": 4
+            },
+            "queue": {
+              "depth": 0,
+              "full": false,
+              "maxsize": 2000,
+              "unfinished_tasks": 0
+            },
+            "queue_depth": 0,
+            "queue_maxsize": 2000,
+            "state": "running",
+            "status": "running",
+            "stop_requested": false,
+            "support_status": "supported",
+            "unsupported_reason": null
+          }
+        },
+        "schema": "cleanhouse.collector_manifest.v1",
+        "surfaces": {
+          "ai_activity": {
+            "collector_failures": 0,
+            "collector_status": "unknown",
+            "issue_count": 0,
+            "status": "unknown"
+          },
+          "anomalies": {
+            "collector_failures": 0,
+            "collector_status": "unknown",
+            "issue_count": 0,
+            "status": "unknown"
+          },
+          "cloud_usage": {
+            "collector_failures": 0,
+            "collector_status": "unknown",
+            "issue_count": 0,
+            "status": "unknown"
+          },
+          "command": {
+            "collector_failures": 0,
+            "collector_status": "unknown",
+            "issue_count": 0,
+            "status": "unknown"
+          },
+          "event_writer": {
+            "collector_status": "ok",
+            "degradation": {
+              "degraded": false,
+              "reasons": []
+            },
+            "last_error": null,
+            "metrics": {
+              "dropped": 0,
+              "enqueued": 4,
+              "max_depth": 1,
+              "write_failures": 0,
+              "write_retries": 0,
+              "written": 4
+            },
+            "queue": {
+              "depth": 0,
+              "full": false,
+              "maxsize": 2000,
+              "unfinished_tasks": 0
+            },
+            "queue_depth": 0,
+            "queue_maxsize": 2000,
+            "state": "running",
+            "status": "running",
+            "stop_requested": false,
+            "support_status": "supported",
+            "unsupported_reason": null
+          },
+          "filesystem_watcher": {
+            "collector_status": "dependency_missing",
+            "degradation": {
+              "degraded": true,
+              "reasons": [
+                "dependency_missing"
+              ]
+            },
+            "dependency_available": false,
+            "last_error": null,
+            "state": "unavailable",
+            "status": "unavailable",
+            "support_status": "unsupported",
+            "unsupported_reason": "watchdog dependency missing",
+            "watch_dir": null
+          },
+          "integrity": {
+            "collector_failures": 0,
+            "collector_status": "unknown",
+            "issue_count": 0,
+            "status": "unknown"
+          },
+          "network": {
+            "collector_failures": 0,
+            "collector_status": "unknown",
+            "issue_count": 0,
+            "status": "unknown"
+          },
+          "processes": {
+            "collector_failures": 0,
+            "collector_status": "unknown",
+            "issue_count": 0,
+            "status": "unknown"
+          },
+          "runtime_event_writer": {
+            "collector_status": "ok",
+            "degradation": {
+              "degraded": false,
+              "reasons": []
+            },
+            "failure_total": 0,
+            "latest_failure": null,
+            "recent_failure_count": 0,
+            "status": "ok",
+            "support_status": "supported",
+            "unsupported_reason": null
+          },
+          "tool_events": {
+            "collector_failures": 0,
+            "collector_status": "unknown",
+            "issue_count": 0,
+            "status": "unknown"
+          }
+        }
+      },
+      "drift_reasons": [
+        {
+          "category": "scope",
+          "data": {
+            "change_count": 1,
+            "changed_paths": [
+              "src/demo.txt"
+            ],
+            "cluster": "src",
+            "explanation": "1 change(s) in src matched declared scope prefix src/.",
+            "in_scope_count": 1,
+            "out_of_scope_count": 0,
+            "relation": "within_declared_scope",
+            "scope_weight": 0.0
+          },
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/scope/f27fede2220bcd32"
+          ],
+          "reason_id": "drift:beb4f3e2754f0968",
+          "relation": "within_declared_scope",
+          "summary": "1 change(s) in src matched declared scope prefix src/."
+        },
+        {
+          "category": "endpoint_drift",
+          "data": {
+            "severity": "high",
+            "source": "correlation"
+          },
+          "evidence_level": "inferred",
+          "evidence_refs": [],
+          "reason_id": "drift:ded3666064756f59",
+          "relation": "inferred",
+          "summary": "No classified signals available for alert generation"
+        },
+        {
+          "category": "runtime_gap",
+          "data": {
+            "collector_status": "unknown",
+            "description": "processes collector status: unknown",
+            "event_id": "collector:processes",
+            "evidence_refs": [
+              "local://cleanhouse/collector/processes"
+            ],
+            "label": "collector_gap",
+            "source": "processes"
+          },
+          "evidence_level": "unknown",
+          "evidence_refs": [
+            "local://cleanhouse/collector/processes"
+          ],
+          "reason_id": "drift:f88f3eb644c711cc",
+          "relation": "unknown",
+          "summary": "processes collector status: unknown"
+        },
+        {
+          "category": "runtime_gap",
+          "data": {
+            "collector_status": "unknown",
+            "description": "network collector status: unknown",
+            "event_id": "collector:network",
+            "evidence_refs": [
+              "local://cleanhouse/collector/network"
+            ],
+            "label": "collector_gap",
+            "source": "network"
+          },
+          "evidence_level": "unknown",
+          "evidence_refs": [
+            "local://cleanhouse/collector/network"
+          ],
+          "reason_id": "drift:0a1ab90bd15a2cc1",
+          "relation": "unknown",
+          "summary": "network collector status: unknown"
+        },
+        {
+          "category": "runtime_gap",
+          "data": {
+            "collector_status": "unknown",
+            "description": "ai_activity collector status: unknown",
+            "event_id": "collector:ai_activity",
+            "evidence_refs": [
+              "local://cleanhouse/collector/ai_activity"
+            ],
+            "label": "collector_gap",
+            "source": "ai_activity"
+          },
+          "evidence_level": "unknown",
+          "evidence_refs": [
+            "local://cleanhouse/collector/ai_activity"
+          ],
+          "reason_id": "drift:ebd5dec8bc69be70",
+          "relation": "unknown",
+          "summary": "ai_activity collector status: unknown"
+        },
+        {
+          "category": "runtime_gap",
+          "data": {
+            "collector_status": "unknown",
+            "description": "anomalies collector status: unknown",
+            "event_id": "collector:anomalies",
+            "evidence_refs": [
+              "local://cleanhouse/collector/anomalies"
+            ],
+            "label": "collector_gap",
+            "source": "anomalies"
+          },
+          "evidence_level": "unknown",
+          "evidence_refs": [
+            "local://cleanhouse/collector/anomalies"
+          ],
+          "reason_id": "drift:c7fa83f264846d57",
+          "relation": "unknown",
+          "summary": "anomalies collector status: unknown"
+        },
+        {
+          "category": "runtime_gap",
+          "data": {
+            "collector_status": "unknown",
+            "description": "integrity collector status: unknown",
+            "event_id": "collector:integrity",
+            "evidence_refs": [
+              "local://cleanhouse/collector/integrity"
+            ],
+            "label": "collector_gap",
+            "source": "integrity"
+          },
+          "evidence_level": "unknown",
+          "evidence_refs": [
+            "local://cleanhouse/collector/integrity"
+          ],
+          "reason_id": "drift:ccfb9be0a5476596",
+          "relation": "unknown",
+          "summary": "integrity collector status: unknown"
+        },
+        {
+          "category": "runtime_gap",
+          "data": {
+            "collector_status": "unknown",
+            "description": "command collector status: unknown",
+            "event_id": "collector:command",
+            "evidence_refs": [
+              "local://cleanhouse/collector/command"
+            ],
+            "label": "collector_gap",
+            "source": "command"
+          },
+          "evidence_level": "unknown",
+          "evidence_refs": [
+            "local://cleanhouse/collector/command"
+          ],
+          "reason_id": "drift:e1ab9291f295cc14",
+          "relation": "unknown",
+          "summary": "command collector status: unknown"
+        },
+        {
+          "category": "runtime_gap",
+          "data": {
+            "collector_status": "unknown",
+            "description": "cloud_usage collector status: unknown",
+            "event_id": "collector:cloud_usage",
+            "evidence_refs": [
+              "local://cleanhouse/collector/cloud_usage"
+            ],
+            "label": "collector_gap",
+            "source": "cloud_usage"
+          },
+          "evidence_level": "unknown",
+          "evidence_refs": [
+            "local://cleanhouse/collector/cloud_usage"
+          ],
+          "reason_id": "drift:a0be820067163825",
+          "relation": "unknown",
+          "summary": "cloud_usage collector status: unknown"
+        },
+        {
+          "category": "runtime_gap",
+          "data": {
+            "collector_status": "unknown",
+            "description": "tool_events collector status: unknown",
+            "event_id": "collector:tool_events",
+            "evidence_refs": [
+              "local://cleanhouse/collector/tool_events"
+            ],
+            "label": "collector_gap",
+            "source": "tool_events"
+          },
+          "evidence_level": "unknown",
+          "evidence_refs": [
+            "local://cleanhouse/collector/tool_events"
+          ],
+          "reason_id": "drift:73dadb13fc65f0f9",
+          "relation": "unknown",
+          "summary": "tool_events collector status: unknown"
+        },
+        {
+          "category": "runtime_gap",
+          "data": {
+            "collector_status": "dependency_missing",
+            "description": "filesystem_watcher collector status: dependency_missing",
+            "event_id": "collector:filesystem_watcher",
+            "evidence_refs": [
+              "local://cleanhouse/collector/filesystem_watcher"
+            ],
+            "label": "unknown",
+            "source": "filesystem_watcher"
+          },
+          "evidence_level": "unknown",
+          "evidence_refs": [
+            "local://cleanhouse/collector/filesystem_watcher"
+          ],
+          "reason_id": "drift:3e23c92a410dcfeb",
+          "relation": "unknown",
+          "summary": "filesystem_watcher collector status: dependency_missing"
+        }
+      ],
+      "evidence_chain": [
+        {
+          "label": "receipt artifact",
+          "ref": "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4",
+          "source": "receipt"
+        },
+        {
+          "label": "observed",
+          "ref": "local://cleanhouse/timeline/tl:beta-proof-session:0",
+          "source": "prompt"
+        },
+        {
+          "label": "observed",
+          "ref": "local://cleanhouse/timeline/tl:beta-proof-session:1",
+          "source": "intent"
+        },
+        {
+          "label": "inferred",
+          "ref": "local://cleanhouse/timeline/tl:beta-proof-session:2",
+          "source": "diff"
+        }
+      ],
+      "lineage_graph": {
+        "edge_count": 4,
+        "edges": [
+          {
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+            ],
+            "relationship": "objective_lineage",
+            "source_id": "objective-beta-proof",
+            "target_id": "tl:beta-proof-session:0"
+          },
+          {
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/intent/beta-proof-session"
+            ],
+            "relationship": "temporal_sequence",
+            "source_id": "tl:beta-proof-session:0",
+            "target_id": "tl:beta-proof-session:1"
+          },
+          {
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/diff/diff:b9c8142a00b36767"
+            ],
+            "relationship": "temporal_sequence",
+            "source_id": "tl:beta-proof-session:1",
+            "target_id": "tl:beta-proof-session:2"
+          },
+          {
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4"
+            ],
+            "relationship": "captured_in_receipt",
+            "source_id": "tl:beta-proof-session:2",
+            "target_id": "receipt:e51b8a73b6ca96c4"
+          }
+        ],
+        "node_count": 5,
+        "nodes": [
+          {
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/session/beta-proof-session"
+            ],
+            "id": "objective-beta-proof",
+            "label": "objective-beta-proof",
+            "type": "objective"
+          },
+          {
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+            ],
+            "id": "tl:beta-proof-session:0",
+            "label": "Generate deterministic evidence chain",
+            "scope_relation": "objective_root",
+            "timestamp": "2026-05-29T14:19:21.728498",
+            "type": "prompt"
+          },
+          {
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/intent/beta-proof-session"
+            ],
+            "id": "tl:beta-proof-session:1",
+            "label": "Generate deterministic evidence chain",
+            "scope_relation": "objective_root",
+            "timestamp": "2026-05-29T14:19:21.728498",
+            "type": "intent"
+          },
+          {
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/diff/diff:b9c8142a00b36767"
+            ],
+            "id": "tl:beta-proof-session:2",
+            "label": "1 change(s)",
+            "scope_relation": "mixed",
+            "timestamp": "2026-05-29T14:19:21.738104",
+            "type": "diff"
+          },
+          {
+            "evidence_level": "observed",
+            "evidence_refs": [
+              "local://cleanhouse/receipt/receipt:e51b8a73b6ca96c4"
+            ],
+            "id": "receipt:e51b8a73b6ca96c4",
+            "label": "receipt:e51b8a73b6ca96c4",
+            "type": "receipt"
+          }
+        ],
+        "objective_id": "objective-beta-proof",
+        "schema": "cleanhouse.lineage_graph.v1",
+        "session_id": "beta-proof-session"
+      },
+      "receipt_id": "receipt:e51b8a73b6ca96c4",
+      "receipt_root_hash": "045c9964d0cdf98287e69c3c9054484951868781fd6069a9f2612759960e84ca",
+      "rollback_state": {
+        "count": 0,
+        "records": [],
+        "status": "not_requested"
+      },
+      "runtime_gaps": [
+        {
+          "collector_status": "unknown",
+          "description": "processes collector status: unknown",
+          "event_id": "collector:processes",
+          "evidence_refs": [
+            "local://cleanhouse/collector/processes"
+          ],
+          "label": "collector_gap",
+          "source": "processes"
+        },
+        {
+          "collector_status": "unknown",
+          "description": "network collector status: unknown",
+          "event_id": "collector:network",
+          "evidence_refs": [
+            "local://cleanhouse/collector/network"
+          ],
+          "label": "collector_gap",
+          "source": "network"
+        },
+        {
+          "collector_status": "unknown",
+          "description": "ai_activity collector status: unknown",
+          "event_id": "collector:ai_activity",
+          "evidence_refs": [
+            "local://cleanhouse/collector/ai_activity"
+          ],
+          "label": "collector_gap",
+          "source": "ai_activity"
+        },
+        {
+          "collector_status": "unknown",
+          "description": "anomalies collector status: unknown",
+          "event_id": "collector:anomalies",
+          "evidence_refs": [
+            "local://cleanhouse/collector/anomalies"
+          ],
+          "label": "collector_gap",
+          "source": "anomalies"
+        },
+        {
+          "collector_status": "unknown",
+          "description": "integrity collector status: unknown",
+          "event_id": "collector:integrity",
+          "evidence_refs": [
+            "local://cleanhouse/collector/integrity"
+          ],
+          "label": "collector_gap",
+          "source": "integrity"
+        },
+        {
+          "collector_status": "unknown",
+          "description": "command collector status: unknown",
+          "event_id": "collector:command",
+          "evidence_refs": [
+            "local://cleanhouse/collector/command"
+          ],
+          "label": "collector_gap",
+          "source": "command"
+        },
+        {
+          "collector_status": "unknown",
+          "description": "cloud_usage collector status: unknown",
+          "event_id": "collector:cloud_usage",
+          "evidence_refs": [
+            "local://cleanhouse/collector/cloud_usage"
+          ],
+          "label": "collector_gap",
+          "source": "cloud_usage"
+        },
+        {
+          "collector_status": "unknown",
+          "description": "tool_events collector status: unknown",
+          "event_id": "collector:tool_events",
+          "evidence_refs": [
+            "local://cleanhouse/collector/tool_events"
+          ],
+          "label": "collector_gap",
+          "source": "tool_events"
+        },
+        {
+          "collector_status": "dependency_missing",
+          "description": "filesystem_watcher collector status: dependency_missing",
+          "event_id": "collector:filesystem_watcher",
+          "evidence_refs": [
+            "local://cleanhouse/collector/filesystem_watcher"
+          ],
+          "label": "unknown",
+          "source": "filesystem_watcher"
+        }
+      ],
+      "scope_analysis": {
+        "change_count": 1,
+        "changed_paths": [
+          "src/demo.txt"
+        ],
+        "classification": "within_declared_scope",
+        "declared_scope": "src/",
+        "in_scope_count": 1,
+        "out_of_scope_count": 0,
+        "path_clusters": [
+          {
+            "change_count": 1,
+            "changed_paths": [
+              "src/demo.txt"
+            ],
+            "cluster": "src",
+            "explanation": "1 change(s) in src matched declared scope prefix src/.",
+            "in_scope_count": 1,
+            "out_of_scope_count": 0,
+            "relation": "within_declared_scope",
+            "scope_weight": 0.0
+          }
+        ],
+        "scope_weight": 0.0
+      },
+      "session_id": "beta-proof-session"
+    },
+    "session_id": "beta-proof-session",
+    "state": {
+      "approval_id": "",
+      "resolution_note": "",
+      "resolved_at": null,
+      "reviewer": "",
+      "reviewer_note": "",
+      "status": "unreviewed"
+    },
+    "status": "ok"
+  },
+  "session_id": "beta-proof-session",
+  "timeline": {
+    "entries": [
+      {
+        "actor_type": "human",
+        "collector_status": "ok",
+        "data": {
+          "actor_type": "human",
+          "collector_status": "ok",
+          "context": "beta proof bundle run",
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+          ],
+          "objective_id": "objective-beta-proof",
+          "observed_vs_expected": {
+            "details": "prompt/context captured",
+            "status": "matched"
+          },
+          "prompt_id": "prompt:bbe1b290436187fc",
+          "raw_evidence_ref": "local://cleanhouse/prompt/prompt:bbe1b290436187fc",
+          "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+          "scope": "src/",
+          "scope_relation": "objective_root",
+          "session_id": "beta-proof-session",
+          "source_surface": "prompt_context",
+          "tool_identity": "codex"
+        },
+        "event_id": "tl:beta-proof-session:0",
+        "event_type": "prompt",
+        "evidence_level": "observed",
+        "evidence_refs": [
+          "local://cleanhouse/prompt/prompt:bbe1b290436187fc"
+        ],
+        "label": "Generate deterministic evidence chain",
+        "objective_id": "objective-beta-proof",
+        "observed_vs_expected": {
+          "details": "prompt/context captured",
+          "status": "matched"
+        },
+        "previous_event_id": null,
+        "raw_evidence_ref": "local://cleanhouse/prompt/prompt:bbe1b290436187fc",
+        "scope_relation": "objective_root",
+        "session_id": "beta-proof-session",
+        "source_surface": "prompt_context",
+        "status": "observed",
+        "timestamp": "2026-05-29T14:19:21.728498"
+      },
+      {
+        "actor_type": "human",
+        "collector_status": "ok",
+        "data": {
+          "actor_type": "human",
+          "collector_status": "ok",
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/intent/beta-proof-session"
+          ],
+          "objective_id": "objective-beta-proof",
+          "observed_vs_expected": {
+            "details": "intent captured",
+            "status": "matched"
+          },
+          "raw_evidence_ref": "local://cleanhouse/intent/beta-proof-session",
+          "repo_path": "/var/folders/_9/pxbqn529315_9r7ss9d_94r00000gn/T/tmp2lf7s3ue",
+          "scope": "src/",
+          "scope_relation": "objective_root",
+          "session_id": "beta-proof-session",
+          "source_surface": "intent",
+          "tool_identity": "codex"
+        },
+        "event_id": "tl:beta-proof-session:1",
+        "event_type": "intent",
+        "evidence_level": "observed",
+        "evidence_refs": [
+          "local://cleanhouse/intent/beta-proof-session"
+        ],
+        "label": "Generate deterministic evidence chain",
+        "objective_id": "objective-beta-proof",
+        "observed_vs_expected": {
+          "details": "intent captured",
+          "status": "matched"
+        },
+        "previous_event_id": "tl:beta-proof-session:0",
+        "raw_evidence_ref": "local://cleanhouse/intent/beta-proof-session",
+        "scope_relation": "objective_root",
+        "session_id": "beta-proof-session",
+        "source_surface": "intent",
+        "status": "observed",
+        "timestamp": "2026-05-29T14:19:21.728498"
+      },
+      {
+        "actor_type": "filesystem",
+        "collector_status": "ok",
+        "data": {
+          "actor_type": "filesystem",
+          "changes": [
+            "src/demo.txt"
+          ],
+          "collector_status": "ok",
+          "created": 0,
+          "deleted": 0,
+          "evidence_level": "observed",
+          "evidence_refs": [
+            "local://cleanhouse/diff/diff:b9c8142a00b36767"
+          ],
+          "file_changes": [
+            {
+              "after_hash": "7b9a72466d3960eb",
+              "before_hash": "9160d4be34c8695b",
+              "change_type": "modified",
+              "path": "src/demo.txt"
+            }
+          ],
+          "modified": 1,
+          "objective_id": "objective-beta-proof",
+          "observed_vs_expected": {
+            "details": "snapshot diff captured",
+            "status": "observed"
+          },
+          "raw_evidence_ref": "local://cleanhouse/diff/diff:b9c8142a00b36767",
+          "scope_relation": "mixed",
+          "session_id": "beta-proof-session",
+          "source_surface": "snapshot_diff"
+        },
+        "event_id": "tl:beta-proof-session:2",
+        "event_type": "diff",
+        "evidence_level": "observed",
+        "evidence_refs": [
+          "local://cleanhouse/diff/diff:b9c8142a00b36767"
+        ],
+        "label": "1 change(s)",
+        "objective_id": "objective-beta-proof",
+        "observed_vs_expected": {
+          "details": "snapshot diff captured",
+          "status": "observed"
+        },
+        "previous_event_id": "tl:beta-proof-session:1",
+        "raw_evidence_ref": "local://cleanhouse/diff/diff:b9c8142a00b36767",
+        "scope_relation": "mixed",
+        "session_id": "beta-proof-session",
+        "source_surface": "snapshot_diff",
+        "status": "inferred",
+        "timestamp": "2026-05-29T14:19:21.738104"
+      }
+    ],
+    "entry_count": 3,
+    "id": "timeline:7cd0baba9e493f51",
+    "origin": "2026-05-29T14:19:21.728498",
+    "session_id": "beta-proof-session",
+    "status": "ok"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "artifact_dir": "/Users/devonwoodson/Documents/GitHub/cleanhouse/docs/evidence/beta_proof_bundle",
+  "chain_status": "ok",
+  "generated_at": "2026-05-29T18:19:21.761405+00:00",
+  "known_limitations": [
+    "Scope is local-first runtime evidence; no external provider trust authority is asserted.",
+    "Chain-of-custody is partial; this bundle proves local evidence continuity only.",
+    "Desktop notification lane is noise-controlled and not treated as visibility guarantee."
+  ],
+  "test_pass_count": 4,
+  "test_total": 4
+}

@@ -1,0 +1,12 @@
+{
+  "final_decision_state": {
+    "decision_current_status": "blessed",
+    "decision_next_action": "complete",
+    "incident_status": "resolved",
+    "outcome_action": "bless",
+    "outcome_actor": "operator",
+    "outcome_timestamp": "2026-05-29T19:19:41.664729",
+    "qpb_case_status": "blessed"
+  },
+  "outcome_hash": "453f710c4d446df2cdf111b6b0657a22765fe204c6ecbd1e88c913bcc533b3e4"
+}

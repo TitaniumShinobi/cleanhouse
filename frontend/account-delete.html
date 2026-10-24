@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CleanHouse - Delete Account</title>
+    <link rel="stylesheet" href="/css/auth.css">
+</head>
+<body>
+    <main class="account-delete-container">
+        <section class="account-delete-card">
+            <div class="logo">
+                <img class="brand-wordmark" src="/assets/cleanhouse.png" alt="CleanHouse">
+            </div>
+
+            <h1>Delete Account</h1>
+            <p class="account-delete-copy">
+                This removes the signed-in CleanHouse account from this device and clears matching local VVAULT user records.
+                Company-side archive retention remains seven years.
+            </p>
+
+            <div id="account-delete-user" class="account-delete-user">
+                Checking signed-in account...
+            </div>
+
+            <form id="account-delete-form" class="account-delete-form">
+                <div class="form-group">
+                    <label for="delete-confirmation">Confirm account email</label>
+                    <input
+                        type="email"
+                        id="delete-confirmation"
+                        name="confirmation"
+                        autocomplete="off"
+                        placeholder="you@example.com"
+                        required
+                    >
+                </div>
+
+                <div class="form-group">
+                    <label for="delete-password">Current password</label>
+                    <input type="password" id="delete-password" autocomplete="current-password">
+                    <button type="button" class="oauth-btn" id="delete-email-reauth">Confirm by email instead</button>
+                </div>
+
+                <button type="submit" class="delete-account-button" id="delete-account-button">
+                    Delete Account
+                </button>
+                <a class="account-delete-cancel" href="/overview">Cancel</a>
+            </form>
+
+            <div id="account-delete-result" class="account-delete-result" role="status"></div>
+        </section>
+    </main>
+
+    <script src="/js/auth-state.js?v=2"></script>
+    <script src="/js/account-delete.js"></script>
+</body>
+</html>

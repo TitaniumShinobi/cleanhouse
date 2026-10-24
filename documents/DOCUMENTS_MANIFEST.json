@@ -1,0 +1,25 @@
+{
+  "schema": "cleanhouse.documents.manifest.v1",
+  "generated_at": "2026-05-30T11:45:39Z",
+  "repo_commit": "54ddc3d499231dce63e8fab0f59fd0447c3674af",
+  "generator": "python inline manifest generation",
+  "coverage_policy": {
+    "source_sets": [
+      "docs/** (excluding .DS_Store)",
+      "README.md",
+      "QUICK_START.md",
+      "RULES.md",
+      "scripts/*.{py,sh}"
+    ],
+    "mirror_root": "documents/95_source-mirror",
+    "matching": "full_path_and_sha256"
+  },
+  "counts": {
+    "source_files": 135,
+    "coverage_rows": 135,
+    "missing": 0,
+    "mismatch": 0
+  },
+  "missing_sources": [],
+  "mismatched_sources": []
+}

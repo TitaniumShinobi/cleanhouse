@@ -1,0 +1,23 @@
+{
+  "created_at": "2026-06-06T02:10:09.870342Z",
+  "evidence_artifact_path": "/Users/devonwoodson/Documents/GitHub/cleanhouse/docs/evidence/application_investigations/evidence/appinv-fd9f49d7d7de746f.json",
+  "findings": {
+    "inferred": [
+      "Runtime behavior is inferred from process snapshot rows matched to the application path, name, or bundle identifier."
+    ],
+    "observed": [
+      "Identified Terminal at /System/Applications/Utilities/Terminal.app with bundle_id=com.apple.Terminal.",
+      "Observed 1 running process record(s) for Terminal."
+    ],
+    "unknown": [
+      "No target-owned network connections were observed in this snapshot.",
+      "No app-specific file events found in the current CleanHouse event store.",
+      "Permission state is not fully observable from this local evidence path."
+    ]
+  },
+  "investigation_id": "appinv-fd9f49d7d7de746f",
+  "next_action": "If the application still seems wrong, keep it open and rerun this investigation while reproducing the behavior.",
+  "question": "Why is Terminal behaving this way?",
+  "schema": "cleanhouse.application_investigation_receipt.v1",
+  "target": "Terminal"
+}

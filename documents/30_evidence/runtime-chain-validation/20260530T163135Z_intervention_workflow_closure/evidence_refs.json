@@ -1,0 +1,10 @@
+{
+  "refs": [
+    "local://cleanhouse/operation-proposal/<proposal_id>",
+    "local://cleanhouse/approval-queue/<approval_id>",
+    "local://cleanhouse/intervention-workflow/<workflow_id>",
+    "local://cleanhouse/receipt/<receipt_id>",
+    "local://cleanhouse/receipt-bundle/<bundle_id>"
+  ],
+  "note": "proposal_id, approval_id, workflow_id, and receipt_id are deterministic over run content"
+}

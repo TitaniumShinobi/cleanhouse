@@ -1,0 +1,12 @@
+{
+  "final_decision_state": {
+    "decision_current_status": "purge_pending",
+    "decision_next_action": "purge",
+    "incident_status": "in_review",
+    "outcome_action": "purge",
+    "outcome_actor": "operator",
+    "outcome_timestamp": "2026-05-29T19:19:52.965835",
+    "qpb_case_status": "purge_pending"
+  },
+  "outcome_hash": "b82e894be20d1b1302c6877c191af00392186ae5df4e17d8dc8b4e9dc4f00b9b"
+}

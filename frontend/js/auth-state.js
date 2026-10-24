@@ -1,71 +1,47 @@
 /**
  * Authentication State Management
- * Handles user authentication state, token management, and protected route access
+ * Handles opaque device-session state and protected route access.
  */
 
 class AuthState {
     constructor() {
         this.user = null;
-        this.token = null;
         this.initialized = false;
+        this.ready = null;
     }
     
     /**
-     * Initialize auth state from localStorage
+     * Initialize auth state from the HttpOnly server session.
      */
     init() {
-        if (this.initialized) return;
-        
-        // Load token and user from localStorage
-        this.token = localStorage.getItem('auth_token');
-        const userStr = localStorage.getItem('user');
-        
-        if (userStr) {
-            try {
-                this.user = JSON.parse(userStr);
-            } catch (e) {
-                console.error('[AUTH] Failed to parse user data:', e);
-                this.clear();
-            }
-        }
-        
-        // Verify token is still valid
-        if (this.token) {
-            this.verifyToken();
-        }
-        
+        if (this.ready) return this.ready;
+        this.ready = this.verifySession();
         this.initialized = true;
+        return this.ready;
     }
     
     /**
-     * Verify JWT token is still valid
+     * Verify the HttpOnly device session through the canonical identity route.
      */
-    async verifyToken() {
-        if (!this.token) {
-            this.clear();
-            return false;
-        }
-        
+    async verifySession() {
         try {
             const response = await fetch('/api/auth/me', {
-                headers: {
-                    'Authorization': `Bearer ${this.token}`
-                }
+                credentials: 'include',
+                headers: { 'Accept': 'application/json' }
             });
             
             if (response.ok) {
                 const data = await response.json();
                 if (data.success && data.user) {
                     this.user = data.user;
-                    localStorage.setItem('user', JSON.stringify(data.user));
                     return true;
                 }
             }
         } catch (error) {
-            console.error('[AUTH] Token verification failed:', error);
+            console.error('[AUTH] Session verification failed:', error);
         }
         
-        // Token invalid or expired
+        // Session invalid or expired.
         this.clear();
         return false;
     }
@@ -74,7 +50,7 @@ class AuthState {
      * Check if user is authenticated
      */
     isAuthenticated() {
-        return this.user !== null && this.token !== null;
+        return this.user !== null;
     }
     
     /**
@@ -85,20 +61,10 @@ class AuthState {
     }
     
     /**
-     * Get auth token
+     * Update the in-memory user projection after a server-authenticated flow.
      */
-    getToken() {
-        return this.token;
-    }
-    
-    /**
-     * Set authenticated user
-     */
-    setUser(user, token) {
+    setUser(user) {
         this.user = user;
-        this.token = token;
-        localStorage.setItem('auth_token', token);
-        localStorage.setItem('user', JSON.stringify(user));
     }
     
     /**
@@ -106,26 +72,25 @@ class AuthState {
      */
     clear() {
         this.user = null;
-        this.token = null;
-        localStorage.removeItem('auth_token');
-        localStorage.removeItem('user');
     }
     
     /**
      * Logout user
      */
     async logout() {
-        try {
-            await fetch('/api/auth/logout', {
-                method: 'POST',
-                headers: {
-                    'Authorization': `Bearer ${this.token}`
-                }
-            });
-        } catch (error) {
-            console.error('[AUTH] Logout error:', error);
-        }
-        
+        const csrfResponse = await fetch('/api/auth/csrf', {
+            credentials: 'include', headers: { 'Accept': 'application/json' }
+        });
+        if (!csrfResponse.ok) throw new Error('Sign out failed. Try again.');
+        const csrfPayload = await csrfResponse.json();
+        const response = await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'X-CSRF-Token': csrfPayload.csrfToken || '' }
+        });
+        if (!response.ok) throw new Error('Sign out failed. Try again.');
+        const result = await response.json();
+        if (result.success !== true) throw new Error('Sign out failed. Try again.');
         this.clear();
     }
 }
@@ -142,4 +107,3 @@ if (document.readyState === 'loading') {
 
 // Export for use in other scripts
 window.authState = authState;
-

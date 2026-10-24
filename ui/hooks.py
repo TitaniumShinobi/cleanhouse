@@ -144,7 +144,7 @@ class UIHooks:
             if changed:
                 self.update_status("Issues Detected", "#e53935")
             else:
-                self.update_status("Protected", "#4caf50")
+                self.update_status("No Changes Observed", "#4caf50")
                 
         except Exception as e:
             result_queue.put(e)
@@ -152,7 +152,7 @@ class UIHooks:
     def update_scan_results(self, results):
         """Update the scan results display."""
         if not results or (isinstance(results, list) and not any(results)):
-            self.layout.results_list.insert(tk.END, "No issues found. Your system is protected.")
+            self.layout.results_list.insert(tk.END, "No integrity or policy signals observed.")
         else:
             for line in results:
                 self.layout.results_list.insert(tk.END, line)
@@ -173,7 +173,7 @@ class UIHooks:
             if changed:
                 self.update_status("Issues Detected", "#e53935")
             else:
-                self.update_status("Protected", "#4caf50")
+                self.update_status("No Changes Observed", "#4caf50")
             time.sleep(int(self.layout.interval_entry.get()))
     
     def load_logs(self):

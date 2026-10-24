@@ -2,156 +2,31 @@
                 console.log('[CLEANHOUSE] Script loaded');
                 console.log('[CLEANHOUSE] window.pywebview:', typeof window.pywebview !== 'undefined' ? 'exists' : 'undefined');
                 console.log('[CLEANHOUSE] window.pywebview.api:', typeof window.pywebview?.api !== 'undefined' ? 'exists' : 'undefined');
-                
-                // Detect environment
-                const IS_PYWEBVIEW = typeof window !== 'undefined' && 
-                                     window.pywebview && 
-                                     window.pywebview.api;
-                const IS_BROWSER = !IS_PYWEBVIEW;
-                const API_BASE_URL = IS_BROWSER ? 'http://127.0.0.1:5000/api' : null;
-                
-                console.log('[CLEANHOUSE] Environment:', IS_PYWEBVIEW ? 'pywebview (desktop)' : 'browser (web)');
-                
-                // UI helper functions (define early so OAuth callback can use them)
-                // Handle both login page (error-message) and signup page (errorMessage) IDs
-                function showError(message) {
-                    const errorDiv = document.getElementById('error-message') || document.getElementById('errorMessage');
-                    if (errorDiv) {
-                        errorDiv.textContent = message;
-                        errorDiv.style.display = 'block';
-                        const successDiv = document.getElementById('success-message') || document.getElementById('successMessage');
-                        if (successDiv) successDiv.style.display = 'none';
-                    }
-                    console.log('[UI] Error:', message);
-                }
-                
-                function showSuccess(message) {
-                    const successDiv = document.getElementById('success-message') || document.getElementById('successMessage');
-                    if (successDiv) {
-                        successDiv.textContent = message;
-                        successDiv.style.display = 'block';
-                        const errorDiv = document.getElementById('error-message') || document.getElementById('errorMessage');
-                        if (errorDiv) errorDiv.style.display = 'none';
-                    }
-                    console.log('[UI] Success:', message);
-                }
-                
-                // Handle OAuth callback (check URL params) - run after DOM is ready
-                function handleOAuthCallback() {
-                    const urlParams = new URLSearchParams(window.location.search);
-                    const oauthSuccess = urlParams.get('oauth_success');
-                    const error = urlParams.get('error');
-                    
-                    if (oauthSuccess === '1') {
-                        console.log('[OAUTH] OAuth success detected in URL');
-                        // Fetch user data from session via API
-                        fetch('/api/auth/oauth/user')
-                            .then(res => res.json())
-                            .then(data => {
-                                if (data.success && data.user && data.token) {
-                                    console.log('[OAUTH] User authenticated:', data.user.email);
-                                    
-                                    // Store authentication state
-                                    if (window.authState) {
-                                        window.authState.setUser(data.user, data.token);
-                                    }
-                                    
-                                    showSuccess('Successfully authenticated! Launching desktop app...');
-                                    
-                                    // Clear URL params
-                                    window.history.replaceState({}, document.title, window.location.pathname);
-                                    
-                                    // Launch desktop app
-                                    fetch('/api/auth/launch-desktop', {
-                                        method: 'POST',
-                                        headers: {
-                                            'Content-Type': 'application/json'
-                                        },
-                                        body: JSON.stringify({
-                                            token: data.token,
-                                            user: data.user
-                                        })
-                                    })
-                                    .then(res => res.json())
-                                    .then(launchData => {
-                                        if (launchData.success) {
-                                            console.log('[OAUTH] Desktop app launched successfully');
-                                            showSuccess('Desktop app is launching! You can close this window.');
-                                            // Close window after a delay (if in pywebview, this will close the desktop window)
-                                            setTimeout(() => {
-                                                if (IS_PYWEBVIEW && window.pywebview) {
-                                                    // In desktop mode, we're already in the desktop app
-                                                    // Just show success message
-                                                } else {
-                                                    // In browser mode, show message that they can close the tab
-                                                    showSuccess('Desktop app launched! You can close this browser tab.');
-                                                }
-                                            }, 2000);
-                                        } else {
-                                            console.error('[OAUTH] Failed to launch desktop app:', launchData.message);
-                                            showError('Authentication successful, but failed to launch desktop app: ' + launchData.message);
-                                        }
-                                    })
-                                    .catch(err => {
-                                        console.error('[OAUTH] Error launching desktop app:', err);
-                                        showError('Authentication successful, but failed to launch desktop app.');
-                                    });
-                                } else {
-                                    showError('OAuth authentication completed but failed to load user data.');
-                                }
-                            })
-                            .catch(err => {
-                                console.error('[OAUTH] Error fetching user data:', err);
-                                showError('OAuth authentication completed but failed to load user data.');
-                            });
-                    } else if (error) {
-                        console.error('[OAUTH] OAuth error:', error);
-                        showError('OAuth authentication failed: ' + decodeURIComponent(error));
-                        // Clear URL params
-                        window.history.replaceState({}, document.title, window.location.pathname);
-                    }
-                }
-                
-                // Run OAuth callback handler when DOM is ready
-                if (document.readyState === 'loading') {
-                    document.addEventListener('DOMContentLoaded', handleOAuthCallback);
-                } else {
-                    handleOAuthCallback();
-                }
-                
+
                 // Global logging helpers - check for pywebview API availability
                 function hasAPI() {
-                    // In browser mode, we always have API (via HTTP)
-                    if (IS_BROWSER) {
-                        return true;
-                    }
-                    // In pywebview mode, check for pywebview API
-                    const has = typeof window !== 'undefined' && 
-                           window.pywebview && 
+                    const has = typeof window !== 'undefined' &&
+                           window.pywebview &&
                            window.pywebview.api;
-                    if (!has) {
-                        console.warn('[CLEANHOUSE] pywebview API not available');
-                    }
                     return has;
                 }
-                
+
                 // Function to attach click listeners (called when API is ready)
                 function attachClickListeners() {
                     console.log('[CLEANHOUSE] Attaching click listeners...');
-                    
+
                     // Log ALL clicks on the page
                     document.addEventListener('click', function(e) {
                         if (!hasAPI()) {
-                            console.warn('[CLEANHOUSE] Click detected but API not available');
                             return;
                         }
-                        
+
                         console.log('[CLEANHOUSE] Click captured:', e.target.tagName, e.target.id || e.target.className);
-                        
+
                         const target = e.target;
                         let elementType = '';
                         let details = '';
-                        
+
                         // Identify what was clicked
                         if (target.tagName === 'BUTTON') {
                             elementType = 'button';
@@ -172,23 +47,26 @@
                             if (target.id) details += ` (id: ${target.id})`;
                             if (target.className) details += ` (class: ${target.className.split(' ')[0]})`;
                         }
-                        
+
                         try {
-                            if (IS_PYWEBVIEW && window.pywebview?.api?.log_click) {
-                                window.pywebview.api.log_click(elementType, details);
-                                console.log('[CLEANHOUSE] Click logged successfully:', elementType, details);
-                            } else {
-                                console.log(`[CLICK] ${elementType}: ${details}`);
-                            }
+                            window.pywebview.api.log_click(elementType, details);
+                            console.log('[CLEANHOUSE] Click logged successfully:', elementType, details);
                         } catch (err) {
                             console.error('[CLEANHOUSE] Error logging click:', err);
-                            console.log(`[CLICK] ${elementType}: ${details}`);
+                            // Fallback to generic log if specific method not available
+                            try {
+                                if (window.pywebview.api.log) {
+                                    window.pywebview.api.log(`[CLICK] ${elementType}: ${details}`);
+                                }
+                            } catch (err2) {
+                                console.error('[CLEANHOUSE] Fallback log also failed:', err2);
+                            }
                         }
                     }, true); // Use capture phase to catch all clicks
-                    
+
                     console.log('[CLEANHOUSE] Click listeners attached');
                 }
-                
+
                 // Wait for pywebview to be ready, then attach listeners
                 if (typeof window.pywebview !== 'undefined' && window.pywebview.api) {
                     // API already available, attach immediately
@@ -201,7 +79,7 @@
                         console.log('[CLEANHOUSE] pywebview ready event fired');
                         attachClickListeners();
                     });
-                    
+
                     // Also try polling as fallback (some versions don't fire the event)
                     let pollCount = 0;
                     const pollInterval = setInterval(function() {
@@ -212,230 +90,547 @@
                             attachClickListeners();
                         } else if (pollCount > 50) {
                             // Give up after 5 seconds (50 * 100ms)
-                            console.error('[CLEANHOUSE] API not available after 5 seconds, giving up');
+                            console.debug('[CLEANHOUSE] pywebview bridge not present; browser auth path remains active.');
                             clearInterval(pollInterval);
                         }
                     }, 100);
                 }
-                
+
                 // Log input field changes (don't log password values)
                 document.addEventListener('input', function(e) {
                     if (!hasAPI()) return;
-                    
+
                     const target = e.target;
                     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
                         const fieldName = target.name || target.id || 'unnamed';
                         const fieldType = target.type || 'text';
                         // Don't log password values, only length
                         const charCount = target.value ? target.value.length : 0;
-                        
+
                         try {
-                            if (IS_PYWEBVIEW && window.pywebview?.api?.log_input) {
-                                window.pywebview.api.log_input(fieldName, fieldType, charCount);
-                            } else {
-                                console.log(`[INPUT] ${fieldType} field "${fieldName}" changed (${charCount} chars)`);
-                            }
+                            window.pywebview.api.log_input(fieldName, fieldType, charCount);
                         } catch (err) {
-                            console.log(`[INPUT] ${fieldType} field "${fieldName}" changed (${charCount} chars)`);
+                            // Fallback to generic log
+                            if (window.pywebview.api.log) {
+                                window.pywebview.api.log(`[INPUT] ${fieldType} field "${fieldName}" changed (${charCount} chars)`);
+                            }
                         }
                     }
                 }, true);
-                
+
                 // Log input focus
                 document.addEventListener('focus', function(e) {
                     if (!hasAPI()) return;
-                    
+
                     const target = e.target;
                     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
                         const fieldName = target.name || target.id || 'unnamed';
-                        
+
                         try {
-                            if (IS_PYWEBVIEW && window.pywebview?.api?.log_focus) {
-                                window.pywebview.api.log_focus(fieldName);
-                            } else {
-                                console.log(`[FOCUS] Field "${fieldName}" focused`);
-                            }
+                            window.pywebview.api.log_focus(fieldName);
                         } catch (err) {
-                            console.log(`[FOCUS] Field "${fieldName}" focused`);
+                            // Fallback to generic log
+                            if (window.pywebview.api.log) {
+                                window.pywebview.api.log(`[FOCUS] Field "${fieldName}" focused`);
+                            }
                         }
                     }
                 }, true);
-                
+
                 // Log input blur
                 document.addEventListener('blur', function(e) {
                     if (!hasAPI()) return;
-                    
+
                     const target = e.target;
                     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT') {
                         const fieldName = target.name || target.id || 'unnamed';
-                        
+
                         try {
-                            if (IS_PYWEBVIEW && window.pywebview?.api?.log_blur) {
-                                window.pywebview.api.log_blur(fieldName);
-                            } else {
-                                console.log(`[BLUR] Field "${fieldName}" blurred`);
-                            }
+                            window.pywebview.api.log_blur(fieldName);
                         } catch (err) {
-                            console.log(`[BLUR] Field "${fieldName}" blurred`);
+                            // Fallback to generic log
+                            if (window.pywebview.api.log) {
+                                window.pywebview.api.log(`[BLUR] Field "${fieldName}" blurred`);
+                            }
                         }
                     }
                 }, true);
-                
-                // Password toggle functionality
+
+		                const AUTH_BASE_PATH = '/api/auth';
+		                const AUTH_UNAVAILABLE_MESSAGE = 'Authentication backend unavailable. Enable auth routes and retry.';
+		                const TURNSTILE_SCRIPT_SRC = 'https://challenges.cloudflare.com/turnstile/v0/api.js';
+		                const DEFAULT_AUTH_CONFIG = {
+		                    docs: [
+		                        { key: 'cleanhouse:terms', label: 'CleanHouse Terms of Service', url: '/legal/terms', required: true },
+		                        { key: 'cleanhouse:privacy', label: 'CleanHouse Privacy Notice', url: '/legal/privacy', required: true },
+		                        { key: 'cleanhouse:eeccd', label: 'European Electronic Communications Code Disclosure', url: '/legal/eeccd', required: true },
+		                    ],
+		                    turnstile: { required: true, enabled: false, siteKey: null },
+		                };
+		                let authConfig = DEFAULT_AUTH_CONFIG;
+		                let turnstileToken = '';
+		                let turnstileWidgetId = null;
+		                let turnstileScriptLoading = false;
+		                let authCsrfToken = '';
+
+		                async function ensureAuthCsrf() {
+		                    if (authCsrfToken) return authCsrfToken;
+		                    const response = await fetch(`${AUTH_BASE_PATH}/csrf`, {
+		                        credentials: 'include', headers: { 'Accept': 'application/json' },
+		                    });
+		                    const payload = await response.json();
+		                    authCsrfToken = payload.csrfToken || '';
+		                    if (!response.ok || !authCsrfToken) throw new Error('Local CSRF initialization failed.');
+		                    return authCsrfToken;
+		                }
+
+		                async function postAuth(path, payload) {
+	                    const csrf = await ensureAuthCsrf();
+	                    const response = await fetch(`${AUTH_BASE_PATH}${path}`, {
+	                        method: 'POST',
+	                        headers: {
+	                            'Content-Type': 'application/json',
+	                            'Accept': 'application/json',
+	                            'X-CSRF-Token': csrf,
+	                        },
+	                        credentials: 'include',
+	                        body: JSON.stringify(payload),
+	                    });
+	                    const data = await response.json().catch(() => ({
+	                        success: false,
+	                        message: 'Authentication response was not valid JSON.',
+	                    }));
+	                    if (response.status === 404) {
+	                        data.message = AUTH_UNAVAILABLE_MESSAGE;
+	                    }
+	                    if (!response.ok && data.success !== true) {
+	                        data.success = false;
+	                    }
+		                    return data;
+		                }
+
+		                async function loadAuthConfig() {
+		                    try {
+		                        const response = await fetch(`${AUTH_BASE_PATH}/config`, {
+		                            method: 'GET',
+		                            headers: { 'Accept': 'application/json' },
+		                            credentials: 'include',
+		                        });
+		                        const payload = await response.json().catch(() => ({}));
+		                        const data = payload.data || payload;
+		                        authConfig = {
+		                            ...DEFAULT_AUTH_CONFIG,
+		                            ...data,
+		                            docs: Array.isArray(data.docs) && data.docs.length ? data.docs : DEFAULT_AUTH_CONFIG.docs,
+		                            turnstile: {
+		                                ...DEFAULT_AUTH_CONFIG.turnstile,
+		                                ...(data.turnstile || {}),
+		                            },
+		                        };
+		                    } catch (error) {
+		                        authConfig = DEFAULT_AUTH_CONFIG;
+		                    }
+		                    renderProviderControls();
+		                    renderTurnstile();
+		                    return authConfig;
+		                }
+
+		                function providerAvailable(provider) {
+		                    return (authConfig.providers || []).some((item) => (
+		                        item.provider === provider && item.enabled === true && item.available === true
+		                    ));
+		                }
+
+		                function renderProviderControls() {
+		                    document.querySelectorAll('.oauth-btn[data-provider]').forEach((button) => {
+		                        const available = providerAvailable(button.dataset.provider);
+		                        button.hidden = !available;
+		                        if (!available) {
+		                            button.disabled = true;
+		                            button.setAttribute('aria-disabled', 'true');
+		                        }
+		                    });
+		                }
+
+		                function requiredAuthDocs() {
+		                    return (authConfig.docs || DEFAULT_AUTH_CONFIG.docs).filter((doc) => doc.required !== false);
+		                }
+
+		                function consentPayload() {
+		                    const accepted = document.getElementById('terms')?.checked === true;
+		                    return Object.fromEntries(requiredAuthDocs().map((doc) => [doc.key, accepted]));
+		                }
+
+		                function isTurnstileRequired() {
+		                    return authConfig.turnstile?.required === true;
+		                }
+
+		                function setTurnstileHelper(message) {
+		                    const helper = document.getElementById('turnstile-helper');
+		                    if (!helper) return;
+		                    helper.textContent = message || '';
+		                    helper.style.display = message ? 'block' : 'none';
+		                }
+
+		                function renderTurnstile() {
+		                    const host = document.getElementById('turnstile-widget');
+		                    if (!host) return;
+		                    if (!isTurnstileRequired()) {
+		                        host.style.display = 'none';
+		                        setTurnstileHelper('');
+		                        return;
+		                    }
+		                    host.style.display = 'flex';
+		                    const siteKey = (authConfig.turnstile?.siteKey || '').trim();
+		                    if (!siteKey) {
+		                        setTurnstileHelper('Human verification is required, but it is not configured for this environment.');
+		                        return;
+		                    }
+		                    if (window.turnstile && !turnstileWidgetId) {
+		                        host.innerHTML = '';
+		                        turnstileWidgetId = window.turnstile.render('#turnstile-widget', {
+		                            sitekey: siteKey,
+		                            callback: (token) => {
+		                                turnstileToken = token;
+		                                setTurnstileHelper('');
+		                            },
+		                            'error-callback': () => {
+		                                turnstileToken = '';
+		                                setTurnstileHelper('Human verification failed. Please try again.');
+		                            },
+		                            'expired-callback': () => {
+		                                turnstileToken = '';
+		                                setTurnstileHelper('Verification expired. Please verify again.');
+		                            },
+		                            theme: 'auto',
+		                            size: 'normal',
+		                        });
+		                        return;
+		                    }
+		                    if (!window.turnstile && !turnstileScriptLoading && !document.querySelector(`script[src="${TURNSTILE_SCRIPT_SRC}"]`)) {
+		                        turnstileScriptLoading = true;
+		                        const script = document.createElement('script');
+		                        script.src = TURNSTILE_SCRIPT_SRC;
+		                        script.async = true;
+		                        script.defer = true;
+		                        script.onload = () => {
+		                            turnstileScriptLoading = false;
+		                            renderTurnstile();
+		                        };
+		                        script.onerror = () => {
+		                            turnstileScriptLoading = false;
+		                            setTurnstileHelper('Human verification failed to load. Please refresh and try again.');
+		                        };
+		                        document.head.appendChild(script);
+		                    }
+		                }
+
+		                function resetTurnstile() {
+		                    turnstileToken = '';
+		                    if (turnstileWidgetId && window.turnstile) {
+		                        window.turnstile.reset(turnstileWidgetId);
+		                    }
+		                }
+
+		                function validateSignupRequirements() {
+		                    if (document.getElementById('terms')?.checked !== true) {
+		                        showError('Please confirm you agree to CleanHouse Terms of Service.');
+		                        return false;
+		                    }
+		                    if (isTurnstileRequired()) {
+		                        if (!authConfig.turnstile?.enabled || !authConfig.turnstile?.siteKey) {
+		                            showError('Human verification is required, but it is not configured for this environment.');
+		                            return false;
+		                        }
+		                        if (!turnstileToken) {
+		                            showError('Please complete human verification.');
+		                            return false;
+		                        }
+		                    }
+		                    return true;
+		                }
+
+		                function updateSignupOauthState() {
+		                    const accepted = document.getElementById('terms')?.checked === true;
+		                    document.querySelectorAll('#oauth-section .oauth-btn').forEach((button) => {
+		                        const available = providerAvailable(button.dataset.provider);
+		                        button.disabled = !accepted || !available;
+		                        button.setAttribute('aria-disabled', String(!accepted || !available));
+		                    });
+		                }
+
+	                function dashboardRedirectWithLoginReport(data) {
+	                    const reportId = data.login_report?.id || data.login_report?.report_id;
+	                    if (reportId) {
+	                        return `/overview?login_report_id=${encodeURIComponent(reportId)}`;
+	                    }
+	                    return '/overview';
+	                }
+
+	                async function waitForDesktopOAuth() {
+	                    for (let attempt = 0; attempt < 150; attempt += 1) {
+	                        await new Promise((resolve) => setTimeout(resolve, 2000));
+	                        try {
+	                            const response = await fetch(`${AUTH_BASE_PATH}/oauth/user`, {
+	                                headers: { 'Accept': 'application/json' },
+	                                credentials: 'include',
+	                            });
+	                            if (!response.ok) continue;
+	                            const result = await response.json();
+	                            if (result.success) {
+	                                completeAuth(result);
+	                                return;
+	                            }
+	                        } catch (_) {
+	                            // The managed runtime can briefly restart; keep the bounded poll active.
+	                        }
+	                    }
+	                    showOAuthLoading(false);
+	                    showError('Google sign-in timed out. Please try again.');
+	                }
+
+	                function completeAuth(result) {
+	                    if (window.authState && result.user) window.authState.setUser(result.user, null);
+	                    showSuccess(result.message || 'Signed in.');
+	                    setTimeout(() => {
+	                        window.location.href = dashboardRedirectWithLoginReport(result);
+	                    }, 350);
+	                }
+
+	                async function completeOAuthRedirectIfPresent() {
+	                    const params = new URLSearchParams(window.location.search);
+	                    if (params.get('oauth_success') !== '1') {
+	                        return false;
+	                    }
+	                    showOAuthLoading(true);
+	                    try {
+	                        const response = await fetch(`${AUTH_BASE_PATH}/oauth/user`, {
+	                            method: 'GET',
+	                            headers: { 'Accept': 'application/json' },
+	                            credentials: 'include',
+	                        });
+	                        const result = await response.json().catch(() => ({
+	                            success: false,
+	                            message: 'OAuth response was not valid JSON.',
+	                        }));
+	                        if (response.ok && result.success) {
+	                            completeAuth(result);
+	                            return true;
+	                        }
+	                        showError(result.message || 'OAuth sign-in could not be completed.');
+	                    } catch (error) {
+	                        showError(`OAuth sign-in failed: ${error.message}`);
+	                    } finally {
+	                        showOAuthLoading(false);
+	                    }
+	                    return false;
+	                }
+
+	                function openOAuthProvider(provider) {
+	                    showOAuthLoading(true);
+	                    if (document.getElementById('signupForm') && !validateSignupRequirements()) {
+		                        showOAuthLoading(false);
+		                        return true;
+		                    }
+		                    if (document.getElementById('signupForm')) {
+		                        void postAuth(`/oauth/${encodeURIComponent(provider)}?intent=signup`, {
+		                            consent: consentPayload(),
+		                            turnstileToken,
+		                        }).then((result) => {
+		                            const target = result.authorization_url;
+		                            if (!target || !/^https:\/\/(github\.com|accounts\.google\.com)\//.test(target)) {
+		                                throw new Error(result.message || 'Provider signup could not be started.');
+		                            }
+		                            window.location.assign(target);
+		                        }).catch((error) => {
+		                            showOAuthLoading(false);
+		                            showError(error.message || 'Provider signup could not be started.');
+		                        });
+		                        return true;
+		                    }
+		                    if (window.pywebview && window.pywebview.api) {
+		                        return null;
+		                    }
+	                    window.location.href = `${AUTH_BASE_PATH}/oauth/${encodeURIComponent(provider)}`;
+	                    return true;
+	                }
+
+	                // Password toggle functionality
                 function togglePassword() {
-                    if (IS_PYWEBVIEW && window.pywebview?.api?.log_click) {
+                    if (hasAPI()) {
                         try {
                             window.pywebview.api.log_click('button', '"Password toggle"');
                         } catch (err) {
-                            console.log('[CLICK] Password toggle button clicked');
+                            if (window.pywebview.api.log) {
+                                window.pywebview.api.log('[CLICK] Password toggle button clicked');
+                            }
                         }
-                    } else {
-                        console.log('[CLICK] Password toggle button clicked');
                     }
                     const passwordInput = document.getElementById('password');
                     const toggle = document.querySelector('.password-toggle');
-                    
+
                     if (passwordInput.type === 'password') {
                         passwordInput.type = 'text';
                         toggle.textContent = '🙈';
-                        if (IS_PYWEBVIEW && window.pywebview?.api?.log) {
+                        if (hasAPI() && window.pywebview.api.log) {
                             window.pywebview.api.log('[ACTION] Password visibility: SHOWN');
                         }
                     } else {
                         passwordInput.type = 'password';
                         toggle.textContent = '👁️';
-                        if (IS_PYWEBVIEW && window.pywebview?.api?.log) {
+                        if (hasAPI() && window.pywebview.api.log) {
                             window.pywebview.api.log('[ACTION] Password visibility: HIDDEN');
                         }
                     }
                 }
-                
+
                 // Form submission
-                const loginForm = document.getElementById('login-form');
-                if (loginForm) {
-                    loginForm.addEventListener('submit', async function(e) {
-                        e.preventDefault();
-                        if (hasAPI()) {
-                            try {
-                                if (IS_PYWEBVIEW) {
-                                    window.pywebview.api.log_click('button', '"Sign In" (form submit)');
-                                } else {
-                                    console.log('[CLICK] Login form submit button clicked');
-                                }
-                            } catch (err) {
-                                console.error('[LOGIN] Log error:', err);
-                            }
-                        }
-                        
-                        const email = document.getElementById('email').value;
-                        const password = document.getElementById('password').value;
-                        
-                        if (!email || !password) {
-                            showError('Please fill in all fields.');
-                            return;
-                        }
-                        
-                        showLoading(true);
-                        
-                        if (IS_BROWSER) {
-                            // Browser mode - use HTTP API
-                            try {
-                                const response = await fetch('/api/auth/login', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ email, password })
-                                });
-                                const data = await response.json();
-                                
-                                if (data.success && data.user && data.token) {
-                                    // Store authentication state
-                                    if (window.authState) {
-                                        window.authState.setUser(data.user, data.token);
-                                    }
-                                    
-                                    showSuccess('Login successful! Welcome, ' + data.user.full_name);
-                                    
-                                    // Redirect to dashboard or redirect URL
-                                    setTimeout(() => {
-                                        const urlParams = new URLSearchParams(window.location.search);
-                                        const redirect = urlParams.get('redirect') || '/dashboard';
-                                        window.location.href = redirect;
-                                    }, 1500);
-                                } else {
-                                    showError(data.message || 'Invalid email or password.');
-                                }
-                            } catch (error) {
-                                console.error('[LOGIN] API error:', error);
-                                showError('Login failed. Please try again.');
-                            }
-                            showLoading(false);
-                        } else if (IS_PYWEBVIEW) {
-                            // Desktop mode - use pywebview API (if available)
-                            // For now, fallback to simple check
-                            setTimeout(() => {
-                                if (email === 'admin@cleanhouse.local' && password === 'admin123') {
-                                    showSuccess('Login successful!');
-                                    setTimeout(() => window.close(), 1000);
-                                } else {
-                                    showError('Invalid email or password.');
-                                }
-                                showLoading(false);
-                            }, 1000);
-                        } else {
-                            showError('API not available. Please refresh the page.');
-                            showLoading(false);
-                        }
-                    });
-                }
-                
-                // OAuth functions - use system browser with full OAuth flow
-                async function signInWithGoogle() {
-                    console.log('[OAUTH] signInWithGoogle() called');
-                    console.log('[OAUTH] IS_BROWSER:', IS_BROWSER);
-                    console.log('[OAUTH] IS_PYWEBVIEW:', IS_PYWEBVIEW);
-                    console.log('[OAUTH] Button disabled?', document.getElementById('oauth-google')?.disabled);
-                    
+	                const loginForm = document.getElementById('login-form');
+		                if (loginForm) {
+		                loginForm.addEventListener('submit', async function(e) {
+	                    e.preventDefault();
                     if (hasAPI()) {
                         try {
-                            if (IS_PYWEBVIEW) {
-                                window.pywebview.api.log_click('button', '"Continue with Google"');
-                            } else {
-                                console.log('[CLICK] Google OAuth button clicked');
-                            }
+                            window.pywebview.api.log_click('button', '"Sign In" (form submit)');
                         } catch (err) {
-                            console.error('[OAUTH] Log error:', err);
+                            if (window.pywebview.api.log) {
+                                window.pywebview.api.log('[CLICK] Login form submit button clicked');
+                            }
                         }
                     }
-                    
-                    // Check if button is disabled
-                    const googleBtn = document.getElementById('oauth-google');
-                    if (googleBtn && googleBtn.disabled) {
-                        console.error('[OAUTH] Google button is disabled - terms checkbox must be checked');
-                        showError('Please check the terms checkbox to enable OAuth signup.');
+
+                    const email = document.getElementById('email').value;
+                    const password = document.getElementById('password').value;
+
+                    if (!email || !password) {
+                        showError('Please fill in all fields.');
                         return;
                     }
-                    
-                    // Show loading (handle gracefully if element doesn't exist)
-                    try {
-                        showOAuthLoading(true);
-                    } catch (err) {
-                        console.warn('[OAUTH] Could not show loading overlay:', err);
-                    }
-                    
-                    if (IS_PYWEBVIEW && window.pywebview && window.pywebview.api) {
-                        // Desktop mode - use pywebview API
+
+	                    showLoading(true);
+
+	                    try {
+	                        const result = await postAuth('/login', { email, password });
+	                        if (result && result.success) {
+	                            completeAuth(result);
+	                        } else {
+	                            showError(result?.message || 'Sign in failed.');
+	                        }
+	                    } catch (error) {
+	                        showError(`Authentication request failed: ${error.message}`);
+	                    } finally {
+	                        showLoading(false);
+	                    }
+		                });
+		                }
+
+		                const magicButton = document.getElementById('magic-email-btn');
+		                if (magicButton) {
+		                    magicButton.addEventListener('click', async () => {
+		                        const signup = Boolean(document.getElementById('signupForm'));
+		                        const email = document.getElementById('email')?.value.trim() || '';
+		                        if (!email) return showError('Enter your email address first.');
+		                        if (signup && !validateSignupRequirements()) return;
+		                        showLoading(true);
+		                        try {
+		                            const result = await postAuth('/magic/request', {
+		                                email,
+		                                intent: signup ? 'signup' : 'signin',
+		                                fullName: document.getElementById('fullName')?.value.trim() || '',
+		                                consent: signup ? consentPayload() : undefined,
+		                                turnstileToken: signup ? turnstileToken : undefined,
+		                            });
+		                            if (!result.success) throw new Error(result.message || 'Magic email could not be requested.');
+		                            showSuccess(result.message);
+		                        } catch (error) {
+		                            showError(error.message || 'Magic email could not be requested.');
+		                        } finally {
+		                            showLoading(false);
+		                        }
+		                    });
+		                }
+
+		                const signupForm = document.getElementById('signupForm');
+		                if (signupForm) {
+		                    updateSignupOauthState();
+		                    document.getElementById('terms')?.addEventListener('change', updateSignupOauthState);
+		                    signupForm.addEventListener('submit', async function(e) {
+		                        e.preventDefault();
+		                        const fullName = document.getElementById('fullName')?.value.trim() || '';
+		                        const email = document.getElementById('email')?.value.trim() || '';
+		                        const password = document.getElementById('password')?.value || '';
+		                        const confirmPassword = document.getElementById('confirmPassword')?.value || '';
+
+		                        if (!fullName || !email || !password || !confirmPassword) {
+		                            showError('Name, email, password, and password confirmation are required.');
+		                            return;
+		                        }
+		                        if (password !== confirmPassword) {
+		                            showError('Passwords do not match.');
+		                            return;
+		                        }
+		                        if (password.length < 8) {
+		                            showError('Password must be at least 8 characters.');
+		                            return;
+		                        }
+		                        if (!validateSignupRequirements()) {
+		                            return;
+		                        }
+
+		                        showLoading(true);
+		                        try {
+		                            const result = await postAuth('/createAccount', {
+		                                fullName,
+		                                email,
+		                                password,
+		                                confirmPassword,
+		                                role: 'user',
+		                                consent: consentPayload(),
+		                                turnstileToken,
+		                            });
+		                            if (result && result.success) {
+		                                completeAuth(result);
+		                            } else {
+		                                showError(result?.message || 'Account creation failed.');
+		                                resetTurnstile();
+		                            }
+		                        } catch (error) {
+		                            showError(`Account creation request failed: ${error.message}`);
+		                            resetTurnstile();
+		                        } finally {
+		                            showLoading(false);
+		                        }
+		                    });
+		                }
+
+	                // OAuth functions - use system browser with full OAuth flow
+                async function signInWithGoogle() {
+                    if (hasAPI()) {
                         try {
-                            console.log('[OAUTH] Calling openOAuthUrl for Google (desktop)...');
-                            const result = window.pywebview.api.openOAuthUrl(null, 'google');
+                            window.pywebview.api.log_click('button', '"Continue with Google"');
+                        } catch (err) {
+                            if (window.pywebview.api.log) {
+                                window.pywebview.api.log('[CLICK] Google OAuth button clicked');
+                            }
+                        }
+	                    }
+	                    if (openOAuthProvider('google')) return;
+	                    showOAuthLoading(true);
+
+                    if (window.pywebview && window.pywebview.api) {
+                        try {
+                            console.log('[OAUTH] Calling openOAuthUrl for Google...');
+                            const result = await window.pywebview.api.openOAuthUrl(null, 'google');
                             console.log('[OAUTH] Result received:', result);
-                            
+
                             if (result) {
                                 if (result.success === true) {
                                     // Success - browser opened
                                     const message = result.message || 'Opening Google authentication in your browser. Please complete the sign-in there.';
                                     console.log('[OAUTH] Success:', message);
                                     showSuccess(message);
-                                    
+	                                waitForDesktopOAuth();
+
                                     if (result.user) {
                                         // Already authenticated (shouldn't happen, but handle it)
                                         setTimeout(() => {
@@ -460,62 +655,39 @@
                             showError('OAuth error: ' + error.message);
                             showOAuthLoading(false);
                         }
-                    } else if (IS_BROWSER) {
-                        // Browser mode - redirect to OAuth endpoint
-                        console.log('[OAUTH] Redirecting to Google OAuth (browser mode)...');
-                        console.log('[OAUTH] Current URL:', window.location.href);
-                        console.log('[OAUTH] Target URL:', `${window.location.origin}/api/auth/oauth/google`);
-                        
-                        // Use full URL to ensure proper redirect
-                        // Use setTimeout to ensure any pending operations complete
-                        setTimeout(() => {
-                            try {
-                                window.location.href = `${window.location.origin}/api/auth/oauth/google`;
-                            } catch (error) {
-                                console.error('[OAUTH] Redirect error:', error);
-                                showError('OAuth error: ' + error.message);
-                                try {
-                                    showOAuthLoading(false);
-                                } catch (e) {
-                                    // Ignore if showOAuthLoading fails
-                                }
-                            }
-                        }, 100);
                     } else {
                         console.error('[OAUTH] API not available');
                         showError('OAuth configuration required. Please contact support.');
-                        try {
-                            showOAuthLoading(false);
-                        } catch (e) {
-                            // Ignore if showOAuthLoading fails
-                        }
+                        showOAuthLoading(false);
                     }
                 }
-                
-                async function signInWithApple() {
+
+                function signInWithApple() {
                     if (hasAPI()) {
                         try {
-                            if (IS_PYWEBVIEW) {
-                                window.pywebview.api.log_click('button', '"Continue with Apple"');
-                            } else {
-                                console.log('[CLICK] Apple OAuth button clicked');
-                            }
+                            window.pywebview.api.log_click('button', '"Continue with Apple"');
                         } catch (err) {
-                            console.error('[OAUTH] Log error:', err);
+                            if (window.pywebview.api.log) {
+                                window.pywebview.api.log('[CLICK] Apple OAuth button clicked');
+                            }
                         }
                     }
-                    showOAuthLoading(true);
-                    
-                    if (IS_PYWEBVIEW && window.pywebview && window.pywebview.api) {
-                        // Desktop mode
+	                    if (openOAuthProvider('apple')) return;
+	                    showOAuthLoading(true);
+
+                    if (window.pywebview && window.pywebview.api) {
                         try {
                             const result = window.pywebview.api.openOAuthUrl(null, 'apple');
                             if (result && result.success) {
                                 if (result.user) {
                                     showSuccess(result.message || 'Successfully authenticated with Apple!');
-                                    setTimeout(() => window.close(), 1500);
-                                } else {
+                                    setTimeout(() => {
+                                        window.close();
+                                    }, 1500);
+                                } else if (result.message && result.message.includes('Opening')) {
                                     showSuccess(result.message || 'Opening Apple authentication in your browser. Please complete the sign-in there.');
+                                } else {
+                                    showSuccess('Opening Apple authentication in your browser. Please complete the sign-in there.');
                                 }
                             } else {
                                 showError(result?.message || 'Failed to open Apple authentication.');
@@ -525,39 +697,38 @@
                             showError('OAuth error: ' + error.message);
                             showOAuthLoading(false);
                         }
-                    } else if (IS_BROWSER) {
-                        // Browser mode
-                        window.location.href = `/api/auth/oauth/apple`;
                     } else {
                         showError('OAuth configuration required. Please contact support.');
                         showOAuthLoading(false);
                     }
                 }
-                
-                async function signInWithGithub() {
+
+                function signInWithGithub() {
                     if (hasAPI()) {
                         try {
-                            if (IS_PYWEBVIEW) {
-                                window.pywebview.api.log_click('button', '"Continue with GitHub"');
-                            } else {
-                                console.log('[CLICK] GitHub OAuth button clicked');
-                            }
+                            window.pywebview.api.log_click('button', '"Continue with GitHub"');
                         } catch (err) {
-                            console.error('[OAUTH] Log error:', err);
+                            if (window.pywebview.api.log) {
+                                window.pywebview.api.log('[CLICK] GitHub OAuth button clicked');
+                            }
                         }
                     }
-                    showOAuthLoading(true);
-                    
-                    if (IS_PYWEBVIEW && window.pywebview && window.pywebview.api) {
-                        // Desktop mode
+	                    if (openOAuthProvider('github')) return;
+	                    showOAuthLoading(true);
+
+                    if (window.pywebview && window.pywebview.api) {
                         try {
                             const result = window.pywebview.api.openOAuthUrl(null, 'github');
                             if (result && result.success) {
                                 if (result.user) {
                                     showSuccess(result.message || 'Successfully authenticated with GitHub!');
-                                    setTimeout(() => window.close(), 1500);
-                                } else {
+                                    setTimeout(() => {
+                                        window.close();
+                                    }, 1500);
+                                } else if (result.message && result.message.includes('Opening')) {
                                     showSuccess(result.message || 'Opening GitHub authentication in your browser. Please complete the sign-in there.');
+                                } else {
+                                    showSuccess('Opening GitHub authentication in your browser. Please complete the sign-in there.');
                                 }
                             } else {
                                 showError(result?.message || 'Failed to open GitHub authentication.');
@@ -567,39 +738,38 @@
                             showError('OAuth error: ' + error.message);
                             showOAuthLoading(false);
                         }
-                    } else if (IS_BROWSER) {
-                        // Browser mode
-                        window.location.href = `/api/auth/oauth/github`;
                     } else {
                         showError('OAuth configuration required. Please contact support.');
                         showOAuthLoading(false);
                     }
                 }
-                
-                async function signInWithMicrosoft() {
+
+                function signInWithMicrosoft() {
                     if (hasAPI()) {
                         try {
-                            if (IS_PYWEBVIEW) {
-                                window.pywebview.api.log_click('button', '"Continue with Microsoft"');
-                            } else {
-                                console.log('[CLICK] Microsoft OAuth button clicked');
-                            }
+                            window.pywebview.api.log_click('button', '"Continue with Microsoft"');
                         } catch (err) {
-                            console.error('[OAUTH] Log error:', err);
+                            if (window.pywebview.api.log) {
+                                window.pywebview.api.log('[CLICK] Microsoft OAuth button clicked');
+                            }
                         }
                     }
-                    showOAuthLoading(true);
-                    
-                    if (IS_PYWEBVIEW && window.pywebview && window.pywebview.api) {
-                        // Desktop mode
+	                    if (openOAuthProvider('microsoft')) return;
+	                    showOAuthLoading(true);
+
+                    if (window.pywebview && window.pywebview.api) {
                         try {
                             const result = window.pywebview.api.openOAuthUrl(null, 'microsoft');
                             if (result && result.success) {
                                 if (result.user) {
                                     showSuccess(result.message || 'Successfully authenticated with Microsoft!');
-                                    setTimeout(() => window.close(), 1500);
-                                } else {
+                                    setTimeout(() => {
+                                        window.close();
+                                    }, 1500);
+                                } else if (result.message && result.message.includes('Opening')) {
                                     showSuccess(result.message || 'Opening Microsoft authentication in your browser. Please complete the sign-in there.');
+                                } else {
+                                    showSuccess('Opening Microsoft authentication in your browser. Please complete the sign-in there.');
                                 }
                             } else {
                                 showError(result?.message || 'Failed to open Microsoft authentication.');
@@ -609,15 +779,12 @@
                             showError('OAuth error: ' + error.message);
                             showOAuthLoading(false);
                         }
-                    } else if (IS_BROWSER) {
-                        // Browser mode
-                        window.location.href = `/api/auth/oauth/microsoft`;
                     } else {
                         showError('OAuth configuration required. Please contact support.');
                         showOAuthLoading(false);
                     }
                 }
-                
+
                 function showSignup(event) {
                     // Log the click immediately - try multiple methods
                     let logged = false;
@@ -637,72 +804,94 @@
                             }
                         }
                     }
-                    
+
                     if (!logged) {
                         console.warn('Could not log click - API not available or error occurred');
                     }
-                    
+
                     // Prevent default link behavior (scrolling to top)
                     if (event) {
                         event.preventDefault();
                     }
-                    
+
                     console.log('showSignup() called');
                     console.log('window.pywebview:', window.pywebview);
-                    
+
                     // Close current window and show signup
                     // This will trigger the parent to show the signup WebView
-                    if (IS_PYWEBVIEW && window.pywebview && window.pywebview.api) {
-                        console.log('Calling window.pywebview.api.showSignup()');
-                        window.pywebview.api.showSignup();
-                    } else if (IS_BROWSER) {
-                        // Browser mode - navigate to signup page
-                        window.location.href = '/signup';
-                    } else {
-                        console.error('API not available');
-                        showError('API not available. Please refresh the page.');
-                    }
+	                    if (window.pywebview && window.pywebview.api) {
+	                        console.log('Calling window.pywebview.api.showSignup()');
+	                        window.pywebview.api.showSignup();
+	                    } else {
+	                        window.location.href = '/signup';
+	                    }
                     // Don't close window immediately - let the API handle it
-                    return false;
-                }
-                
-                // UI helper functions (already defined above, but keep for compatibility)
-                // Note: showError and showSuccess are defined at the top of the file
-                
-                function showLoading(show) {
-                    const loadingDiv = document.getElementById('loading');
-                    const loginBtn = document.getElementById('login-btn');
-                    
-                    if (show) {
-                        loadingDiv.style.display = 'block';
-                        loginBtn.disabled = true;
-                        loginBtn.textContent = 'Signing in...';
-                    } else {
-                        loadingDiv.style.display = 'none';
-                        loginBtn.disabled = false;
-                        loginBtn.textContent = 'Sign In';
-                    }
-                }
-                
-                function showOAuthLoading(show) {
-                    const overlay = document.getElementById('loading-overlay');
-                    if (!overlay) {
-                        // Element doesn't exist (e.g., on signup page), just log
-                        console.log(`[OAUTH] Loading overlay ${show ? 'shown' : 'hidden'} (element not found)`);
-                        return;
-                    }
-                    if (show) {
-                        overlay.style.display = 'flex';
+	                    return false;
+	                }
+
+		                function showLogin(event) {
+		                    if (event) {
+		                        event.preventDefault();
+		                    }
+		                    window.location.href = '/login';
+		                    return false;
+		                }
+
+	                // UI helper functions
+	                function showError(message) {
+	                    const errorDiv = document.getElementById('error-message') || document.getElementById('errorMessage');
+	                    if (!errorDiv) return;
+	                    errorDiv.textContent = message;
+	                    errorDiv.style.display = 'block';
+	                    const successDiv = document.getElementById('success-message') || document.getElementById('successMessage');
+	                    if (successDiv) successDiv.style.display = 'none';
+	                }
+
+	                function showSuccess(message) {
+	                    const successDiv = document.getElementById('success-message') || document.getElementById('successMessage');
+	                    if (!successDiv) return;
+	                    successDiv.textContent = message;
+	                    successDiv.style.display = 'block';
+	                    const errorDiv = document.getElementById('error-message') || document.getElementById('errorMessage');
+	                    if (errorDiv) errorDiv.style.display = 'none';
+	                }
+
+	                function showLoading(show) {
+	                    const loadingDiv = document.getElementById('loading');
+	                    const actionBtn = document.getElementById('login-btn') || document.getElementById('signupButton');
+	                    const defaultText = document.getElementById('signupButton') ? 'Create Account' : 'Sign In';
+	                    const loadingText = document.getElementById('signupButton') ? 'Creating account...' : 'Signing in...';
+
+	                    if (show) {
+	                        if (loadingDiv) loadingDiv.style.display = 'block';
+	                        if (actionBtn) {
+	                            actionBtn.disabled = true;
+	                            actionBtn.textContent = loadingText;
+	                        }
+	                    } else {
+	                        if (loadingDiv) loadingDiv.style.display = 'none';
+	                        if (actionBtn) {
+	                            actionBtn.disabled = false;
+	                            actionBtn.textContent = defaultText;
+	                        }
+	                    }
+	                }
+
+	                function showOAuthLoading(show) {
+	                    const overlay = document.getElementById('loading-overlay');
+	                    if (!overlay) return;
+	                    if (show) {
+	                        overlay.style.display = 'flex';
                     } else {
                         overlay.style.display = 'none';
                     }
                 }
-                
+
                 function handleOAuthTimeout() {
                     showOAuthLoading(false);
                     showError('OAuth timeout. Please try again.');
                 }
-                
+
                 // Test API function
                 function testAPI() {
                     if (hasAPI()) {
@@ -716,7 +905,7 @@
                     }
                     console.log('Testing API connection...');
                     console.log('window.pywebview:', window.pywebview);
-                    
+
                     if (window.pywebview && window.pywebview.api) {
                         try {
                             const result = window.pywebview.api.test_api();
@@ -731,166 +920,16 @@
                         alert('API not available - WebView setup issue');
                     }
                 }
-                
-                // Focus first input (only if login form exists)
-                const emailInput = document.getElementById('email');
-                if (emailInput) {
-                    emailInput.focus();
-                }
-                
-                // Signup page: Enable OAuth buttons when terms checkbox is checked
-                function setupSignupOAuthToggle() {
-                    const termsCheckbox = document.getElementById('terms');
-                    const oauthSection = document.getElementById('oauth-section');
-                    
-                    if (!termsCheckbox || !oauthSection) {
-                        // Not on signup page
-                        return;
-                    }
-                    
-                    // Get all OAuth buttons
-                    const oauthButtons = [
-                        document.getElementById('oauth-google'),
-                        document.getElementById('oauth-microsoft'),
-                        document.getElementById('oauth-apple'),
-                        document.getElementById('oauth-github')
-                    ].filter(btn => btn !== null);
-                    
-                    // Get the helper text paragraph
-                    const helperText = document.getElementById('oauth-helper-text') || oauthSection.querySelector('p');
-                    
-                    // Function to toggle OAuth buttons
-                    function toggleOAuthButtons(enabled) {
-                        oauthButtons.forEach(btn => {
-                            btn.disabled = !enabled;
-                        });
-                        
-                        // Update helper text
-                        if (helperText) {
-                            if (enabled) {
-                                helperText.textContent = 'Or sign up with one of the providers below';
-                                helperText.style.color = '#666';
-                            } else {
-                                helperText.textContent = 'Complete the form above to enable OAuth signup';
-                                helperText.style.color = '#999';
-                            }
-                        }
-                    }
-                    
-                    // Initial state: buttons disabled
-                    toggleOAuthButtons(false);
-                    
-                    // Listen for checkbox changes
-                    termsCheckbox.addEventListener('change', function(e) {
-                        toggleOAuthButtons(e.target.checked);
-                        
-                        // Log the change
-                        if (hasAPI()) {
-                            try {
-                                if (IS_PYWEBVIEW) {
-                                    window.pywebview.api.log_input('terms', 'checkbox', e.target.checked ? 'checked' : 'unchecked');
-                                } else {
-                                    console.log('[INPUT] Terms checkbox:', e.target.checked ? 'checked' : 'unchecked');
-                                }
-                            } catch (err) {
-                                console.error('[SIGNUP] Log error:', err);
-                            }
-                        }
-                    });
-                    
-                    console.log('[SIGNUP] OAuth toggle setup complete');
-                }
-                
-                // Setup signup OAuth toggle when DOM is ready
-                if (document.readyState === 'loading') {
-                    document.addEventListener('DOMContentLoaded', setupSignupOAuthToggle);
-                } else {
-                    setupSignupOAuthToggle();
-                }
-                
-                // Signup form submission handler
-                const signupForm = document.getElementById('signupForm');
-                if (signupForm) {
-                    signupForm.addEventListener('submit', async function(e) {
-                        e.preventDefault();
-                        
-                        // Clear previous messages
-                        showError('');
-                        showSuccess('');
-                        
-                        // Get form data
-                        const formData = new FormData(signupForm);
-                        const data = {
-                            fullName: formData.get('fullName'),
-                            email: formData.get('email'),
-                            password: formData.get('password'),
-                            confirmPassword: formData.get('confirmPassword'),
-                            role: formData.get('role'),
-                            terms: formData.get('terms')
-                        };
-                        
-                        // Validate form
-                        if (!data.fullName || !data.email || !data.password || !data.confirmPassword || !data.role) {
-                            showError('All fields are required.');
-                            return;
-                        }
-                        
-                        if (data.password !== data.confirmPassword) {
-                            showError('Passwords do not match.');
-                            return;
-                        }
-                        
-                        if (data.password.length < 8) {
-                            showError('Password must be at least 8 characters long.');
-                            return;
-                        }
-                        
-                        if (!data.terms) {
-                            showError('You must agree to the Terms of Service and Privacy Notice.');
-                            return;
-                        }
-                        
-                        // Show loading
-                        const loadingDiv = document.getElementById('loading');
-                        const signupButton = document.getElementById('signupButton');
-                        if (loadingDiv) loadingDiv.style.display = 'block';
-                        if (signupButton) signupButton.disabled = true;
-                        
-                        try {
-                            const response = await fetch('/api/auth/createAccount', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    fullName: data.fullName,
-                                    email: data.email,
-                                    password: data.password,
-                                    role: data.role
-                                })
-                            });
-                            
-                            const result = await response.json();
-                            
-                            if (result.success && result.user && result.token) {
-                                // Store authentication state
-                                if (window.authState) {
-                                    window.authState.setUser(result.user, result.token);
-                                }
-                                
-                                showSuccess('Account created successfully! Welcome, ' + result.user.full_name);
-                                
-                                // Redirect to dashboard
-                                setTimeout(() => {
-                                    window.location.href = '/dashboard';
-                                }, 1500);
-                            } else {
-                                showError(result.message || 'Account creation failed. Please try again.');
-                            }
-                        } catch (error) {
-                            console.error('[SIGNUP] API error:', error);
-                            showError('Network error. Please check your connection and try again.');
-                        } finally {
-                            if (loadingDiv) loadingDiv.style.display = 'none';
-                            if (signupButton) signupButton.disabled = false;
-                        }
-                    });
-                }
+
+		                const query = new URLSearchParams(window.location.search);
+		                if (query.get('error') === 'provider_unavailable') {
+		                    showError('Google sign-in is not configured for this CleanHouse runtime.');
+		                }
+		                completeOAuthRedirectIfPresent();
+
+		                // Focus first input
+		                loadAuthConfig();
+		                const emailField = document.getElementById('email');
+		                if (emailField) {
+		                    emailField.focus();
+	                }

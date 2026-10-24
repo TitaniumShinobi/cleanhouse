@@ -1,0 +1,12 @@
+lab_cleaned=2026-05-29T23:19:46.756719+00:00
+prepared
+baseline_rc=0
+process_started name=codex-agent pid=15258
+mutation_applied file=gone2.txt change=missing
+event_id=domain_event:77f6db2f8902f91f
+incident_id=incident:09021b0309213cf8
+receipt_create_http=200
+receipt_create_status=ok
+case_id=qpb_case:04fd5e32528cdcce
+action=quarantine http=200 status=ok
+action=purge http=200 status=ok

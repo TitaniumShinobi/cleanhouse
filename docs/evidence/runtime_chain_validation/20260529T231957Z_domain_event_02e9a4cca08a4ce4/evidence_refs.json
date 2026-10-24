@@ -1,0 +1,11 @@
+{
+  "count": 6,
+  "evidence_refs": [
+    "local://cleanhouse/process/6211",
+    "local://cleanhouse/pattern/platform/code",
+    "local://cleanhouse/evidence/processes:ffacdc29ea3fb88f.json",
+    "local://cleanhouse/integrity/29597c54c585a388",
+    "local://cleanhouse/evidence/integrity:5efc4dc4b20c0fdd.json",
+    "local://cleanhouse/correlation/process-integrity/c61d200b1b4ef128"
+  ]
+}

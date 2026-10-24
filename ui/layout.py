@@ -52,7 +52,7 @@ class UILayout:
     def _init_state_variables(self):
         """Initialize UI state variables."""
         # Status variables
-        self.status_var = tk.StringVar(value="Protected")
+        self.status_var = tk.StringVar(value="Not Scanned")
         self.status_color = "#4caf50"
         self.scan_progress = tk.DoubleVar(value=0)
         self.last_scan = tk.StringVar(value="Never")
@@ -240,7 +240,7 @@ class UILayout:
         browse_btn.pack(side='left', padx=5)
         
         # Add a tooltip to explain the directory selection
-        self.create_tooltip(browse_btn, "Select a directory to monitor for unauthorized changes")
+        self.create_tooltip(browse_btn, "Select a directory to monitor for integrity changes")
         
         # Directory statistics frame
         stats_frame = tk.Frame(target_frame, bg="#f4f6fa")

@@ -1,0 +1,51 @@
+{
+  "schema": "cleanhouse.runtime_chain_validation.catalog.v1",
+  "run_count": 5,
+  "runs": [
+    {
+      "run_folder": "20260529T231835Z_domain_event_a1f6c050cbfb6bcb",
+      "event_id": "domain_event:a1f6c050cbfb6bcb",
+      "incident_id": "incident:717085848c8c1cbe",
+      "receipt_id": "incident_receipt:qpb_case:e0d79972035670a1",
+      "session_id": "runtime-global",
+      "decision_state": null,
+      "outcome_hash": "40f647f33ee6fe3b23f1ba88ee16b7cb1d29338b1ae69098965dcf950eecbfba"
+    },
+    {
+      "run_folder": "20260529T231942Z_domain_event_06bda7311b974be4",
+      "event_id": "domain_event:06bda7311b974be4",
+      "incident_id": "incident:79a301c2f4a51241",
+      "receipt_id": "incident_receipt:qpb_case:9717c514d196509e",
+      "session_id": "runtime-global",
+      "decision_state": null,
+      "outcome_hash": "453f710c4d446df2cdf111b6b0657a22765fe204c6ecbd1e88c913bcc533b3e4"
+    },
+    {
+      "run_folder": "20260529T231946Z_domain_event_8e95a708f2474776",
+      "event_id": "domain_event:8e95a708f2474776",
+      "incident_id": "incident:33bb0027b2edb521",
+      "receipt_id": "incident_receipt:qpb_case:e63e97791fab16d0",
+      "session_id": "runtime-global",
+      "decision_state": null,
+      "outcome_hash": "47fd46abe7f225dc87b036e36096c70ada4745f3265819be35b9d0dbe0f94e37"
+    },
+    {
+      "run_folder": "20260529T231953Z_domain_event_77f6db2f8902f91f",
+      "event_id": "domain_event:77f6db2f8902f91f",
+      "incident_id": "incident:09021b0309213cf8",
+      "receipt_id": "incident_receipt:qpb_case:04fd5e32528cdcce",
+      "session_id": "runtime-global",
+      "decision_state": null,
+      "outcome_hash": "b82e894be20d1b1302c6877c191af00392186ae5df4e17d8dc8b4e9dc4f00b9b"
+    },
+    {
+      "run_folder": "20260529T231957Z_domain_event_02e9a4cca08a4ce4",
+      "event_id": "domain_event:02e9a4cca08a4ce4",
+      "incident_id": "incident:20afcc5a65a2ee87",
+      "receipt_id": "incident_receipt:qpb_case:79b9d044aea185f7",
+      "session_id": "runtime-global",
+      "decision_state": null,
+      "outcome_hash": "f2d42e8c68c062b9c291a3ec20562d8e06d373b8998f4d99eb537c215750d62a"
+    }
+  ]
+}

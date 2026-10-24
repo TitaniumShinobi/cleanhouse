@@ -1,0 +1,29 @@
+CleanHouse blocker proof: Actor Attribution
+Date: 2026-06-05
+
+Blocker:
+Actor Attribution needed explicit actor attribution across the mediated workflow, chain-of-custody, receipt, replay, and bundle path.
+
+Files containing proof surface:
+- backend/api/cleanhouse_monitoring.py
+- tests/test_cleanhouse_monitoring_api.py
+
+Targeted proof command:
+python3 -m unittest tests.test_cleanhouse_monitoring_api.CleanHouseMonitoringApiTests.test_intervention_workflow_receipt_and_replay_chain
+
+Observed result:
+.
+----------------------------------------------------------------------
+Ran 1 test in 0.096s
+
+OK
+
+Proof assertions covered:
+- intervention workflow includes actor_attribution
+- actor attribution carries actor_type, actor_id, attribution_id, and attribution_hash
+- chain-of-custody hops include actor attribution records
+- receipt, replay, and exported bundle include actor_attribution
+- exported bundle verification confirms actor_attribution_hash_match
+
+Verdict:
+closed

@@ -1,0 +1,517 @@
+{
+  "card": {
+    "card_id": "incident_receipt:qpb_case:9717c514d196509e",
+    "decision_path": {
+      "allowed_actions": [
+        "quarantine",
+        "purge",
+        "bless"
+      ],
+      "current_status": "blessed",
+      "next_action": "complete"
+    },
+    "evidence": {
+      "history": [
+        {
+          "action": "detected",
+          "actor": "operator",
+          "case_id": "qpb_case:9717c514d196509e",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "integrity": {
+            "root_hash": "ba1671b4cfb2828f6f0b8ef1ddb012842bdc325523a94b097122316a56201f07"
+          },
+          "metadata": {
+            "source": "incident_receipt"
+          },
+          "status": "detected",
+          "target_scope": {
+            "paths": [
+              "alpha2.txt"
+            ],
+            "process_pids": [
+              1223
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:41.089047"
+        },
+        {
+          "action": "quarantine",
+          "actor": "operator",
+          "case_id": "qpb_case:9717c514d196509e",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "integrity": {
+            "root_hash": "64b53233b7a191af43428ebb3cf260c853611560fee174e649c6541cee920cb6"
+          },
+          "metadata": {},
+          "status": "quarantined",
+          "target_scope": {
+            "paths": [
+              "alpha2.txt"
+            ],
+            "process_pids": [
+              1223
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:41.149762"
+        },
+        {
+          "action": "purge",
+          "actor": "operator",
+          "case_id": "qpb_case:9717c514d196509e",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "integrity": {
+            "root_hash": "63d8b969896f7455e6bd0c12b3a1a2f183491911f5664681224885e58246ddda"
+          },
+          "metadata": {
+            "process_results": [
+              {
+                "error": "",
+                "killed": true,
+                "pid": 1223
+              }
+            ],
+            "removed_paths": [
+              "alpha2.txt"
+            ],
+            "undo_records": [
+              {
+                "before_content_b64": "c3RhbmRhbG9uZV9pbmNpZGVudF9yZWNlaXB0PXRydWUKc2Vzc2lvbl9pZD1ydW50aW1lLWdsb2JhbApzaWduYWxfc291cmNlPXByb2Nlc3NfaW50ZWdyaXR5X2NvbGxlY3RvcgpzaWduYWxfcGlkPTEyMjMKc2lnbmFsX3Byb2Nlc3M9L0FwcGxpY2F0aW9ucy9DaGF0R1BUIEF0bGFzLmFwcC9Db250ZW50cy9TdXBwb3J0L0NoYXRHUFQgQXRsYXMuYXBwL0NvbnRlbnRzL0ZyYW1ld29ya3MvQ2hhdEdQVCBBdGxhcyBGcmFtZXdvcmsuZnJhbWV3b3JrL1ZlcnNpb25zLzE0OC4wLjc3NzguOTcvSGVscGVycy9DaGF0R1BUIEF0bGFzIChSZW5kZXJlcikuYXBwL0NvbnRlbnRzL01hY09TL0NoYXRHUFQgQXRsYXMgKFJlbmRlcmVyKSAtLXR5cGU9cmVuZGVyZXIgLS11c2VyLWRhdGEtZGlyPS9Vc2Vycy9kZXZvbndvb2Rzb24vTGlicmFyeS9BcHBsaWNhdGlvbiBTdXBwb3J0L2NvbS5vcGVuYWkuYXRsYXMvYnJvd3Nlci1kYXRhL2hvc3QgLS1vd2wtc2NvcGVkLXVzZXItYWdlbnQtYWRkaXRpb25hbC1ob3N0cz1jaGF0Z3B0LmNvbSxvcGVuYWkuY29tIC0tb3dsLXNjb3BlZC11c2VyLWFnZW50LXByZWZpeD1DaGF0R1BUQnJvd3NlciAtLXN0YXJ0LXN0YWNrLXByb2ZpbGVyIC0tbGFuZz1lbi1VUyAtLW51bS1yYXN0ZXItdGhyZWFkcz00IC0tZW5hYmxlLXplcm8tY29weSAtLWVuYWJsZS1ncHUtbWVtb3J5LWJ1ZmZlci1jb21wb3NpdG9yLXJlc291cmNlcyAtLWVuYWJsZS1tYWluLWZyYW1lLWJlZm9yZS1hY3RpdmF0aW9uIC0tcmVuZGVyZXItY2xpZW50LWlkPTExIC0tdGltZS10aWNrcy1hdC11bml4LWVwb2NoPS0xNzgwMDk0NzI2MjUyNjY2IC0tZGlzYWJsZS1tb2pvLWJyb2tlciAtLWxhdW5jaC10aW1lLXRpY2tzPTQ5OTIzOTYxIC0tc2hhcmVkLWZpbGVzIC0tbWV0cmljcy1zaG1lbS1oYW5kbGU9MTc1MjM5NTEyMixyLDUwOTA0NjA1MzQ1ODQ2NDM4MzMsMjc0Njc4MzIwNTQ2NTYwNjY1MCwyMDk3MTUyIC0tZmllbGQtdHJpYWwtaGFuZGxlPTE3MTgzNzk2MzYsciwxMzc3ODY5MjM1NTAzNjc0ODE5NSwyNzc3NzEyMzM4MTkwNzg0NTQxLDI2MjE0NCAtLWVuYWJsZS1mZWF0dXJlcz1Pd2xCb29zdFRpdGxlTWF0Y2hlcyxPd2xNZXJnZVNpbWlsYXJVcmxzIC0tdmFyaWF0aW9ucy1zZWVkLXZlcnNpb24gLS1wc2V1ZG9ueW1pemF0aW9uLXNhbHQtaGFuZGxlPTE5MzU3NjQ1OTYsciwxNzI1ODQ0OTEzMjkyMTYzOTI2MSwyMzYwNDI3MDg4MTgwNzgzMzgwLDQgLS10cmFjZS1wcm9jZXNzLXRyYWNrLXV1aWQ9MzE5MDcwODk5NjYxOTMzMTgzMyAtLWVuYWJsZS1sb2dnaW5nIC0tbG9nLWZpbGU9L1VzZXJzL2Rldm9ud29vZHNvbi9MaWJyYXJ5L0FwcGxpY2F0aW9uIFN1cHBvcnQvY29tLm9wZW5haS5hdGxhcy9icm93c2VyLWRhdGEvaG9zdC9kZWJ1Zy5sb2cgLS1zZWF0YmVsdC1jbGllbnQ9MTE5CnN1c3BpY2lvbl9yZWFzb249cHJvY2VzcyAxMjIzICgvQXBwbGljYXRpb25zL0NoYXRHUFQgQXRsYXMuYXBwL0NvbnRlbnRzL1N1cHBvcnQvQ2hhdEdQVCBBdGxhcy5hcHAvQ29udGVudHMvRnJhbWV3b3Jrcy9DaGF0R1BUIEF0bGFzIEZyYW1ld29yay5mcmFtZXdvcmsvVmVyc2lvbnMvMTQ4LjAuNzc3OC45Ny9IZWxwZXJzL0NoYXRHUFQgQXRsYXMgKFJlbmRlcmVyKS5hcHAvQ29udGVudHMvTWFjT1MvQ2hhdEdQVCBBdGxhcyAoUmVuZGVyZXIpIC0tdHlwZT1yZW5kZXJlciAtLXVzZXItZGF0YS1kaXI9L1VzZXJzL2Rldm9ud29vZHNvbi9MaWJyYXJ5L0FwcGxpY2F0aW9uIFN1cHBvcnQvY29tLm9wZW5haS5hdGxhcy9icm93c2VyLWRhdGEvaG9zdCAtLW93bC1zY29wZWQtdXNlci1hZ2VudC1hZGRpdGlvbmFsLWhvc3RzPWNoYXRncHQuY29tLG9wZW5haS5jb20gLS1vd2wtc2NvcGVkLXVzZXItYWdlbnQtcHJlZml4PUNoYXRHUFRCcm93c2VyIC0tc3RhcnQtc3RhY2stcHJvZmlsZXIgLS1sYW5nPWVuLVVTIC0tbnVtLXJhc3Rlci10aHJlYWRzPTQgLS1lbmFibGUtemVyby1jb3B5IC0tZW5hYmxlLWdwdS1tZW1vcnktYnVmZmVyLWNvbXBvc2l0b3ItcmVzb3VyY2VzIC0tZW5hYmxlLW1haW4tZnJhbWUtYmVmb3JlLWFjdGl2YXRpb24gLS1yZW5kZXJlci1jbGllbnQtaWQ9MTEgLS10aW1lLXRpY2tzLWF0LXVuaXgtZXBvY2g9LTE3ODAwOTQ3MjYyNTI2NjYgLS1kaXNhYmxlLW1vam8tYnJva2VyIC0tbGF1bmNoLXRpbWUtdGlja3M9NDk5MjM5NjEgLS1zaGFyZWQtZmlsZXMgLS1tZXRyaWNzLXNobWVtLWhhbmRsZT0xNzUyMzk1MTIyLHIsNTA5MDQ2MDUzNDU4NDY0MzgzMywyNzQ2NzgzMjA1NDY1NjA2NjUwLDIwOTcxNTIgLS1maWVsZC10cmlhbC1oYW5kbGU9MTcxODM3OTYzNixyLDEzNzc4NjkyMzU1MDM2NzQ4MTk1LDI3Nzc3MTIzMzgxOTA3ODQ1NDEsMjYyMTQ0IC0tZW5hYmxlLWZlYXR1cmVzPU93bEJvb3N0VGl0bGVNYXRjaGVzLE93bE1lcmdlU2ltaWxhclVybHMgLS12YXJpYXRpb25zLXNlZWQtdmVyc2lvbiAtLXBzZXVkb255bWl6YXRpb24tc2FsdC1oYW5kbGU9MTkzNTc2NDU5NixyLDE3MjU4NDQ5MTMyOTIxNjM5MjYxLDIzNjA0MjcwODgxODA3ODMzODAsNCAtLXRyYWNlLXByb2Nlc3MtdHJhY2stdXVpZD0zMTkwNzA4OTk2NjE5MzMxODMzIC0tZW5hYmxlLWxvZ2dpbmcgLS1sb2ctZmlsZT0vVXNlcnMvZGV2b253b29kc29uL0xpYnJhcnkvQXBwbGljYXRpb24gU3VwcG9ydC9jb20ub3BlbmFpLmF0bGFzL2Jyb3dzZXItZGF0YS9ob3N0L2RlYnVnLmxvZyAtLXNlYXRiZWx0LWNsaWVudD0xMTkpIGNvcnJlbGF0ZWQgd2l0aCBpbnRlZ3JpdHkgbW9kaWZpZWQgb24gYWxwaGEyLnR4dApjcmVhdGVkX2F0PTIwMjYtMDUtMjlUMTk6MTk6MzcuNzkxMjA0Cg==",
+                "before_exists": true,
+                "before_is_dir": false,
+                "path": "alpha2.txt"
+              }
+            ]
+          },
+          "status": "purged",
+          "target_scope": {
+            "paths": [
+              "alpha2.txt"
+            ],
+            "process_pids": [
+              1223
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:41.415130"
+        },
+        {
+          "action": "bless",
+          "actor": "operator",
+          "case_id": "qpb_case:9717c514d196509e",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "integrity": {
+            "root_hash": "453f710c4d446df2cdf111b6b0657a22765fe204c6ecbd1e88c913bcc533b3e4"
+          },
+          "metadata": {
+            "trust_reset": true
+          },
+          "status": "blessed",
+          "target_scope": {
+            "paths": [
+              "alpha2.txt"
+            ],
+            "process_pids": [
+              1223
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:41.664729"
+        }
+      ],
+      "refs": [
+        "local://cleanhouse/process/1223",
+        "local://cleanhouse/pattern/agent/agent",
+        "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+        "local://cleanhouse/integrity/9b9ecd4289707b65",
+        "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+        "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+      ]
+    },
+    "incident": {
+      "acknowledged_at": "2026-05-29T19:19:41.354942",
+      "created_at": "2026-05-29T19:19:37.853525",
+      "evidence_refs": [
+        "local://cleanhouse/process/1223",
+        "local://cleanhouse/pattern/agent/agent",
+        "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+        "local://cleanhouse/integrity/9b9ecd4289707b65",
+        "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+        "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+      ],
+      "history": [
+        {
+          "action": "created",
+          "actor": "policy_engine",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "incident_id": "incident:79a301c2f4a51241",
+          "integrity": {
+            "root_hash": "79bcc4e7f19e6fad392f85ec9e42a0250b76145b3361c965e589e2ee4b271e90"
+          },
+          "note": "incident created from domain event",
+          "state": "open",
+          "timestamp": "2026-05-29T19:19:37.853538"
+        },
+        {
+          "action": "review",
+          "actor": "operator",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "incident_id": "incident:79a301c2f4a51241",
+          "integrity": {
+            "root_hash": "ad5506aa47d8f803c7177dad10728aef047f7c188da5953c0890f28d73ec18c4"
+          },
+          "note": "qpb quarantine -> quarantined",
+          "state": "in_review",
+          "timestamp": "2026-05-29T19:19:41.354951"
+        },
+        {
+          "action": "review",
+          "actor": "operator",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "incident_id": "incident:79a301c2f4a51241",
+          "integrity": {
+            "root_hash": "29b3a10ecbf6c1dd47a4837cbb9c0cb2a0c32a7ae10d628e94d608a220626d2a"
+          },
+          "note": "qpb purge -> purged",
+          "state": "in_review",
+          "timestamp": "2026-05-29T19:19:41.607446"
+        },
+        {
+          "action": "resolve",
+          "actor": "operator",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "incident_id": "incident:79a301c2f4a51241",
+          "integrity": {
+            "root_hash": "3c1968fd1f632fb5c602f7eb22715350b6b7845660097dcaef7a9ecab05038ca"
+          },
+          "note": "qpb bless completed",
+          "state": "resolved",
+          "timestamp": "2026-05-29T19:19:41.857096"
+        }
+      ],
+      "id": "incident:79a301c2f4a51241",
+      "metadata": {
+        "domain": "agent_firewall",
+        "policy_decision_id": "policy_decision:880b55ea4a76b95f",
+        "surface": "process_integrity_collector"
+      },
+      "next_action": "inspect lineage",
+      "notification_type": "incident_action_required",
+      "objective_id": null,
+      "resolved_at": "2026-05-29T19:19:41.857089",
+      "session_id": "runtime-global",
+      "severity": "warning",
+      "source_event_id": "domain_event:06bda7311b974be4",
+      "status": "resolved",
+      "summary": "agent_firewall/process_integrity_collector: process_file_integrity_suspicion",
+      "title": "process_file_integrity_suspicion",
+      "updated_at": "2026-05-29T19:19:41.857089"
+    },
+    "objective_id": "None",
+    "outcome": {
+      "action": "bless",
+      "actor": "operator",
+      "details": {
+        "trust_reset": true
+      },
+      "integrity_root_hash": "453f710c4d446df2cdf111b6b0657a22765fe204c6ecbd1e88c913bcc533b3e4",
+      "note": "",
+      "status": "blessed",
+      "timestamp": "2026-05-29T19:19:41.664729"
+    },
+    "proposal": {
+      "applied_at": "2026-05-29T19:19:41.029089",
+      "created_at": "2026-05-29T19:19:38.420888",
+      "evidence_refs": [
+        "local://cleanhouse/process/1223",
+        "local://cleanhouse/pattern/agent/agent",
+        "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+        "local://cleanhouse/integrity/9b9ecd4289707b65",
+        "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+        "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+      ],
+      "id": "proposal:bbc3ad934499a135",
+      "metadata": {
+        "applied_ops": [
+          {
+            "op": "write_file",
+            "path": "alpha2.txt"
+          }
+        ],
+        "incident_id": "incident:79a301c2f4a51241",
+        "repo_path": "/private/tmp/cleanhouse-runtime-validation",
+        "synthetic": false,
+        "undo_records": [
+          {
+            "before_content_b64": "YWxwaGEtbW9kaWZpZWQK",
+            "before_exists": true,
+            "op": "write_file",
+            "path": "alpha2.txt"
+          }
+        ],
+        "workflow": "standalone_incident_receipt"
+      },
+      "objective_id": null,
+      "operations": [
+        {
+          "content": "standalone_incident_receipt=true\nsession_id=runtime-global\nsignal_source=process_integrity_collector\nsignal_pid=1223\nsignal_process=/Applications/ChatGPT Atlas.app/Contents/Support/ChatGPT Atlas.app/Contents/Frameworks/ChatGPT Atlas Framework.framework/Versions/148.0.7778.97/Helpers/ChatGPT Atlas (Renderer).app/Contents/MacOS/ChatGPT Atlas (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host --owl-scoped-user-agent-additional-hosts=chatgpt.com,openai.com --owl-scoped-user-agent-prefix=ChatGPTBrowser --start-stack-profiler --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=11 --time-ticks-at-unix-epoch=-1780094726252666 --disable-mojo-broker --launch-time-ticks=49923961 --shared-files --metrics-shmem-handle=1752395122,r,5090460534584643833,2746783205465606650,2097152 --field-trial-handle=1718379636,r,13778692355036748195,2777712338190784541,262144 --enable-features=OwlBoostTitleMatches,OwlMergeSimilarUrls --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17258449132921639261,2360427088180783380,4 --trace-process-track-uuid=3190708996619331833 --enable-logging --log-file=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host/debug.log --seatbelt-client=119\nsuspicion_reason=process 1223 (/Applications/ChatGPT Atlas.app/Contents/Support/ChatGPT Atlas.app/Contents/Frameworks/ChatGPT Atlas Framework.framework/Versions/148.0.7778.97/Helpers/ChatGPT Atlas (Renderer).app/Contents/MacOS/ChatGPT Atlas (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host --owl-scoped-user-agent-additional-hosts=chatgpt.com,openai.com --owl-scoped-user-agent-prefix=ChatGPTBrowser --start-stack-profiler --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=11 --time-ticks-at-unix-epoch=-1780094726252666 --disable-mojo-broker --launch-time-ticks=49923961 --shared-files --metrics-shmem-handle=1752395122,r,5090460534584643833,2746783205465606650,2097152 --field-trial-handle=1718379636,r,13778692355036748195,2777712338190784541,262144 --enable-features=OwlBoostTitleMatches,OwlMergeSimilarUrls --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17258449132921639261,2360427088180783380,4 --trace-process-track-uuid=3190708996619331833 --enable-logging --log-file=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host/debug.log --seatbelt-client=119) correlated with integrity modified on alpha2.txt\ncreated_at=2026-05-29T19:19:37.791204\n",
+          "op": "write_file",
+          "path": "alpha2.txt"
+        }
+      ],
+      "proposal_type": "incident_receipt_stage",
+      "reason": "incident receipt file-integrity marker staged for mediation evidence",
+      "rollback_id": "op_rollback:df9fa819ae02e175",
+      "session_id": "runtime-global",
+      "status": "applied",
+      "target_scope": {
+        "paths": [
+          "alpha2.txt"
+        ],
+        "process_pids": [
+          1223
+        ]
+      },
+      "undone_at": null,
+      "updated_at": "2026-05-29T19:19:41.029089"
+    },
+    "qpb_case": {
+      "created_at": "2026-05-29T19:19:41.089014",
+      "evidence_refs": [
+        "local://cleanhouse/process/1223",
+        "local://cleanhouse/pattern/agent/agent",
+        "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+        "local://cleanhouse/integrity/9b9ecd4289707b65",
+        "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+        "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+      ],
+      "history": [
+        {
+          "action": "detected",
+          "actor": "operator",
+          "case_id": "qpb_case:9717c514d196509e",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "integrity": {
+            "root_hash": "ba1671b4cfb2828f6f0b8ef1ddb012842bdc325523a94b097122316a56201f07"
+          },
+          "metadata": {
+            "source": "incident_receipt"
+          },
+          "status": "detected",
+          "target_scope": {
+            "paths": [
+              "alpha2.txt"
+            ],
+            "process_pids": [
+              1223
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:41.089047"
+        },
+        {
+          "action": "quarantine",
+          "actor": "operator",
+          "case_id": "qpb_case:9717c514d196509e",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "integrity": {
+            "root_hash": "64b53233b7a191af43428ebb3cf260c853611560fee174e649c6541cee920cb6"
+          },
+          "metadata": {},
+          "status": "quarantined",
+          "target_scope": {
+            "paths": [
+              "alpha2.txt"
+            ],
+            "process_pids": [
+              1223
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:41.149762"
+        },
+        {
+          "action": "purge",
+          "actor": "operator",
+          "case_id": "qpb_case:9717c514d196509e",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "integrity": {
+            "root_hash": "63d8b969896f7455e6bd0c12b3a1a2f183491911f5664681224885e58246ddda"
+          },
+          "metadata": {
+            "process_results": [
+              {
+                "error": "",
+                "killed": true,
+                "pid": 1223
+              }
+            ],
+            "removed_paths": [
+              "alpha2.txt"
+            ],
+            "undo_records": [
+              {
+                "before_content_b64": "c3RhbmRhbG9uZV9pbmNpZGVudF9yZWNlaXB0PXRydWUKc2Vzc2lvbl9pZD1ydW50aW1lLWdsb2JhbApzaWduYWxfc291cmNlPXByb2Nlc3NfaW50ZWdyaXR5X2NvbGxlY3RvcgpzaWduYWxfcGlkPTEyMjMKc2lnbmFsX3Byb2Nlc3M9L0FwcGxpY2F0aW9ucy9DaGF0R1BUIEF0bGFzLmFwcC9Db250ZW50cy9TdXBwb3J0L0NoYXRHUFQgQXRsYXMuYXBwL0NvbnRlbnRzL0ZyYW1ld29ya3MvQ2hhdEdQVCBBdGxhcyBGcmFtZXdvcmsuZnJhbWV3b3JrL1ZlcnNpb25zLzE0OC4wLjc3NzguOTcvSGVscGVycy9DaGF0R1BUIEF0bGFzIChSZW5kZXJlcikuYXBwL0NvbnRlbnRzL01hY09TL0NoYXRHUFQgQXRsYXMgKFJlbmRlcmVyKSAtLXR5cGU9cmVuZGVyZXIgLS11c2VyLWRhdGEtZGlyPS9Vc2Vycy9kZXZvbndvb2Rzb24vTGlicmFyeS9BcHBsaWNhdGlvbiBTdXBwb3J0L2NvbS5vcGVuYWkuYXRsYXMvYnJvd3Nlci1kYXRhL2hvc3QgLS1vd2wtc2NvcGVkLXVzZXItYWdlbnQtYWRkaXRpb25hbC1ob3N0cz1jaGF0Z3B0LmNvbSxvcGVuYWkuY29tIC0tb3dsLXNjb3BlZC11c2VyLWFnZW50LXByZWZpeD1DaGF0R1BUQnJvd3NlciAtLXN0YXJ0LXN0YWNrLXByb2ZpbGVyIC0tbGFuZz1lbi1VUyAtLW51bS1yYXN0ZXItdGhyZWFkcz00IC0tZW5hYmxlLXplcm8tY29weSAtLWVuYWJsZS1ncHUtbWVtb3J5LWJ1ZmZlci1jb21wb3NpdG9yLXJlc291cmNlcyAtLWVuYWJsZS1tYWluLWZyYW1lLWJlZm9yZS1hY3RpdmF0aW9uIC0tcmVuZGVyZXItY2xpZW50LWlkPTExIC0tdGltZS10aWNrcy1hdC11bml4LWVwb2NoPS0xNzgwMDk0NzI2MjUyNjY2IC0tZGlzYWJsZS1tb2pvLWJyb2tlciAtLWxhdW5jaC10aW1lLXRpY2tzPTQ5OTIzOTYxIC0tc2hhcmVkLWZpbGVzIC0tbWV0cmljcy1zaG1lbS1oYW5kbGU9MTc1MjM5NTEyMixyLDUwOTA0NjA1MzQ1ODQ2NDM4MzMsMjc0Njc4MzIwNTQ2NTYwNjY1MCwyMDk3MTUyIC0tZmllbGQtdHJpYWwtaGFuZGxlPTE3MTgzNzk2MzYsciwxMzc3ODY5MjM1NTAzNjc0ODE5NSwyNzc3NzEyMzM4MTkwNzg0NTQxLDI2MjE0NCAtLWVuYWJsZS1mZWF0dXJlcz1Pd2xCb29zdFRpdGxlTWF0Y2hlcyxPd2xNZXJnZVNpbWlsYXJVcmxzIC0tdmFyaWF0aW9ucy1zZWVkLXZlcnNpb24gLS1wc2V1ZG9ueW1pemF0aW9uLXNhbHQtaGFuZGxlPTE5MzU3NjQ1OTYsciwxNzI1ODQ0OTEzMjkyMTYzOTI2MSwyMzYwNDI3MDg4MTgwNzgzMzgwLDQgLS10cmFjZS1wcm9jZXNzLXRyYWNrLXV1aWQ9MzE5MDcwODk5NjYxOTMzMTgzMyAtLWVuYWJsZS1sb2dnaW5nIC0tbG9nLWZpbGU9L1VzZXJzL2Rldm9ud29vZHNvbi9MaWJyYXJ5L0FwcGxpY2F0aW9uIFN1cHBvcnQvY29tLm9wZW5haS5hdGxhcy9icm93c2VyLWRhdGEvaG9zdC9kZWJ1Zy5sb2cgLS1zZWF0YmVsdC1jbGllbnQ9MTE5CnN1c3BpY2lvbl9yZWFzb249cHJvY2VzcyAxMjIzICgvQXBwbGljYXRpb25zL0NoYXRHUFQgQXRsYXMuYXBwL0NvbnRlbnRzL1N1cHBvcnQvQ2hhdEdQVCBBdGxhcy5hcHAvQ29udGVudHMvRnJhbWV3b3Jrcy9DaGF0R1BUIEF0bGFzIEZyYW1ld29yay5mcmFtZXdvcmsvVmVyc2lvbnMvMTQ4LjAuNzc3OC45Ny9IZWxwZXJzL0NoYXRHUFQgQXRsYXMgKFJlbmRlcmVyKS5hcHAvQ29udGVudHMvTWFjT1MvQ2hhdEdQVCBBdGxhcyAoUmVuZGVyZXIpIC0tdHlwZT1yZW5kZXJlciAtLXVzZXItZGF0YS1kaXI9L1VzZXJzL2Rldm9ud29vZHNvbi9MaWJyYXJ5L0FwcGxpY2F0aW9uIFN1cHBvcnQvY29tLm9wZW5haS5hdGxhcy9icm93c2VyLWRhdGEvaG9zdCAtLW93bC1zY29wZWQtdXNlci1hZ2VudC1hZGRpdGlvbmFsLWhvc3RzPWNoYXRncHQuY29tLG9wZW5haS5jb20gLS1vd2wtc2NvcGVkLXVzZXItYWdlbnQtcHJlZml4PUNoYXRHUFRCcm93c2VyIC0tc3RhcnQtc3RhY2stcHJvZmlsZXIgLS1sYW5nPWVuLVVTIC0tbnVtLXJhc3Rlci10aHJlYWRzPTQgLS1lbmFibGUtemVyby1jb3B5IC0tZW5hYmxlLWdwdS1tZW1vcnktYnVmZmVyLWNvbXBvc2l0b3ItcmVzb3VyY2VzIC0tZW5hYmxlLW1haW4tZnJhbWUtYmVmb3JlLWFjdGl2YXRpb24gLS1yZW5kZXJlci1jbGllbnQtaWQ9MTEgLS10aW1lLXRpY2tzLWF0LXVuaXgtZXBvY2g9LTE3ODAwOTQ3MjYyNTI2NjYgLS1kaXNhYmxlLW1vam8tYnJva2VyIC0tbGF1bmNoLXRpbWUtdGlja3M9NDk5MjM5NjEgLS1zaGFyZWQtZmlsZXMgLS1tZXRyaWNzLXNobWVtLWhhbmRsZT0xNzUyMzk1MTIyLHIsNTA5MDQ2MDUzNDU4NDY0MzgzMywyNzQ2NzgzMjA1NDY1NjA2NjUwLDIwOTcxNTIgLS1maWVsZC10cmlhbC1oYW5kbGU9MTcxODM3OTYzNixyLDEzNzc4NjkyMzU1MDM2NzQ4MTk1LDI3Nzc3MTIzMzgxOTA3ODQ1NDEsMjYyMTQ0IC0tZW5hYmxlLWZlYXR1cmVzPU93bEJvb3N0VGl0bGVNYXRjaGVzLE93bE1lcmdlU2ltaWxhclVybHMgLS12YXJpYXRpb25zLXNlZWQtdmVyc2lvbiAtLXBzZXVkb255bWl6YXRpb24tc2FsdC1oYW5kbGU9MTkzNTc2NDU5NixyLDE3MjU4NDQ5MTMyOTIxNjM5MjYxLDIzNjA0MjcwODgxODA3ODMzODAsNCAtLXRyYWNlLXByb2Nlc3MtdHJhY2stdXVpZD0zMTkwNzA4OTk2NjE5MzMxODMzIC0tZW5hYmxlLWxvZ2dpbmcgLS1sb2ctZmlsZT0vVXNlcnMvZGV2b253b29kc29uL0xpYnJhcnkvQXBwbGljYXRpb24gU3VwcG9ydC9jb20ub3BlbmFpLmF0bGFzL2Jyb3dzZXItZGF0YS9ob3N0L2RlYnVnLmxvZyAtLXNlYXRiZWx0LWNsaWVudD0xMTkpIGNvcnJlbGF0ZWQgd2l0aCBpbnRlZ3JpdHkgbW9kaWZpZWQgb24gYWxwaGEyLnR4dApjcmVhdGVkX2F0PTIwMjYtMDUtMjlUMTk6MTk6MzcuNzkxMjA0Cg==",
+                "before_exists": true,
+                "before_is_dir": false,
+                "path": "alpha2.txt"
+              }
+            ]
+          },
+          "status": "purged",
+          "target_scope": {
+            "paths": [
+              "alpha2.txt"
+            ],
+            "process_pids": [
+              1223
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:41.415130"
+        },
+        {
+          "action": "bless",
+          "actor": "operator",
+          "case_id": "qpb_case:9717c514d196509e",
+          "evidence_refs": [
+            "local://cleanhouse/process/1223",
+            "local://cleanhouse/pattern/agent/agent",
+            "local://cleanhouse/evidence/processes:6283cad8cbedcf88.json",
+            "local://cleanhouse/integrity/9b9ecd4289707b65",
+            "local://cleanhouse/evidence/integrity:c73d1cb32d3163d1.json",
+            "local://cleanhouse/correlation/process-integrity/8e975dcfd28d5f3e"
+          ],
+          "integrity": {
+            "root_hash": "453f710c4d446df2cdf111b6b0657a22765fe204c6ecbd1e88c913bcc533b3e4"
+          },
+          "metadata": {
+            "trust_reset": true
+          },
+          "status": "blessed",
+          "target_scope": {
+            "paths": [
+              "alpha2.txt"
+            ],
+            "process_pids": [
+              1223
+            ]
+          },
+          "timestamp": "2026-05-29T19:19:41.664729"
+        }
+      ],
+      "id": "qpb_case:9717c514d196509e",
+      "metadata": {
+        "incident_id": "incident:79a301c2f4a51241",
+        "proposal_id": "proposal:bbc3ad934499a135",
+        "repo_path": "/private/tmp/cleanhouse-runtime-validation",
+        "signal_pid": 1223,
+        "signal_process": "/Applications/ChatGPT Atlas.app/Contents/Support/ChatGPT Atlas.app/Contents/Frameworks/ChatGPT Atlas Framework.framework/Versions/148.0.7778.97/Helpers/ChatGPT Atlas (Renderer).app/Contents/MacOS/ChatGPT Atlas (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host --owl-scoped-user-agent-additional-hosts=chatgpt.com,openai.com --owl-scoped-user-agent-prefix=ChatGPTBrowser --start-stack-profiler --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=11 --time-ticks-at-unix-epoch=-1780094726252666 --disable-mojo-broker --launch-time-ticks=49923961 --shared-files --metrics-shmem-handle=1752395122,r,5090460534584643833,2746783205465606650,2097152 --field-trial-handle=1718379636,r,13778692355036748195,2777712338190784541,262144 --enable-features=OwlBoostTitleMatches,OwlMergeSimilarUrls --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17258449132921639261,2360427088180783380,4 --trace-process-track-uuid=3190708996619331833 --enable-logging --log-file=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host/debug.log --seatbelt-client=119",
+        "signal_source": "process_integrity_collector",
+        "suspicion_reason": "process 1223 (/Applications/ChatGPT Atlas.app/Contents/Support/ChatGPT Atlas.app/Contents/Frameworks/ChatGPT Atlas Framework.framework/Versions/148.0.7778.97/Helpers/ChatGPT Atlas (Renderer).app/Contents/MacOS/ChatGPT Atlas (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host --owl-scoped-user-agent-additional-hosts=chatgpt.com,openai.com --owl-scoped-user-agent-prefix=ChatGPTBrowser --start-stack-profiler --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=11 --time-ticks-at-unix-epoch=-1780094726252666 --disable-mojo-broker --launch-time-ticks=49923961 --shared-files --metrics-shmem-handle=1752395122,r,5090460534584643833,2746783205465606650,2097152 --field-trial-handle=1718379636,r,13778692355036748195,2777712338190784541,262144 --enable-features=OwlBoostTitleMatches,OwlMergeSimilarUrls --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17258449132921639261,2360427088180783380,4 --trace-process-track-uuid=3190708996619331833 --enable-logging --log-file=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host/debug.log --seatbelt-client=119) correlated with integrity modified on alpha2.txt",
+        "synthetic": false,
+        "workflow": "standalone_incident_receipt"
+      },
+      "objective_id": "None",
+      "session_id": "runtime-global",
+      "status": "blessed",
+      "target_scope": {
+        "paths": [
+          "alpha2.txt"
+        ],
+        "process_pids": [
+          1223
+        ]
+      },
+      "updated_at": "2026-05-29T19:19:41.664726"
+    },
+    "session_id": "runtime-global",
+    "suspicion": {
+      "process_pids": [
+        1223
+      ],
+      "reason": "process 1223 (/Applications/ChatGPT Atlas.app/Contents/Support/ChatGPT Atlas.app/Contents/Frameworks/ChatGPT Atlas Framework.framework/Versions/148.0.7778.97/Helpers/ChatGPT Atlas (Renderer).app/Contents/MacOS/ChatGPT Atlas (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host --owl-scoped-user-agent-additional-hosts=chatgpt.com,openai.com --owl-scoped-user-agent-prefix=ChatGPTBrowser --start-stack-profiler --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=11 --time-ticks-at-unix-epoch=-1780094726252666 --disable-mojo-broker --launch-time-ticks=49923961 --shared-files --metrics-shmem-handle=1752395122,r,5090460534584643833,2746783205465606650,2097152 --field-trial-handle=1718379636,r,13778692355036748195,2777712338190784541,262144 --enable-features=OwlBoostTitleMatches,OwlMergeSimilarUrls --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17258449132921639261,2360427088180783380,4 --trace-process-track-uuid=3190708996619331833 --enable-logging --log-file=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host/debug.log --seatbelt-client=119) correlated with integrity modified on alpha2.txt",
+      "signal_pid": 1223,
+      "signal_process": "/Applications/ChatGPT Atlas.app/Contents/Support/ChatGPT Atlas.app/Contents/Frameworks/ChatGPT Atlas Framework.framework/Versions/148.0.7778.97/Helpers/ChatGPT Atlas (Renderer).app/Contents/MacOS/ChatGPT Atlas (Renderer) --type=renderer --user-data-dir=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host --owl-scoped-user-agent-additional-hosts=chatgpt.com,openai.com --owl-scoped-user-agent-prefix=ChatGPTBrowser --start-stack-profiler --lang=en-US --num-raster-threads=4 --enable-zero-copy --enable-gpu-memory-buffer-compositor-resources --enable-main-frame-before-activation --renderer-client-id=11 --time-ticks-at-unix-epoch=-1780094726252666 --disable-mojo-broker --launch-time-ticks=49923961 --shared-files --metrics-shmem-handle=1752395122,r,5090460534584643833,2746783205465606650,2097152 --field-trial-handle=1718379636,r,13778692355036748195,2777712338190784541,262144 --enable-features=OwlBoostTitleMatches,OwlMergeSimilarUrls --variations-seed-version --pseudonymization-salt-handle=1935764596,r,17258449132921639261,2360427088180783380,4 --trace-process-track-uuid=3190708996619331833 --enable-logging --log-file=/Users/devonwoodson/Library/Application Support/com.openai.atlas/browser-data/host/debug.log --seatbelt-client=119",
+      "signal_source": "process_integrity_collector",
+      "target_path": "alpha2.txt",
+      "target_paths": [
+        "alpha2.txt"
+      ],
+      "title": "Agent Firewall + File Integrity Suspicion"
+    },
+    "workflow": "standalone_incident_receipt"
+  },
+  "status": "ok"
+}

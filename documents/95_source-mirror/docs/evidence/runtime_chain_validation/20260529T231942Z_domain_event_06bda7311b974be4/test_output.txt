@@ -1,0 +1,13 @@
+lab_cleaned=2026-05-29T23:19:35.012772+00:00
+prepared
+baseline_rc=0
+process_started name=cursor-agent pid=15180
+mutation_applied file=alpha2.txt change=modified
+event_id=domain_event:06bda7311b974be4
+incident_id=incident:79a301c2f4a51241
+receipt_create_http=200
+receipt_create_status=ok
+case_id=qpb_case:9717c514d196509e
+action=quarantine http=200 status=ok
+action=purge http=200 status=ok
+action=bless http=200 status=ok

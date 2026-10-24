@@ -1,0 +1,10 @@
+{
+  "event_id": "domain_event:a1f6c050cbfb6bcb",
+  "incident_id": "incident:717085848c8c1cbe",
+  "receipt_id": "incident_receipt:qpb_case:e0d79972035670a1",
+  "session_id": "runtime-global",
+  "timestamps": {
+    "captured_at_utc": "2026-05-29T23:18:35.468896+00:00",
+    "run_folder_timestamp_utc": "20260529T231835Z"
+  }
+}

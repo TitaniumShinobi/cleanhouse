@@ -1,0 +1,8 @@
+{
+  "status": "ok",
+  "blocker": "evidence_signing",
+  "objective": "signed custody-aware evidence manifest and offline verification",
+  "implemented": true,
+  "tests_passed": true,
+  "evidence_generated": true
+}

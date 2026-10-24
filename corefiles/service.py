@@ -42,8 +42,8 @@ from corefiles.notifications import NotificationManager
 if WINDOWS_AVAILABLE:
     class CleanHouseService(win32serviceutil.ServiceFramework):
         _svc_name_ = "CleanHouseService"
-        _svc_display_name_ = "CleanHouse Security Service"
-        _svc_description_ = "Monitors and protects against unauthorized AI processes"
+        _svc_display_name_ = "CleanHouse Observability Service"
+        _svc_description_ = "Monitors local process, file integrity, and network signals"
 
         def __init__(self, args):
             win32serviceutil.ServiceFramework.__init__(self, args)
@@ -123,8 +123,8 @@ def install_service():
         win32serviceutil.InstallService(
             pythonClassString = "corefiles.service.CleanHouseService",
             serviceName = "CleanHouseService",
-            displayName = "CleanHouse Security Service",
-            description = "Monitors and protects against unauthorized AI processes",
+            displayName = "CleanHouse Observability Service",
+            description = "Monitors local process, file integrity, and network signals",
             startType = win32service.SERVICE_AUTO_START
         )
         print("Service installed successfully")

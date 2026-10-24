@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CleanHouse Advanced Monitor</title>
+<link rel="stylesheet" href="/css/dashboard.css?v=1">
+<link rel="stylesheet" href="/css/settings.css?v=1">
+</head>
+<body>
+<header>
+    <span class="logo-icon">CH</span>
+    <h1>CleanHouse Advanced Monitor</h1>
+    <div class="controls">
+        <select id="session-select" onchange="onSessionChange()">
+            <option value="">— Select session —</option>
+        </select>
+        <button onclick="refreshAll()">⟳ Refresh</button>
+        <label>
+            <input type="checkbox" id="auto-refresh" onchange="toggleAutoRefresh()">
+            Auto-refresh
+        </label>
+        <a class="control-link" href="/overview" title="Open CleanHouse overview">Overview</a>
+        <a class="control-link" href="/account/delete" title="Manage local account deletion">Account</a>
+        <button id="report-btn" onclick="openReportPanel()" title="Generate report for current session">⚑ Report</button>
+        <button id="settings-open-button" onclick="openSettingsPanel()" title="Open CleanHouse settings" aria-haspopup="dialog" aria-controls="settings-modal">⚙ Settings</button>
+    </div>
+</header>
+
+<div id="status-banner" class="clear">
+    <span class="dot"></span>
+    <span id="status-text">Loading session data...</span>
+</div>
+
+<section class="workstation" id="operator-workstation">
+    <div class="session-bar" id="session-bar">
+        <div class="session-state">
+            <span class="session-label">Session</span>
+            <strong id="operator-session-id">none</strong>
+            <span class="session-status" id="operator-session-status">stopped</span>
+            <span class="runtime-indicator runtime-idle" id="runtime-indicator" title="Evidence-derived runtime state">
+                <span class="runtime-dot"></span>
+                <span id="runtime-indicator-text">idle</span>
+            </span>
+            <span class="runtime-detail" id="runtime-indicator-detail">unavailable</span>
+        </div>
+        <div class="session-actions">
+            <input id="operator-session-input" type="text" autocomplete="off" spellcheck="false" aria-label="Session ID">
+            <button id="session-start-btn" onclick="startSelectedSession()">Start</button>
+            <button id="session-stop-btn" onclick="stopSelectedSession(false)">Stop</button>
+            <button id="session-finalize-btn" onclick="stopSelectedSession(true)">Finalize</button>
+            <button id="active-context-follow-btn" onclick="toggleActiveContextFollow()">Follow Active Work</button>
+            <button id="notification-enable-btn" onclick="requestDashboardNotificationPermission()">Enable Browser Notifications (Dashboard Notifications)</button>
+        </div>
+    </div>
+
+    <form class="objective-declaration" id="objective-declaration-form" onsubmit="declareObjective(event)">
+        <div class="objective-fields">
+            <label>
+                <span>Objective</span>
+                <input id="objective-text" type="text" placeholder="Describe the requested change">
+            </label>
+            <label>
+                <span>Declared Scope</span>
+                <input id="objective-scope" type="text" placeholder="Allowed path or scope">
+            </label>
+            <label>
+                <span>Context</span>
+                <input id="objective-context" type="text" placeholder="Session context">
+            </label>
+            <label>
+                <span>Tool</span>
+                <select id="objective-tool">
+                    <option value="codex">codex</option>
+                    <option value="cursor">cursor</option>
+                    <option value="opencode">opencode</option>
+                    <option value="copilot">copilot</option>
+                </select>
+            </label>
+        </div>
+        <div class="objective-actions">
+            <button id="declare-objective-btn" type="submit">Declare Objective</button>
+            <div id="objective-declare-result" class="objective-result"></div>
+        </div>
+    </form>
+
+    <div class="workstation-grid">
+        <section class="workstation-panel presence-panel" id="operational-presence-panel">
+            <h2>Operational Presence <span class="count" id="operational-presence-state">unknown</span></h2>
+            <div class="workstation-body" id="operational-presence-body"></div>
+        </section>
+        <section class="workstation-panel active-context-panel" id="active-context-panel">
+            <h2>Active Work Context <span class="count" id="active-context-state">missing</span></h2>
+            <div class="workstation-body" id="active-context-body"></div>
+        </section>
+        <section class="workstation-panel native-report-panel" id="native-report-panel">
+            <h2>Native Reports / Since Last Login <span class="count" id="native-report-count">0</span></h2>
+            <div class="workstation-body" id="native-report-body"></div>
+        </section>
+        <section class="workstation-panel" id="runtime-presence-panel">
+            <h2>Runtime Spine / Native Presence <span class="count" id="runtime-presence-count">0</span></h2>
+            <div class="workstation-body" id="runtime-presence-body"></div>
+        </section>
+        <section class="workstation-panel continuity-panel" id="continuity-provenance-panel">
+            <h2>Continuity Provenance <span class="count" id="continuity-provenance-state">unknown</span></h2>
+            <div class="workstation-body" id="continuity-provenance-body"></div>
+        </section>
+        <section class="workstation-panel" id="objective-feed-panel">
+            <h2>Live Objective Feed <span class="count" id="objective-feed-count">0</span></h2>
+            <div class="workstation-body" id="objective-feed-body"></div>
+        </section>
+        <section class="workstation-panel" id="mutation-stream-panel">
+            <h2>Mutation Stream / Latest Local <span class="count" id="mutation-stream-count">0</span></h2>
+            <div class="workstation-body" id="mutation-stream-body"></div>
+        </section>
+        <section class="workstation-panel" id="task-manager-panel">
+            <h2>Universal Task Manager <span class="count" id="task-manager-count">0</span></h2>
+            <div class="workstation-body" id="task-manager-body"></div>
+        </section>
+        <section class="workstation-panel" id="port-monitor-panel">
+            <h2>Port Monitor <span class="count" id="port-monitor-count">0</span></h2>
+            <div class="workstation-body" id="port-monitor-body"></div>
+        </section>
+        <section class="workstation-panel" id="file-lineage-panel">
+            <h2>File Lineage (Who/What/Where/When) <span class="count" id="file-lineage-count">0</span></h2>
+            <div class="workstation-body" id="file-lineage-body"></div>
+        </section>
+        <section class="workstation-panel" id="minimal-workflow-panel">
+            <h2>Minimal Control Workflow <span class="count" id="minimal-workflow-state">idle</span></h2>
+            <div class="workstation-body" id="minimal-workflow-body"></div>
+        </section>
+        <section class="workstation-panel" id="qpb-queue-panel">
+            <h2>QPB Action Queue <span class="count" id="qpb-queue-count">0</span></h2>
+            <div class="workstation-body" id="qpb-queue-body"></div>
+        </section>
+        <section class="workstation-panel" id="mediator-queue-panel">
+            <h2>Mediator Queue (Keep Changes + Undo) <span class="count" id="mediator-queue-count">0</span></h2>
+            <div class="workstation-body" id="mediator-queue-body"></div>
+        </section>
+        <section class="workstation-panel" id="deviation-alert-panel">
+            <h2>Deviation Alerts <span class="count" id="deviation-alert-count">0</span></h2>
+            <div class="workstation-body" id="deviation-alert-body"></div>
+        </section>
+        <section class="workstation-panel" id="approval-required-panel">
+            <h2>Approval Required / Pending <span class="count" id="approval-required-count">0</span></h2>
+            <div class="workstation-body" id="approval-required-body"></div>
+        </section>
+        <section class="workstation-panel" id="receipt-replay-panel">
+            <h2>Receipt Replay <span class="count" id="receipt-replay-count">0</span></h2>
+            <div class="workstation-body" id="receipt-replay-body"></div>
+        </section>
+        <section class="workstation-panel" id="notification-tray-panel">
+            <h2>Notification Center (Live Alerts) <span class="count" id="notification-tray-count">0</span></h2>
+            <div class="workstation-body" id="notification-tray"></div>
+        </section>
+        <section class="workstation-panel tier1-panel" id="collector-manifest-panel">
+            <h2>Collector Manifest / Health <span class="count" id="collector-manifest-count">0</span></h2>
+            <div class="workstation-body" id="collector-manifest-body"></div>
+        </section>
+        <section class="workstation-panel tier1-panel" id="lineage-graph-panel">
+            <h2>Session Evidence Links <span class="count" id="lineage-graph-count">0</span></h2>
+            <div class="workstation-body" id="lineage-graph-body"></div>
+        </section>
+        <section class="workstation-panel tier1-panel" id="rollback-replay-panel">
+            <h2>Rollback Replay State / Signature <span class="count" id="rollback-replay-count">0</span></h2>
+            <div class="workstation-body" id="rollback-replay-body"></div>
+        </section>
+        <section class="workstation-panel tier1-panel" id="operator-verification-panel">
+            <h2>HTTP Evidence Snapshot / Gaps <span class="count" id="operator-verification-count">0</span></h2>
+            <div class="workstation-body" id="operator-verification-body"></div>
+        </section>
+    </div>
+</section>
+
+<main>
+    <section class="panel" id="timeline-panel">
+        <h2>Timeline <span class="count" id="tl-count">0</span></h2>
+        <div class="panel-body" id="tl-body">
+            <div class="empty-state">
+                <div class="icon">⏱</div>
+                <div>No timeline events recorded for this session.</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="panel" id="filesystem-events-panel">
+        <h2>Observed Filesystem Events <span class="count" id="fs-event-count">0</span></h2>
+        <div class="panel-body" id="fs-events-body">
+            <div class="empty-state">
+                <div class="icon">🖿</div>
+                <div>No observed filesystem events yet.</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="panel" id="alerts-panel">
+        <h2>Alerts <span class="count" id="alert-count">0</span></h2>
+        <div class="panel-body" id="alert-body">
+            <div class="empty-state">
+                <div class="icon">⚑</div>
+                <div>No alerts generated for this session.</div>
+            </div>
+        </div>
+    </section>
+
+    <section class="panel" id="receipt-scope-panel">
+        <h2>Receipt Scope <span class="count" id="scope-cluster-count">0</span></h2>
+        <div class="panel-body" id="receipt-scope-body">
+            <div class="empty-state">
+                <div class="icon">⌁</div>
+                <div>No receipt scope evidence recorded for this session.</div>
+            </div>
+        </div>
+    </section>
+</main>
+
+<div id="report-modal" class="modal-overlay" style="display:none">
+    <div class="modal-card">
+        <div class="modal-header">
+            <span>⚑ Report Observed Behavior</span>
+            <button class="modal-close" onclick="closeReportPanel()">✕</button>
+        </div>
+        <div class="modal-body" id="report-body"></div>
+        <div class="modal-footer" id="report-footer"></div>
+    </div>
+</div>
+
+<div id="settings-modal" class="modal-overlay settings-overlay" hidden>
+    <div class="modal-card modal-card-wide settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" aria-describedby="settings-description">
+        <div class="modal-header">
+            <div>
+                <span id="settings-title">⚙ CleanHouse Settings</span>
+                <p id="settings-description" class="settings-description">Manage this Mac's antivirus access and local controls.</p>
+            </div>
+            <button class="modal-close" type="button" onclick="closeSettingsPanel()" aria-label="Close settings">✕</button>
+        </div>
+        <div class="settings-layout">
+            <nav id="settings-tabs" class="settings-tabs" role="tablist" aria-label="Settings sections"></nav>
+            <div class="modal-body settings-panel" id="settings-body" role="tabpanel" tabindex="0" aria-live="polite">
+                <p class="loading">Loading settings...</p>
+            </div>
+        </div>
+        <div class="modal-footer" id="settings-footer"></div>
+    </div>
+</div>
+
+<script src="/js/click-trace.js?v=1"></script>
+<script src="/js/api-client.js?v=1"></script>
+<script src="/js/dashboard.js?v=1"></script>
+<script src="/js/settings.js?v=1"></script>
+</body>
+</html>

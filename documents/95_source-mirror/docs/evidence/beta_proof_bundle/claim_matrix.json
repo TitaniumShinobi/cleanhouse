@@ -1,0 +1,20 @@
+[
+  {
+    "claim": "Events API creation/persistence/retrieval paths are executable in current runtime",
+    "evidence_ref": "tests/test_events_api.py",
+    "implemented": true,
+    "verified": true
+  },
+  {
+    "claim": "Deterministic prompt->mutation->timeline->receipt->replay->bundle chain exists",
+    "evidence_ref": "beta_proof_chain.json",
+    "implemented": true,
+    "verified": true
+  },
+  {
+    "claim": "Retention cleanup is auditable with actor/time/reason",
+    "evidence_ref": "tests/test_cleanhouse_monitoring_api.py::test_prune_deterministic_auditable",
+    "implemented": true,
+    "verified": true
+  }
+]

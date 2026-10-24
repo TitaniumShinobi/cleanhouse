@@ -1,0 +1,130 @@
+CLEANHOUSE Rubric v1 (Evidence-First)
+
+Summary
+-------
+CleanHouse is a local-first, read-oriented runtime accountability platform for AI-assisted software execution.
+Its output is machine-auditable evidence of observed behavior, not interpretation of latent intent.
+Future work must preserve the contract: observe -> correlate -> explain -> cite evidence, with explicit uncertainty.
+
+1) Product Boundaries
+---------------------
+1.1 CleanHouse SHALL be a local process, file, network, and agent-behavior observability system for local developer environments.
+1.2 CleanHouse SHALL NOT be an AGI governance layer, intent oracle, truth oracle, or model-mental-state detector.
+1.3 CleanHouse MAY provide read-only enforcement hooks only in explicitly scoped future phases; v1 is observer-first.
+
+2) Canonical Terms (Hard Requirement)
+--------------------------------------
+Allowed terms: `CleanHouse`, `Zaelith`, `prompt`, `action`, `drift`, `deviation`, `session`, `receipt`, `timeline`, `anomaly`, `risk`, `evidence`.
+Allowed epistemic qualifiers: `observed`, `inferred`, `unknown`.
+Forbidden phrasing: `reads thoughts`, `intent detection`, `deception engine`, `AGI`, `malicious AI`, `omniscient`, `speculative`, `conscious`, `autonomous authority`.
+
+3) Anti-Overclaim Constraints
+-----------------------------
+3.1 All conclusions MUST be evidence-backed and local-collectible.
+3.2 Zaelith MAY output `alignment risk` / `behavioral mismatch risk` only as inference-level labels.
+3.3 Any intent or motive claim is FORBIDDEN.
+3.4 Collector failure MUST be surfaced as collector-status evidence, never silently ignored.
+
+4) Architectural Priorities (Execution Order)
+--------------------------------------------
+4.1 Event-First Architecture: every subsystem emits normalized events with timestamp and source provenance.
+4.2 Local artifacts are preferred over external inference.
+4.3 Correlation explains relationships (prompt -> command chain -> file diff -> network call).
+
+5) Evidence Integrity Contract
+-----------------------------
+Each alert/incident item MUST include:
+- `event_id`
+- `timestamp` (`start` and `end` where applicable)
+- `source` (`prompt`, `process`, `file`, `network`, `command`, `agent`)
+- `severity`
+- `confidence` and `uncertainty`
+- `evidence_refs` (log IDs, path snapshots, command output pointers)
+- `rationale` (human-readable)
+Reproduction from local persistent storage is mandatory.
+
+6) MVP Scope (v1)
+------------------
+6.1 Capture and persist: prompts, shell/process invocations, filesystem mutations, repo diff summaries, session context.
+6.2 Emit: session timeline, drift/deviation alerts, anomaly rollups, signed or hash-linked receipts.
+6.3 No auto-blocking, no auto-rewrite, no hidden actions on observed entities.
+
+7) Observability Inputs
+----------------------
+7.1 Prompt Observer: tool/agent, user intent text, target scope/goal.
+7.2 Shell/Command Observer: command, args, cwd, exit status, duration.
+7.3 Process Observer: process trees tied to session/tool context.
+7.4 File Observer: create/modify/delete/rename events + diff summaries.
+7.5 Network/Service Observer: external endpoints, service families, protocol metadata.
+
+8) Session Timeline Requirements
+-------------------------------
+8.1 Ordered timeline per session with immutable append semantics.
+8.2 Drift/alert entries include nearest preceding intent and nearest downstream effect.
+8.3 Timeline playback must reconstruct what happened without external dependency.
+
+9) Zaelith Behavior Rules
+-------------------------
+9.1 Zaelith performs synthesis, scoring, correlation, summarization only.
+9.2 Zaelith outputs:
+- observed-vs-expected checks
+- confidence-ranked findings
+- explicit `unknown` fields where evidence is missing
+9.3 Zaelith MUST NOT:
+- assert malice/motive
+- output certainty without evidence
+- override raw evidence with narrative defaults
+9.4 On insufficient evidence, Zaelith lowers confidence and requests more context.
+
+10) Evidence Hierarchy
+---------------------
+10.1 Primary: direct artifacts (file diffs, command logs, event traces).
+10.2 Secondary: derived inferences (semantic drift heuristics, scope expansion).
+10.3 Tertiary: aggregate risk summaries (must cite secondary + primary).
+
+11) Reporting Standards
+----------------------
+11.1 Every session is reportable as a standard artifact containing:
+- session metadata
+- chronological events
+- alert list with severity and confidence
+- evidence bundle index
+- unresolved gaps and unknowns
+- action-relevant summary
+11.2 Report workflows MUST preserve raw evidence links and provenance.
+11.3 Reports must separate:
+- `Observed Fact`
+- `Inferred Signal`
+- `Assumption`
+- `Unknown/Not Observed`
+11.4 Include both machine-readable and concise human summary blocks.
+11.5 Never fabricate screenshots, transcripts, or intent rationale.
+
+12) Implementation Doctrine
+--------------------------
+12.1 Local-first: default local collector execution and persistence.
+12.2 External services MAY be optional enrichments only, never sole evidence source.
+12.3 On collector outage, session continues with explicit degradation flags.
+12.4 Deterministic behavior over breadth.
+12.5 Small auditable changes over sweeping redesign.
+12.6 Every feature change requires rubric compliance checklist review.
+
+13) UI/Terminology Doctrine
+---------------------------
+13.1 UI/alerts/docs/messages must use approved canonical terms.
+13.2 Alerts must be calm, explicit, evidence-first:
+    `Detected behavioral deviation` style wording; no speculative blame language.
+
+14) Governance
+------------
+14.1 Every implementation pass must include:
+- scope drift boundary check
+- at least one missing/partial evidence test
+- one failure-mode test showing collector degradation behavior
+
+15) Acceptance Tests (v1)
+-------------------------
+- Prompt mismatch emits evidence-linked drift alert.
+- Unauthorized scope expansion emits warning with file/command correlation.
+- Collector outage emits explicit collector warning and does not suppress session timeline.
+- Report output includes reproducible evidence references and confidence/unknown fields.

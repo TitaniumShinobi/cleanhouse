@@ -1,0 +1,11 @@
+lab_cleaned=2026-05-29T23:19:53.355540+00:00
+prepared
+baseline_rc=0
+process_started name=code-completion-agent pid=15298
+mutation_applied file=beta2.txt change=modified
+event_id=domain_event:02e9a4cca08a4ce4
+incident_id=incident:20afcc5a65a2ee87
+receipt_create_http=200
+receipt_create_status=ok
+case_id=qpb_case:79b9d044aea185f7
+action=reject http=200 status=ok

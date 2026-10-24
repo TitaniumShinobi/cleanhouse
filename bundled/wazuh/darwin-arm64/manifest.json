@@ -1,0 +1,22 @@
+{
+  "architecture": "darwin-arm64",
+  "checksum_source": "https://packages.wazuh.com/4.x/checksums/wazuh/4.14.7/wazuh-agent-4.14.7-1.arm64.pkg.sha512",
+  "license": "GPL-2.0-only",
+  "name": "Wazuh Agent",
+  "package": "wazuh-agent-4.14.7-1.arm64.pkg",
+  "package_source": "https://packages.wazuh.com/4.x/macos/wazuh-agent-4.14.7-1.arm64.pkg",
+  "powered_state_allowed": false,
+  "schema": "cleanhouse.bundled_dependency.v1",
+  "sha512": "9d1dbf1a0e440d8a1f6f75d44a30a395442926b01208ee8b88821e6d21a6b1ea5b885fd0c389df999a089bebda741e1af76cf9f773d552612430664da9428b11",
+  "signature": {
+    "developer_id_installer": "Wazuh Inc (KLZK8P68R5)",
+    "notarization": "trusted",
+    "sha256_fingerprint": "A88FB540D91F9A4CAFDC573FE77D633038A1787D1C05548027EAD4B9C6477E1E",
+    "verified_at_vendoring": "2026-08-22T16:57:33.702504+00:00"
+  },
+  "source_archive": "wazuh-4.14.7-source.tar.gz",
+  "source_code": "https://github.com/wazuh/wazuh/tree/v4.14.7",
+  "source_sha512": "d6182330f74ff249bfd8ff2f6a6f7934b6c5df9c53a8e5955cd42c0aa36fb25cabaef2dce2dd6241f6eb979b85fc6f87067e9f5c19069eea940aa6f127e61c09",
+  "vendored": true,
+  "version": "4.14.7"
+}
